@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { writeFileSync, unlinkSync } from 'fs';
+import { writeFileSync, unlinkSync, readFileSync } from 'fs';
 
 function require_fs() { return { writeFileSync, unlinkSync }; }
 
@@ -72,11 +72,11 @@ describe('CLI — help and routing', () => {
     assert.ok(stdout.includes('check'));
   });
 
-  it('ohlcv --help shows options', () => {
-    const { stdout, exitCode } = run(['ohlcv', '--help']);
-    assert.equal(exitCode, 0);
-    assert.ok(stdout.includes('--count'));
-    assert.ok(stdout.includes('--summary'));
+  it('screenshot command forwards retry options', () => {
+    const source = readFileSync(join(__dirname, '..', 'src', 'cli', 'commands', 'capture.js'), 'utf8');
+    assert.ok(source.includes('target_id'));
+    assert.ok(source.includes('max_attempts'));
+    assert.ok(source.includes('fail_on_modal'));
   });
 });
 

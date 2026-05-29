@@ -328,7 +328,7 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `draw_shape` | Draw horizontal_line, trend_line, rectangle, text |
 | `draw_list` / `draw_remove_one` / `draw_clear` | Manage drawings |
 | `alert_create` / `alert_list` / `alert_delete` | Manage price alerts |
-| `capture_screenshot` | Screenshot (regions: full, chart, strategy_tester) |
+| `capture_screenshot` | Screenshot (regions: full, chart, strategy_tester; target_id/expected_symbol/expected_timeframe retry guard) |
 | `batch_run` | Run action across multiple symbols/timeframes |
 | `watchlist_get` / `watchlist_add` | Read/modify watchlist |
 | `layout_list` / `layout_switch` | Manage saved layouts |
