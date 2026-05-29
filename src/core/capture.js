@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCREENSHOT_DIR = join(dirname(dirname(__dirname)), 'screenshots');
 
-export async function captureScreenshot({ region, filename, method } = {}) {
+export async function captureScreenshot({ region, filename, method, target_id } = {}) {
   mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -18,8 +18,8 @@ export async function captureScreenshot({ region, filename, method } = {}) {
 
   if (method === 'api') {
     try {
-      const colPath = await getChartCollection();
-      await evaluate(`${colPath}.takeScreenshot()`);
+      const colPath = await getChartCollection({ target_id });
+      await evaluate(`${colPath}.takeScreenshot()`, { target_id });
       return {
         success: true, method: 'api',
         note: 'takeScreenshot() triggered — TradingView will save/show the screenshot via its own UI',
@@ -29,7 +29,7 @@ export async function captureScreenshot({ region, filename, method } = {}) {
     }
   }
 
-  const client = await getClient();
+  const client = await getClient({ target_id });
   let clip = undefined;
 
   if (region === 'chart') {
@@ -42,7 +42,7 @@ export async function captureScreenshot({ region, filename, method } = {}) {
         var rect = el.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       })()
-    `);
+    `, { target_id });
     if (bounds) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
   } else if (region === 'strategy_tester') {
     const bounds = await evaluate(`
@@ -53,7 +53,7 @@ export async function captureScreenshot({ region, filename, method } = {}) {
         var rect = el.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
       })()
-    `);
+    `, { target_id });
     if (bounds) clip = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height, scale: 1 };
   }
 
@@ -64,7 +64,7 @@ export async function captureScreenshot({ region, filename, method } = {}) {
   writeFileSync(filePath, Buffer.from(data, 'base64'));
 
   return {
-    success: true, method: 'cdp', file_path: filePath, region,
+    success: true, method: 'cdp', file_path: filePath, region, target_id: target_id || undefined,
     size_bytes: Buffer.from(data, 'base64').length,
   };
 }
