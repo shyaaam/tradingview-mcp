@@ -3,8 +3,10 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
 
 export function registerChartTools(server) {
-  server.tool('chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', {}, async () => {
-    try { return jsonResult(await core.getState()); }
+  server.tool('chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', {
+    target_id: z.string().optional().describe('Optional CDP target ID from tab_list. Reads this exact TradingView chart target.'),
+  }, async ({ target_id }) => {
+    try { return jsonResult(await core.getState({ target_id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
