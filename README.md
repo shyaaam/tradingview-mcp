@@ -110,6 +110,32 @@ scripts\launch_tv_debug.bat
 /path/to/TradingView --remote-debugging-port=9222
 ```
 
+You can also point the MCP at a different CDP endpoint with environment variables:
+
+```bash
+CDP_HOST=localhost CDP_PORT=9222 node src/server.js
+```
+
+For Chrome Web isolation tests, launch Chrome with a dedicated profile and CDP port:
+
+```bash
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir=/tmp/tv-chrome-cdp \
+  --no-first-run \
+  --no-default-browser-check
+```
+
+Then use `tab_list` to copy the desired `target_id`. The first target-aware read tools now accept `target_id` so reads can be pinned to a specific chart tab:
+
+- `chart_get_state`
+- `data_get_ohlcv`
+- `data_get_study_values`
+- `capture_screenshot`
+- `replay_status`
+
+If `target_id` is omitted, tools keep the previous default behavior and use the first/active TradingView chart target.
+
 **Or use the MCP tool** (auto-detects your install):
 > "Use tv_launch to start TradingView in debug mode"
 
