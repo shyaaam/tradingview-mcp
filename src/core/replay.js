@@ -119,9 +119,9 @@ export async function trade({ action, _deps }) {
   return { success: true, action, position, realized_pnl: pnl };
 }
 
-export async function status({ _deps } = {}) {
+export async function status({ target_id, _deps } = {}) {
   const { evaluate, getReplayApi } = _resolve(_deps);
-  const rp = await getReplayApi();
+  const rp = await getReplayApi({ target_id });
   const st = await evaluate(`
     (function() {
       var r = ${rp};
@@ -135,8 +135,8 @@ export async function status({ _deps } = {}) {
         autoplay_delay: unwrap(r.autoplayDelay()),
       };
     })()
-  `);
-  const pos = await evaluate(wv(`${rp}.position()`));
-  const pnl = await evaluate(wv(`${rp}.realizedPL()`));
-  return { success: true, ...st, position: pos, realized_pnl: pnl };
+  `, { target_id });
+  const pos = await evaluate(wv(`${rp}.position()`), { target_id });
+  const pnl = await evaluate(wv(`${rp}.realizedPL()`), { target_id });
+  return { success: true, target_id: target_id || undefined, ...st, position: pos, realized_pnl: pnl };
 }

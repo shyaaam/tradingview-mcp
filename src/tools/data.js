@@ -6,8 +6,9 @@ export function registerDataTools(server) {
   server.tool('data_get_ohlcv', 'Get OHLCV bar data from the chart. Use summary=true for compact stats instead of all bars (saves context).', {
     count: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),
     summary: z.coerce.boolean().optional().describe('Return summary stats (high, low, open, close, avg volume, range) instead of all bars — much smaller output'),
-  }, async ({ count, summary }) => {
-    try { return jsonResult(await core.getOhlcv({ count, summary })); }
+    target_id: z.string().optional().describe('Optional CDP target ID from tab_list. Reads this exact TradingView chart target.'),
+  }, async ({ count, summary, target_id }) => {
+    try { return jsonResult(await core.getOhlcv({ count, summary, target_id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -79,8 +80,10 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_study_values', 'Get current indicator values from the data window for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()).', {}, async () => {
-    try { return jsonResult(await core.getStudyValues()); }
+  server.tool('data_get_study_values', 'Get current indicator values from the data window for all visible studies (RSI, MACD, Bollinger Bands, EMAs, custom indicators with plot()).', {
+    target_id: z.string().optional().describe('Optional CDP target ID from tab_list. Reads this exact TradingView chart target.'),
+  }, async ({ target_id }) => {
+    try { return jsonResult(await core.getStudyValues({ target_id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }

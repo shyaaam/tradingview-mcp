@@ -1,25 +1,22 @@
 /**
  * Core tab management logic.
- * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
+ * Controls TradingView Desktop/Web tabs via CDP and Electron/browser keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
-
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+import { getClient, listCdpTargets, activateTarget } from '../connection.js';
 
 /**
  * List all open chart tabs (CDP page targets).
  */
 export async function list() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
-  const targets = await resp.json();
+  const targets = await listCdpTargets();
 
   const tabs = targets
     .filter(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
     .map((t, i) => ({
       index: i,
       id: t.id,
-      title: t.title.replace(/^Live stock.*charts on /, ''),
+      target_id: t.id,
+      title: (t.title || '').replace(/^Live stock.*charts on /, ''),
       url: t.url,
       chart_id: t.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
     }));
@@ -83,23 +80,28 @@ export async function closeTab() {
 }
 
 /**
- * Switch to a tab by index. Reconnects CDP to the new target.
+ * Switch to a tab by index or target_id and set it as the legacy default target.
  */
-export async function switchTab({ index }) {
+export async function switchTab({ index, target_id }) {
   const tabs = await list();
-  const idx = Number(index);
+  let target;
+  let idx = null;
 
-  if (idx >= tabs.tab_count) {
-    throw new Error(`Tab index ${idx} out of range (have ${tabs.tab_count} tabs)`);
+  if (target_id) {
+    target = tabs.tabs.find(t => t.id === target_id || t.target_id === target_id);
+    if (!target) throw new Error(`Tab target_id ${target_id} not found (have ${tabs.tab_count} tabs)`);
+    idx = target.index;
+  } else {
+    idx = Number(index);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= tabs.tab_count) {
+      throw new Error(`Tab index ${index} out of range (have ${tabs.tab_count} tabs)`);
+    }
+    target = tabs.tabs[idx];
   }
 
-  const target = tabs.tabs[idx];
-
-  // Use CDP Target.activateTarget to bring the tab to front
   try {
-    const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
-    const text = await resp.text();
-    return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
+    await activateTarget(target.id);
+    return { success: true, action: 'switched', index: idx, tab_id: target.id, target_id: target.id, chart_id: target.chart_id };
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
   }

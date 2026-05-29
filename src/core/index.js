@@ -7,6 +7,7 @@ export * as data from './data.js';
 export * as pine from './pine.js';
 export * as health from './health.js';
 export * as capture from './capture.js';
+export * as target from './target.js';
 export * as drawing from './drawing.js';
 export * as replay from './replay.js';
 export * as alerts from './alerts.js';

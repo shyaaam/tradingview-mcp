@@ -59,7 +59,7 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
   `;
 }
 
-export async function getOhlcv({ count, summary } = {}) {
+export async function getOhlcv({ count, summary, target_id } = {}) {
   const limit = Math.min(count || 100, MAX_OHLCV_BARS);
   let data;
   try {
@@ -76,7 +76,7 @@ export async function getOhlcv({ count, summary } = {}) {
         }
         return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
       })()
-    `);
+    `, { target_id });
   } catch { data = null; }
 
   if (!data || !data.bars || data.bars.length === 0) {
@@ -91,7 +91,7 @@ export async function getOhlcv({ count, summary } = {}) {
     const first = bars[0];
     const last = bars[bars.length - 1];
     return {
-      success: true, bar_count: bars.length,
+      success: true, target_id: target_id || undefined, bar_count: bars.length,
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
@@ -103,7 +103,7 @@ export async function getOhlcv({ count, summary } = {}) {
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return { success: true, target_id: target_id || undefined, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
 }
 
 export async function getIndicator({ entity_id }) {
@@ -321,7 +321,7 @@ export async function getDepth() {
   return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
 }
 
-export async function getStudyValues() {
+export async function getStudyValues({ target_id } = {}) {
   const data = await evaluate(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
@@ -353,8 +353,8 @@ export async function getStudyValues() {
       }
       return results;
     })()
-  `);
-  return { success: true, study_count: data?.length || 0, studies: data || [] };
+  `, { target_id });
+  return { success: true, target_id: target_id || undefined, study_count: data?.length || 0, studies: data || [] };
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {
