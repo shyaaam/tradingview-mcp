@@ -18,10 +18,11 @@ export function registerTabTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('tab_switch', 'Switch to a chart tab by index', {
-    index: z.coerce.number().describe('Tab index (0-based, from tab_list)'),
-  }, async ({ index }) => {
-    try { return jsonResult(await core.switchTab({ index })); }
+  server.tool('tab_switch', 'Switch to a chart tab by index or target_id', {
+    index: z.coerce.number().optional().describe('Tab index (0-based, from tab_list)'),
+    target_id: z.string().optional().describe('CDP target ID from tab_list'),
+  }, async ({ index, target_id }) => {
+    try { return jsonResult(await core.switchTab({ index, target_id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }
