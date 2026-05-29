@@ -14,7 +14,7 @@ function _resolve(deps) {
   };
 }
 
-export async function getState({ _deps } = {}) {
+export async function getState({ target_id, _deps } = {}) {
   const { evaluate } = _resolve(_deps);
   const state = await evaluate(`
     (function() {
@@ -33,8 +33,8 @@ export async function getState({ _deps } = {}) {
         studies: studies,
       };
     })()
-  `);
-  return { success: true, ...state };
+  `, { target_id });
+  return { success: true, target_id: target_id || undefined, ...state };
 }
 
 export async function setSymbol({ symbol, _deps }) {
