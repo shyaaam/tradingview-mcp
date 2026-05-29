@@ -34,8 +34,10 @@ export function registerReplayTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('replay_status', 'Get current replay mode status', {}, async () => {
-    try { return jsonResult(await core.status()); }
+  server.tool('replay_status', 'Get current replay mode status', {
+    target_id: z.string().optional().describe('Optional CDP target ID from tab_list. Reads this exact TradingView chart target.'),
+  }, async ({ target_id }) => {
+    try { return jsonResult(await core.status({ target_id })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }
