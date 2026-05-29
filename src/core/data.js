@@ -91,7 +91,7 @@ export async function getOhlcv({ count, summary, target_id } = {}) {
     const first = bars[0];
     const last = bars[bars.length - 1];
     return {
-      success: true, bar_count: bars.length,
+      success: true, target_id: target_id || undefined, bar_count: bars.length,
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
@@ -103,7 +103,7 @@ export async function getOhlcv({ count, summary, target_id } = {}) {
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return { success: true, target_id: target_id || undefined, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
 }
 
 export async function getIndicator({ entity_id }) {
