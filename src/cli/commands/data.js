@@ -11,16 +11,21 @@ register('ohlcv', {
   options: {
     count: { type: 'string', short: 'n', description: 'Number of bars (default 100, max 500)' },
     summary: { type: 'boolean', short: 's', description: 'Return summary stats instead of all bars' },
+    target_id: { type: 'string', description: 'Optional CDP target ID from tab_list' },
   },
   handler: (opts) => core.getOhlcv({
     count: opts.count ? Number(opts.count) : undefined,
     summary: opts.summary,
+    target_id: opts.target_id,
   }),
 });
 
 register('values', {
   description: 'Get current indicator values from data window',
-  handler: () => core.getStudyValues(),
+  options: {
+    target_id: { type: 'string', description: 'Optional CDP target ID from tab_list' },
+  },
+  handler: (opts) => core.getStudyValues({ target_id: opts.target_id }),
 });
 
 register('data', {

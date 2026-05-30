@@ -21,7 +21,10 @@ register('replay', {
     }],
     ['status', {
       description: 'Get current replay state',
-      handler: () => core.status(),
+      options: {
+        target_id: { type: 'string', description: 'Optional CDP target ID from tab_list' },
+      },
+      handler: (opts) => core.status({ target_id: opts.target_id }),
     }],
     ['autoplay', {
       description: 'Toggle autoplay in replay mode',

@@ -4,7 +4,10 @@ import * as healthCore from '../../core/health.js';
 
 register('state', {
   description: 'Get current chart state (symbol, TF, studies)',
-  handler: () => core.getState(),
+  options: {
+    target_id: { type: 'string', description: 'Optional CDP target ID from tab_list' },
+  },
+  handler: (opts) => core.getState({ target_id: opts.target_id }),
 });
 
 register('symbol', {
