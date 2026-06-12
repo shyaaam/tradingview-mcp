@@ -2,6 +2,7 @@
  * Core health/discovery/launch logic.
  */
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { launchCloakProfile, resolveCloakManagerBaseUrl } from './cloak.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 
@@ -160,6 +161,47 @@ export async function uiState() {
 }
 
 export async function launch({ port, kill_existing } = {}) {
+  const managerBaseUrl = await resolveCloakManagerBaseUrl();
+  if (managerBaseUrl) {
+    const managerLaunch = await launchCloakProfile({
+      killExisting: kill_existing !== false,
+    });
+    const cdpUrl = managerLaunch.cdp_url
+      ? new URL(managerLaunch.cdp_url, `${managerBaseUrl}/`).toString()
+      : null;
+
+    let cdpReady = false;
+    if (cdpUrl) {
+      const versionUrl = new URL('json/version', `${cdpUrl}/`).toString();
+      for (let i = 0; i < 15; i += 1) {
+        await new Promise((r) => setTimeout(r, 1000));
+        try {
+          const response = await fetch(versionUrl);
+          if (response.ok) {
+            const info = await response.json();
+            cdpReady = true;
+            return {
+              ...managerLaunch,
+              cdp_ready: true,
+              cdp_url: cdpUrl,
+              browser: info.Browser,
+              user_agent: info['User-Agent'],
+            };
+          }
+        } catch {
+          // retry
+        }
+      }
+    }
+
+    return {
+      ...managerLaunch,
+      cdp_ready: cdpReady,
+      cdp_url: cdpUrl || managerLaunch.cdp_url || null,
+      warning: 'CloakBrowser launched but CDP not responding yet. Try tv_health_check in a few seconds.',
+    };
+  }
+
   const cdpPort = port || 9222;
   const killFirst = kill_existing !== false;
   const platform = process.platform;
