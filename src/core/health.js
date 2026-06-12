@@ -1,10 +1,79 @@
 /**
  * Core health/discovery/launch logic.
  */
+import CDP from 'chrome-remote-interface';
 import { getClient, getTargetInfo, evaluate } from '../connection.js';
 import { launchCloakProfile, resolveCloakManagerBaseUrl } from './cloak.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
+
+const TRADINGVIEW_CHART_URL = 'https://www.tradingview.com/chart/';
+
+function isChartTarget(target) {
+  return target?.type === 'page' && typeof target.url === 'string' && /tradingview\.com\/chart/i.test(target.url);
+}
+
+function firstPageTarget(targets) {
+  return targets.find((target) => target?.type === 'page') || null;
+}
+
+async function listTargets(cdpUrl) {
+  const response = await fetch(new URL('json/list', `${cdpUrl}/`).toString());
+  if (!response.ok) {
+    throw new Error(`failed to list targets: ${response.status} ${response.statusText}`);
+  }
+  const targets = await response.json();
+  return Array.isArray(targets) ? targets : [];
+}
+
+async function waitForChartTarget(cdpUrl, attempts = 10, delayMs = 1000) {
+  for (let i = 0; i < attempts; i += 1) {
+    const targets = await listTargets(cdpUrl);
+    const chartTarget = targets.find(isChartTarget);
+    if (chartTarget) return chartTarget;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return null;
+}
+
+async function openChartTarget(cdpUrl, browserWsUrl) {
+  const targets = await listTargets(cdpUrl);
+  const existingChartTarget = targets.find(isChartTarget);
+  if (existingChartTarget) {
+    return { opened: false, target: existingChartTarget };
+  }
+
+  const pageTarget = firstPageTarget(targets);
+  if (pageTarget?.webSocketDebuggerUrl) {
+    const pageClient = await CDP({ target: pageTarget.webSocketDebuggerUrl, local: true });
+    try {
+      await pageClient.Page.enable();
+      await pageClient.Page.navigate({ url: TRADINGVIEW_CHART_URL });
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } finally {
+      try { await pageClient.close(); } catch { /* ignore */ }
+    }
+    const navigatedTarget = await waitForChartTarget(cdpUrl);
+    if (navigatedTarget) {
+      return { opened: true, target: navigatedTarget };
+    }
+  }
+
+  if (browserWsUrl) {
+    const browserClient = await CDP({ target: browserWsUrl, local: true });
+    try {
+      await browserClient.Target.createTarget({ url: TRADINGVIEW_CHART_URL });
+    } finally {
+      try { await browserClient.close(); } catch { /* ignore */ }
+    }
+    const createdTarget = await waitForChartTarget(cdpUrl);
+    if (createdTarget) {
+      return { opened: true, target: createdTarget };
+    }
+  }
+
+  throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
+}
 
 export async function healthCheck() {
   await getClient();
@@ -180,12 +249,35 @@ export async function launch({ port, kill_existing } = {}) {
           if (response.ok) {
             const info = await response.json();
             cdpReady = true;
+            const browserWsUrl = info.webSocketDebuggerUrl || null;
+            let chartBootstrapped = false;
+            let chartTarget = null;
+            try {
+              chartTarget = await waitForChartTarget(cdpUrl, 2, 500);
+              if (!chartTarget) {
+                const opened = await openChartTarget(cdpUrl, browserWsUrl);
+                chartBootstrapped = opened.opened;
+                chartTarget = opened.target;
+              }
+            } catch (chartError) {
+              return {
+                ...managerLaunch,
+                cdp_ready: true,
+                cdp_url: cdpUrl,
+                browser: info.Browser,
+                user_agent: info['User-Agent'],
+                warning: chartError.message,
+              };
+            }
             return {
               ...managerLaunch,
               cdp_ready: true,
               cdp_url: cdpUrl,
               browser: info.Browser,
               user_agent: info['User-Agent'],
+              chart_bootstrapped: chartBootstrapped,
+              chart_target_id: chartTarget?.id || null,
+              chart_target_url: chartTarget?.url || null,
             };
           }
         } catch {
