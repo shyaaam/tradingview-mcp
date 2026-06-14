@@ -18,4 +18,63 @@ export function registerIndicatorTools(server) {
     try { return jsonResult(await core.toggleVisibility({ entity_id, visible })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('indicator_apply_scoped', 'Apply an indicator to a scoped tab/pane and return scoped evidence', {
+    profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+    tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+    pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+    indicator_name: z.string().describe('Indicator/study name to apply, e.g. "Relative Strength Index"'),
+    expected_settings: z.string().describe('JSON object of expected indicator settings, e.g. \'{"length":14}\''),
+  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
+    try {
+      return jsonResult(await core.applyScopedPlanItem({
+        profile_id,
+        tab_index,
+        pane_index,
+        indicator_name,
+        expected_settings,
+        action: 'apply_indicator',
+      }));
+    } catch (err) {
+      return jsonResult({
+        success: false,
+        profile_id,
+        tab_index,
+        pane_index,
+        indicator_name,
+        action: 'apply_indicator',
+        applied: false,
+        error: err.message,
+      }, true);
+    }
+  });
+
+  server.tool('indicator_update_settings_scoped', 'Update indicator settings on a scoped tab/pane and return scoped evidence', {
+    profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+    tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+    pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+    indicator_name: z.string().describe('Existing indicator/study name to update'),
+    expected_settings: z.string().describe('JSON object of expected indicator settings, e.g. \'{"length":14}\''),
+  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
+    try {
+      return jsonResult(await core.updateScopedSettings({
+        profile_id,
+        tab_index,
+        pane_index,
+        indicator_name,
+        expected_settings,
+      }));
+    } catch (err) {
+      return jsonResult({
+        success: false,
+        profile_id,
+        tab_index,
+        pane_index,
+        indicator_name,
+        action: 'update_indicator_settings',
+        applied: false,
+        error: err.message,
+      }, true);
+    }
+  });
 }
