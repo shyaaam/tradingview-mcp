@@ -1,6 +1,6 @@
 /**
  * Comprehensive E2E tests for all 70 TradingView MCP tools.
- * Requires TradingView Desktop running with --remote-debugging-port=9222
+ * Requires TradingView profile attached through CloakBrowser Manager
  *
  * Run: node --test tests/e2e.test.js
  *
@@ -22,11 +22,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
+import { resolveCdpBaseUrl } from '../src/core/cloak.js';
 
 let client;
 let Runtime;
 let Input;
 let Page;
+let cdpBaseUrl;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -65,11 +67,12 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
 
   before(async () => {
     try {
-      const targets = await CDP.List({ host: 'localhost', port: 9222 });
-      const chartTarget = targets.find(t => t.url && t.url.includes('tradingview.com/chart'));
+      cdpBaseUrl = await resolveCdpBaseUrl();
+      const targets = await (await fetch(`${cdpBaseUrl}/json/list`)).json();
+      const chartTarget = targets.find((t) => t.type === 'page' && t.url && t.url.includes('tradingview.com/chart'));
       if (!chartTarget) throw new Error('No TradingView chart target found');
 
-      client = await CDP({ host: 'localhost', port: 9222, target: chartTarget.id });
+      client = await CDP({ target: chartTarget.webSocketDebuggerUrl || chartTarget.id, local: true });
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
@@ -77,7 +80,7 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
       Input = client.Input;
       Page = client.Page;
     } catch (err) {
-      console.error('Cannot connect to TradingView. Make sure it is running with --remote-debugging-port=9222');
+      console.error('Cannot connect to TradingView. Make sure profile is attached through CloakBrowser Manager');
       process.exit(1);
     }
   });
@@ -140,7 +143,7 @@ describe('TradingView MCP — Full E2E (70 tools)', () => {
     });
 
     it('tv_launch — auto-detect binary (verify path resolution only)', async () => {
-      // tv_launch is destructive (kills TradingView), so we only test path detection
+      // tv_launch can reattach manager profile, so we only test binary path fallback
       const { existsSync } = await import('fs');
       const paths = [
         '/Applications/TradingView.app/Contents/MacOS/TradingView',

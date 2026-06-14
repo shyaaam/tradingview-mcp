@@ -3,15 +3,14 @@
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
 import { getClient, evaluate } from '../connection.js';
-
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
+import { resolveCdpBaseUrl } from './cloak.js';
 
 /**
  * List all open chart tabs (CDP page targets).
  */
 export async function list() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const baseUrl = await resolveCdpBaseUrl();
+  const resp = await fetch(`${baseUrl}/json/list`);
   const targets = await resp.json();
 
   const tabs = targets
@@ -19,6 +18,7 @@ export async function list() {
     .map((t, i) => ({
       index: i,
       id: t.id,
+      ws_url: t.webSocketDebuggerUrl || null,
       title: t.title.replace(/^Live stock.*charts on /, ''),
       url: t.url,
       chart_id: t.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
@@ -95,10 +95,13 @@ export async function switchTab({ index }) {
 
   const target = tabs.tabs[idx];
 
-  // Use CDP Target.activateTarget to bring the tab to front
+  // Use direct CDP to bring tab to front.
   try {
-    const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/activate/${target.id}`);
-    const text = await resp.text();
+    const CDP = (await import('chrome-remote-interface')).default;
+    const c = await CDP({ target: target.ws_url, local: true });
+    await c.Page.enable();
+    await c.Page.bringToFront();
+    await c.close();
     return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);

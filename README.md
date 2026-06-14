@@ -1,9 +1,9 @@
 # TradingView MCP Bridge
 
-Personal AI assistant for your TradingView Desktop charts. Connects Claude Code to your locally running TradingView app via Chrome DevTools Protocol for AI-assisted chart analysis, Pine Script development, and workflow automation.
+Personal AI assistant for your TradingView charts. Connects Claude Code to your TradingView profile through CloakBrowser Manager and Chrome DevTools Protocol for AI-assisted chart analysis, Pine Script development, and workflow automation.
 
 > [!WARNING]
-> **This tool is not affiliated with, endorsed by, or associated with TradingView Inc.** It interacts with your locally running TradingView Desktop application via Chrome DevTools Protocol. Review the [Disclaimer](#disclaimer) before use.
+> **This tool is not affiliated with, endorsed by, or associated with TradingView Inc.** It interacts with your TradingView profile through CloakBrowser Manager and Chrome DevTools Protocol. Review the [Disclaimer](#disclaimer) before use.
 
 > [!IMPORTANT]
 > **Requires a valid TradingView subscription.** This tool does not bypass or circumvent any TradingView paywall or access control. It reads from and controls the TradingView Desktop app already running on your machine.
@@ -16,9 +16,7 @@ Personal AI assistant for your TradingView Desktop charts. Connects Claude Code 
 
 ## How It Works (and why it's safe to run)
 
-This tool does not connect to TradingView's servers, modify any TradingView files, or intercept any network traffic. It communicates exclusively with your locally running TradingView Desktop instance via Chrome DevTools Protocol (CDP) — a standard debugging interface built into all Chromium/Electron applications by Google, including VS Code, Slack, and Discord.
-
-The debug port is disabled by default and must be explicitly enabled by you using a standard Chromium flag (`--remote-debugging-port=9222`). Nothing happens without that deliberate step.
+This tool does not connect to TradingView's servers, modify any TradingView files, or intercept any network traffic. It communicates with your TradingView profile through CloakBrowser Manager and Chrome DevTools Protocol (CDP) — a standard debugging interface built into all Chromium/Electron applications by Google, including VS Code, Slack, and Discord.
 
 ## What This Tool Does Not Do
 
@@ -47,7 +45,8 @@ See [RESEARCH.md](RESEARCH.md) for open questions, findings, and related work.
 
 ## Prerequisites
 
-- **TradingView Desktop app** (paid subscription required for real-time data)
+- **CloakBrowser Manager** with logged-in TradingView profile
+- **TradingView Desktop app** only if you use fallback local launch mode
 - **Node.js 18+**
 - **Claude Code** with MCP support (for MCP tools) or any terminal (for CLI)
 - **macOS, Windows, or Linux**
@@ -88,7 +87,7 @@ npm install
 
 ### 2. Launch TradingView with CDP
 
-TradingView Desktop must be running with Chrome DevTools Protocol enabled on port 9222.
+TradingView profile must be attached through CloakBrowser Manager.
 
 **Mac:**
 ```bash
@@ -105,10 +104,8 @@ scripts\launch_tv_debug.bat
 ./scripts/launch_tv_debug_linux.sh
 ```
 
-**Or launch manually on any platform:**
-```bash
-/path/to/TradingView --remote-debugging-port=9222
-```
+**Or attach via manager:**
+set `CLOAK_BROWSER_BASE_URL` and `CLOAK_BROWSER_PROFILE_ID`, then call `tv_launch`
 
 **Or use the MCP tool** (auto-detects your install):
 > "Use tv_launch to start TradingView in debug mode"
@@ -182,7 +179,7 @@ tv screenshot / discover / ui-state / range / scroll
 
 ## Streaming
 
-The `tv stream` commands poll your locally running TradingView Desktop instance at regular intervals via Chrome DevTools Protocol on localhost.
+The `tv stream` commands poll your TradingView profile at regular intervals via CloakBrowser Manager and CDP.
 
 No connection is made to TradingView's servers. All data stays on your machine.
 
@@ -334,12 +331,14 @@ Launch scripts and `tv_launch` auto-detect TradingView. If auto-detection fails:
 | **Windows** | `%LOCALAPPDATA%\TradingView\TradingView.exe`, `%PROGRAMFILES%\WindowsApps\TradingView*\TradingView.exe` |
 | **Linux** | `/opt/TradingView/tradingview`, `~/.local/share/TradingView/TradingView`, `/snap/tradingview/current/tradingview` |
 
-The key flag: `--remote-debugging-port=9222`
+Key manager env:
+`CLOAK_BROWSER_BASE_URL`
+`CLOAK_BROWSER_PROFILE_ID`
 
 ## Testing
 
 ```bash
-# Requires TradingView running with --remote-debugging-port=9222
+# Requires TradingView profile attached through CloakBrowser Manager
 npm test
 ```
 
@@ -348,11 +347,11 @@ npm test
 ## Architecture
 
 ```
-Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
+Claude Code  ←→  MCP Server (stdio)  ←→  CloakBrowser Manager  ←→  CDP  ←→  TradingView profile
 ```
 
 - **Transport**: MCP over stdio (78 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
-- **Connection**: Chrome DevTools Protocol on localhost:9222
+- **Connection**: Chrome DevTools Protocol through CloakBrowser Manager
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
 
@@ -368,7 +367,7 @@ This tool is an independent MCP server that connects to Claude Code via the stan
 
 This project is provided **for personal, educational, and research purposes only**.
 
-**How this tool works:** This tool uses the Chrome DevTools Protocol (CDP), a standard debugging interface built into all Chromium-based applications by Google. It does not reverse engineer any proprietary TradingView protocol, connect to TradingView's servers, or bypass any access controls. The debug port must be explicitly enabled by the user via a standard Chromium command-line flag (`--remote-debugging-port=9222`).
+**How this tool works:** This tool uses Chrome DevTools Protocol (CDP) through CloakBrowser Manager, a standard debugging interface built into all Chromium-based applications by Google. It does not reverse engineer any proprietary TradingView protocol, connect to TradingView's servers, or bypass any access controls. Manager handles browser attachment.
 
 By using this software, you acknowledge and agree that:
 

@@ -31,30 +31,14 @@ Replace `<INSTALL_PATH>` with the actual path where the repo was cloned (e.g., `
 
 If the config file already exists and has other servers, merge the `tradingview` entry into the existing `mcpServers` object. Do not overwrite other servers.
 
-## Step 3: Launch TradingView Desktop
+## Step 3: Attach TradingView Profile
 
-TradingView Desktop must be running with Chrome DevTools Protocol enabled.
+TradingView profile must be attached through CloakBrowser Manager.
 
-**Auto-detect and launch (recommended):**
-After the MCP server is connected, use the `tv_launch` tool — it auto-detects TradingView on Mac, Windows, and Linux.
-
-**Manual launch by platform:**
-
-Mac:
-```bash
-/Applications/TradingView.app/Contents/MacOS/TradingView --remote-debugging-port=9222
-```
-
-Windows:
-```bash
-%LOCALAPPDATA%\TradingView\TradingView.exe --remote-debugging-port=9222
-```
-
-Linux:
-```bash
-/opt/TradingView/tradingview --remote-debugging-port=9222
-# or: tradingview --remote-debugging-port=9222
-```
+**Recommended path:**
+1. Set `CLOAK_BROWSER_BASE_URL`
+2. Set `CLOAK_BROWSER_PROFILE_ID`
+3. Use `tv_launch` to attach profile through manager
 
 ## Step 4: Restart Claude Code
 
@@ -77,7 +61,7 @@ Use the `tv_health_check` tool. Expected response:
 }
 ```
 
-If `cdp_connected: false`, TradingView is not running with `--remote-debugging-port=9222`.
+If `cdp_connected: false`, TradingView profile is not attached through CloakBrowser Manager.
 
 ## Step 6: Install CLI (Optional)
 
@@ -94,7 +78,7 @@ Then `tv status`, `tv quote`, `tv pine compile`, etc. work from anywhere.
 
 | Problem | Solution |
 |---------|----------|
-| `cdp_connected: false` | Launch TradingView with `--remote-debugging-port=9222` |
+| `cdp_connected: false` | Attach TradingView profile through CloakBrowser Manager |
 | `ECONNREFUSED` | TradingView isn't running or port 9222 is blocked |
 | MCP server not showing in Claude Code | Check `~/.claude/.mcp.json` syntax, restart Claude Code |
 | `tv` command not found | Run `npm link` from the project directory |

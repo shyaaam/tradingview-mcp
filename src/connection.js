@@ -1,9 +1,8 @@
 import CDP from 'chrome-remote-interface';
+import { resolveCdpBaseUrl } from './core/cloak.js';
 
 let client = null;
 let targetInfo = null;
-const CDP_HOST = 'localhost';
-const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 
@@ -70,7 +69,7 @@ export async function connect() {
         throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
       }
       targetInfo = target;
-      client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+      client = await CDP({ target: target.webSocketDebuggerUrl, local: true });
 
       // Enable required domains
       await client.Runtime.enable();
@@ -88,7 +87,8 @@ export async function connect() {
 }
 
 async function findChartTarget() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const baseUrl = await resolveCdpBaseUrl();
+  const resp = await fetch(`${baseUrl}/json/list`);
   const targets = await resp.json();
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
