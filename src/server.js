@@ -22,7 +22,7 @@ const server = new McpServer(
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 78 tools for reading and controlling a live TradingView chart through CloakBrowser Manager.
+    instructions: `TradingView MCP — 80 tools for reading and controlling a live TradingView chart through CloakBrowser Manager.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -45,6 +45,7 @@ Changing the chart:
 - chart_manage_indicator → add/remove studies. USE FULL NAMES: "Relative Strength Index" not "RSI"
 - chart_scroll_to_date → jump to a date (ISO format)
 - indicator_set_inputs → change indicator settings (length, source, etc.)
+- indicator_apply_scoped / indicator_update_settings_scoped → apply/update studies on an explicit profile/tab/pane and return scoped evidence
 
 Pine Script development:
 - pine_set_source → inject code, pine_smart_compile → compile + check errors

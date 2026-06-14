@@ -212,7 +212,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (80 MCP tools)
 
 ### Chart Reading
 
@@ -248,6 +248,8 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `chart_set_visible_range` | Zoom to exact range (unix timestamps) |
 | `symbol_info` / `symbol_search` | Symbol metadata and search |
 | `indicator_set_inputs` / `indicator_toggle_visibility` | Change indicator settings, show/hide |
+| `indicator_apply_scoped` | Apply a TradingView-recognized indicator, including custom/private confluence indicators, to an explicit tab/pane and return scoped evidence |
+| `indicator_update_settings_scoped` | Update settings for an existing indicator, including custom/private confluence indicators, on an explicit tab/pane and return scoped evidence |
 
 ### Multi-Pane Layouts
 
@@ -257,6 +259,8 @@ Read `line.new()`, `label.new()`, `table.new()`, `box.new()` output from any vis
 | `pane_set_layout` | Change grid: `s`, `2h`, `2v`, `2x2`, `4`, `6`, `8` |
 | `pane_focus` | Focus a specific pane by index |
 | `pane_set_symbol` | Set symbol on any pane |
+
+Scoped indicator mutation tools require `profile_id`, `tab_index`, and `pane_index`, switch/focus that target before mutating, and return the same scope in the response. They are intended for explicit indicator suites such as a custom confluence strategy profile. The `indicator_name` should be the exact TradingView-recognized study name/title available to the signed-in account; unavailable custom/private scripts return a deterministic failure. These tools only apply/update studies and do not log in, save layouts, change symbols/timeframes, run strategies, or place trades.
 
 ### Tab Management
 
@@ -350,7 +354,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CloakBrowser Manager  ←→  CDP  ←→  TradingView profile
 ```
 
-- **Transport**: MCP over stdio (78 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (80 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
 - **Connection**: Chrome DevTools Protocol through CloakBrowser Manager
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
