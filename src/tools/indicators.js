@@ -23,8 +23,8 @@ export function registerIndicatorTools(server) {
     profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
-    indicator_name: z.string().describe('Indicator/study name to apply, e.g. "Relative Strength Index"'),
-    expected_settings: z.string().describe('JSON object of expected indicator settings, e.g. \'{"length":14}\''),
+    indicator_name: z.string().describe('TradingView-recognized study name/title to apply, including custom/private confluence indicators'),
+    expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
   }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
     try {
       return jsonResult(await core.applyScopedPlanItem({
@@ -53,8 +53,8 @@ export function registerIndicatorTools(server) {
     profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
-    indicator_name: z.string().describe('Existing indicator/study name to update'),
-    expected_settings: z.string().describe('JSON object of expected indicator settings, e.g. \'{"length":14}\''),
+    indicator_name: z.string().describe('Existing indicator/study name/title to update, including custom/private confluence indicators'),
+    expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
   }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
     try {
       return jsonResult(await core.updateScopedSettings({
