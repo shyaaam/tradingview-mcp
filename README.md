@@ -212,7 +212,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (80 MCP tools)
 
 ### Chart Reading
 
@@ -354,7 +354,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CloakBrowser Manager  ←→  CDP  ←→  TradingView profile
 ```
 
-- **Transport**: MCP over stdio (78 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (80 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
 - **Connection**: Chrome DevTools Protocol through CloakBrowser Manager
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
