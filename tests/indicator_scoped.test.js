@@ -1,5 +1,5 @@
 /**
- * Scoped indicator mutation unit tests  no TradingView connection needed.
+ * Scoped indicator mutation unit tests — no TradingView connection needed.
  *
  * Run: node --test tests/indicator_scoped.test.js
  */
