@@ -50,6 +50,44 @@ function _settingsFromInputValues(inputValues) {
   return settings;
 }
 
+function _valuesFromDisplayedValues(values) {
+  if (!values || typeof values !== 'object') return {};
+  if (Array.isArray(values)) {
+    return Object.fromEntries(
+      values
+        .filter(item => item && typeof item === 'object' && item.title != null)
+        .map(item => [String(item.title), item.value]),
+    );
+  }
+  return { ...values };
+}
+
+function _settingsEvidenceFromStudy(study) {
+  const inputSettings = _settingsFromInputValues(study?.inputs || []);
+  if (Object.keys(inputSettings).length > 0) {
+    return {
+      settings: inputSettings,
+      source: 'input_values',
+      unavailable_reason: null,
+    };
+  }
+
+  const displayedValues = _valuesFromDisplayedValues(study?.values);
+  if (Object.keys(displayedValues).length > 0) {
+    return {
+      settings: { values: displayedValues },
+      source: 'displayed_values',
+      unavailable_reason: null,
+    };
+  }
+
+  return {
+    settings: {},
+    source: 'unavailable',
+    unavailable_reason: 'study did not expose input values or displayed values',
+  };
+}
+
 async function _selectScopedChart({ tab_index, pane_index, _deps }) {
   const { focusPane, switchTab } = _resolve(_deps);
   await switchTab({ index: tab_index });
