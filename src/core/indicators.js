@@ -107,7 +107,12 @@ async function _getStudyByName({ indicator_name, _deps }) {
         if (name === ${safeString(indicator_name.toLowerCase())}) {
           var study = chart.getStudyById(item.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          return { id: item.id, name: item.name || item.title || ${safeString(indicator_name)}, inputs: inputs };
+          return {
+            id: item.id,
+            name: item.name || item.title || ${safeString(indicator_name)},
+            inputs: inputs,
+            values: item.values || item.description || null
+          };
         }
       }
       return null;
@@ -135,7 +140,12 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
           if (!added) return resolve({ error: 'indicator was not added' });
           var study = chart.getStudyById(added.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputs });
+          resolve({
+            id: added.id,
+            name: added.name || added.title || ${safeString(indicator_name)},
+            inputs: inputs,
+            values: added.values || added.description || null
+          });
         }, 1200);
       });
     })()
@@ -163,7 +173,20 @@ async function _updateIndicatorSettings({ entity_id, expected_settings, _deps })
       }
       study.setInputValues(currentInputs);
       var updated = study.getInputValues ? study.getInputValues() : currentInputs;
-      return { id: ${safeString(entity_id)}, previous: previous, inputs: updated };
+      var studies = chart.getAllStudies ? chart.getAllStudies() : [];
+      var studyMeta = null;
+      for (var i = 0; i < studies.length; i++) {
+        if (studies[i] && studies[i].id === ${safeString(entity_id)}) {
+          studyMeta = studies[i];
+          break;
+        }
+      }
+      return {
+        id: ${safeString(entity_id)},
+        previous: previous,
+        inputs: updated,
+        values: studyMeta ? (studyMeta.values || studyMeta.description || null) : null
+      };
     })()
   `);
   if (result?.error) throw new Error(result.error);
