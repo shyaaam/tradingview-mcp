@@ -19,7 +19,7 @@ export function registerIndicatorTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('indicator_apply_scoped', 'Apply an indicator to a scoped tab/pane and return scoped evidence', {
+  server.tool('indicator_apply_scoped', 'Apply an indicator to a scoped tab/pane and return scoped evidence, including previous/new settings when TradingView exposes them', {
     profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
@@ -49,7 +49,7 @@ export function registerIndicatorTools(server) {
     }
   });
 
-  server.tool('indicator_update_settings_scoped', 'Update indicator settings on a scoped tab/pane and return scoped evidence', {
+  server.tool('indicator_update_settings_scoped', 'Update indicator settings on a scoped tab/pane and return scoped evidence, including previous/new settings when TradingView exposes them', {
     profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
