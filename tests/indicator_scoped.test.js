@@ -14,6 +14,7 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
       id: study.id,
       name: study.name,
       inputs: (study.inputs || []).map(input => ({ ...input })),
+      values: study.values ? { ...study.values } : undefined,
     })),
     switchedTabs: [],
     focusedPanes: [],
@@ -38,7 +39,9 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
           const match = expression.match(/name === "([^"]+)"/);
           const name = match ? match[1] : '';
           const found = state.studies.find(study => study.name.toLowerCase() === name);
-          return found ? { id: found.id, name: found.name, inputs: found.inputs } : null;
+          return found
+            ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values }
+            : null;
         }
         if (expression.includes('chart.createStudy')) {
           const name = expression.match(/chart.createStudy\("([^"]+)"/)?.[1] || 'Unknown';
@@ -54,7 +57,7 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
           if (!study) return { error: `Study not found: ${id}` };
           const previous = Object.fromEntries(study.inputs.map(input => [input.id, input.value]));
           study.inputs = study.inputs.map(input => ({ ...input, value: 50 }));
-          return { id, previous, inputs: study.inputs };
+          return { id, previous, inputs: study.inputs, values: study.values };
         }
         throw new Error(`unexpected evaluate expression: ${expression.slice(0, 80)}`);
       },
@@ -108,9 +111,62 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.entity_id, 'study-rsi');
     assert.deepEqual(result.previous_settings, { length: 14 });
     assert.deepEqual(result.new_settings, { length: 50 });
+    assert.equal(result.previous_settings_source, 'input_values');
+    assert.equal(result.new_settings_source, 'input_values');
     assert.equal(result.profile_id, 'profile-a');
     assert.equal(result.tab_index, 0);
     assert.equal(result.pane_index, 0);
+  });
+
+  it('returns displayed values for private studies without raw inputs', async () => {
+    const { deps } = makeDeps({
+      studies: [{
+        id: 'study-private',
+        name: 'Private Hermes Study',
+        inputs: [],
+        values: { Fast: '293.98', Slow: '291.61' },
+      }],
+    });
+
+    const result = await updateScopedSettings({
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      indicator_name: 'Private Hermes Study',
+      expected_settings: { in_1: 25 },
+      _deps: deps,
+    });
+
+    assert.equal(result.success, true);
+    assert.deepEqual(result.previous_settings, { values: { Fast: '293.98', Slow: '291.61' } });
+    assert.deepEqual(result.new_settings, { values: { Fast: '293.98', Slow: '291.61' } });
+    assert.equal(result.previous_settings_source, 'displayed_values');
+    assert.equal(result.new_settings_source, 'displayed_values');
+    assert.deepEqual(result.settings_unavailable_reason, {});
+  });
+
+  it('returns diagnostics when scoped settings evidence is unavailable', async () => {
+    const { deps } = makeDeps({
+      studies: [{ id: 'study-private', name: 'Private Empty Study', inputs: [] }],
+    });
+
+    const result = await updateScopedSettings({
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      indicator_name: 'Private Empty Study',
+      expected_settings: { in_1: 25 },
+      _deps: deps,
+    });
+
+    assert.deepEqual(result.previous_settings, {});
+    assert.deepEqual(result.new_settings, {});
+    assert.equal(result.previous_settings_source, 'unavailable');
+    assert.equal(result.new_settings_source, 'unavailable');
+    assert.deepEqual(result.settings_unavailable_reason, {
+      previous_settings: 'study did not expose input values or displayed values',
+      new_settings: 'study did not expose input values or displayed values',
+    });
   });
 
   it('blocks missing profile scope', async () => {
