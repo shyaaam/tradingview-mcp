@@ -261,7 +261,9 @@ export async function applyScopedPlanItem({
 
   const focusResult = await _selectScopedChart({ ...scope, _deps });
   const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
-  let previousSettings = existingStudy ? _settingsFromInputValues(existingStudy.inputs) : {};
+  const previousEvidence = existingStudy
+    ? _settingsEvidenceFromStudy(existingStudy)
+    : { settings: {}, source: 'absent', unavailable_reason: null };
   let appliedStudy;
 
   if (action === 'apply_indicator') {
@@ -277,10 +279,21 @@ export async function applyScopedPlanItem({
       expected_settings: expectedSettings,
       _deps,
     });
-    previousSettings = appliedStudy.previous || previousSettings;
+    if (appliedStudy.previous && Object.keys(appliedStudy.previous).length > 0) {
+      previousEvidence.settings = appliedStudy.previous;
+      previousEvidence.source = 'input_values';
+      previousEvidence.unavailable_reason = null;
+    }
   }
 
-  const newSettings = _settingsFromInputValues(appliedStudy.inputs);
+  const newEvidence = _settingsEvidenceFromStudy(appliedStudy);
+  const unavailableReasons = {};
+  if (previousEvidence.unavailable_reason) {
+    unavailableReasons.previous_settings = previousEvidence.unavailable_reason;
+  }
+  if (newEvidence.unavailable_reason) {
+    unavailableReasons.new_settings = newEvidence.unavailable_reason;
+  }
   return {
     success: true,
     profile_id: scope.profile_id,
@@ -290,8 +303,11 @@ export async function applyScopedPlanItem({
     action,
     applied: true,
     entity_id: appliedStudy.id || null,
-    previous_settings: previousSettings,
-    new_settings: newSettings,
+    previous_settings: previousEvidence.settings,
+    new_settings: newEvidence.settings,
+    previous_settings_source: previousEvidence.source,
+    new_settings_source: newEvidence.source,
+    settings_unavailable_reason: unavailableReasons,
     focus: focusResult,
     message: 'scoped indicator plan item applied',
   };
