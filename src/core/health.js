@@ -229,7 +229,58 @@ export async function uiState() {
   return { success: true, ...state };
 }
 
+function explicitCdpBaseUrl() {
+  const value = String(process.env.CDP_BASE_URL || '').trim();
+  return value ? value.replace(/\/+$/, '') : null;
+}
+
+async function attachDirectCdp(cdpUrl) {
+  const versionUrl = new URL('json/version', `${cdpUrl}/`).toString();
+  const response = await fetch(versionUrl);
+  if (!response.ok) {
+    throw new Error(`direct CDP endpoint not ready: ${response.status} ${response.statusText}`);
+  }
+  const info = await response.json();
+  const browserWsUrl = info.webSocketDebuggerUrl || null;
+  let chartBootstrapped = false;
+  let chartTarget = null;
+  try {
+    chartTarget = await waitForChartTarget(cdpUrl, 2, 500);
+    if (!chartTarget) {
+      const opened = await openChartTarget(cdpUrl, browserWsUrl);
+      chartBootstrapped = opened.opened;
+      chartTarget = opened.target;
+    }
+  } catch (chartError) {
+    return {
+      success: true,
+      direct_cdp: true,
+      cdp_ready: true,
+      cdp_url: cdpUrl,
+      browser: info.Browser,
+      user_agent: info['User-Agent'],
+      warning: chartError.message,
+    };
+  }
+  return {
+    success: true,
+    direct_cdp: true,
+    cdp_ready: true,
+    cdp_url: cdpUrl,
+    browser: info.Browser,
+    user_agent: info['User-Agent'],
+    chart_bootstrapped: chartBootstrapped,
+    chart_target_id: chartTarget?.id || null,
+    chart_target_url: chartTarget?.url || null,
+  };
+}
+
 export async function launch({ port, kill_existing } = {}) {
+  const directCdpUrl = explicitCdpBaseUrl();
+  if (directCdpUrl) {
+    return await attachDirectCdp(directCdpUrl);
+  }
+
   const managerBaseUrl = await resolveCloakManagerBaseUrl();
   if (managerBaseUrl) {
     const managerLaunch = await launchCloakProfile({

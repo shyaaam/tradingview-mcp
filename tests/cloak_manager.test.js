@@ -74,6 +74,49 @@ describe('CloakBrowser manager routing', () => {
     assert.equal(await resolveCloakManagerBaseUrl(), 'http://127.0.0.1:8080/api');
   });
 
+  it('tv_launch bypasses manager when CDP_BASE_URL is set', async () => {
+    process.env.CDP_BASE_URL = 'http://127.0.0.1:9222';
+    process.env.CLOAK_BROWSER_BASE_URL = 'http://127.0.0.1:8080/api';
+
+    const calls = [];
+    global.fetch = async (input, init = {}) => {
+      const url = String(input);
+      calls.push({ url, method: init.method || 'GET' });
+      if (url === 'http://127.0.0.1:9222/json/version') {
+        return new Response(
+          JSON.stringify({
+            Browser: 'Chrome/146.0.0.0',
+            'User-Agent': 'test-agent',
+            webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/test',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      if (url === 'http://127.0.0.1:9222/json/list') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'target-1',
+              type: 'page',
+              url: 'https://www.tradingview.com/chart/',
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    const result = await launch({ kill_existing: false });
+
+    assert.equal(result.success, true);
+    assert.equal(result.direct_cdp, true);
+    assert.equal(result.cdp_ready, true);
+    assert.equal(result.cdp_url, 'http://127.0.0.1:9222');
+    assert.ok(calls.some((call) => call.url === 'http://127.0.0.1:9222/json/version'));
+    assert.ok(calls.every((call) => !call.url.includes(':8080/api/profiles')));
+  });
+
   it('launches via manager endpoint and reads cdp readiness', async () => {
     process.env.CLOAK_BROWSER_BASE_URL = 'http://127.0.0.1:8080/api';
     process.env.CLOAK_BROWSER_PROFILE_ID = 'profile-a';
