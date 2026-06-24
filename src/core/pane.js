@@ -132,7 +132,7 @@ export async function focus({ index }) {
 
 /**
  * Set the symbol on a specific pane by index.
- * Works by focusing the pane, then using the active chart's setSymbol.
+ * Works by focusing the pane, then using that pane's chart widget when available.
  */
 export async function setSymbol({ index, symbol }) {
   const idx = Number(index);
@@ -141,10 +141,27 @@ export async function setSymbol({ index, symbol }) {
   await focus({ index: idx });
   await new Promise(r => setTimeout(r, 300));
 
-  // Now set symbol on the now-active chart
+  // Prefer the pane-local widget so linked panes do not inherit the write.
   await evaluateAsync(`
     (function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var cwc = ${CWC};
+      var all = cwc.getAll();
+      if (${idx} >= all.length) {
+        throw new Error('Pane index ' + ${idx} + ' out of range (have ' + all.length + ' panes)');
+      }
+      var chart = all[${idx}];
+      if (chart && typeof chart.setSymbol !== 'function' && chart._chartWidget && typeof chart._chartWidget.setSymbol === 'function') {
+        chart = chart._chartWidget;
+      }
+      if (!chart || typeof chart.setSymbol !== 'function') {
+        chart = window.TradingViewApi._activeChartWidgetWV.value();
+        if (chart && typeof chart.setSymbol !== 'function' && chart._chartWidget && typeof chart._chartWidget.setSymbol === 'function') {
+          chart = chart._chartWidget;
+        }
+      }
+      if (!chart || typeof chart.setSymbol !== 'function') {
+        throw new Error('Pane chart setSymbol unavailable');
+      }
       return new Promise(function(resolve) {
         chart.setSymbol(${safeString(symbol)}, {});
         setTimeout(resolve, 500);
