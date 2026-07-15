@@ -1,6 +1,6 @@
 # TradingView MCP — Claude Instructions
 
-68 tools for reading and controlling a live TradingView chart via CloakBrowser Manager and CDP.
+Versioned tools for reading and controlling a live TradingView chart via CloakBrowser Manager and CDP. TV Observer integrations must call `tv_observer_contract` first and verify the release commit and manifest hash.
 
 ## Decision Tree — Which Tool When
 
