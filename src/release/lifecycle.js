@@ -52,7 +52,6 @@ function withTimeout(promise, timeoutMs) {
     promise,
     new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`stdio shutdown exceeded ${timeoutMs}ms`)), timeoutMs);
-      timer.unref?.();
     }),
   ]).finally(() => clearTimeout(timer));
 }
