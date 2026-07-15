@@ -47,7 +47,7 @@ See [RESEARCH.md](RESEARCH.md) for open questions, findings, and related work.
 
 - **CloakBrowser Manager** with logged-in TradingView profile
 - **TradingView Desktop app** only if you use fallback local launch mode
-- **Node.js 18+**
+- **Node.js 22.22.3** (exact supported runtime; see `docs/runtime/node-version.txt`)
 - **Claude Code** with MCP support (for MCP tools) or any terminal (for CLI)
 - **macOS, Windows, or Linux**
 
@@ -80,7 +80,7 @@ Or follow the manual steps below.
 ### 1. Install
 
 ```bash
-git clone https://github.com/tradesdontlie/tradingview-mcp.git
+git clone https://github.com/shyaaam/tradingview-mcp.git
 cd tradingview-mcp
 npm install
 ```
@@ -212,7 +212,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (80 MCP tools)
+## Tool Reference (versioned MCP tools)
 
 ### Chart Reading
 
@@ -354,7 +354,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CloakBrowser Manager  ←→  CDP  ←→  TradingView profile
 ```
 
-- **Transport**: MCP over stdio (80 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio with machine-readable `tv-observer-v1` capability manifest + CLI (`tv` command)
 - **Connection**: Chrome DevTools Protocol through CloakBrowser Manager
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`
