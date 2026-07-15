@@ -50,6 +50,10 @@ export async function openPanel({ panel, action }) {
           performed = 'opened';
         } else if (action === 'close' || (action === 'toggle' && isOpen)) {
           if (typeof bwb.hideWidget === 'function') bwb.hideWidget(widgetName);
+          else if (typeof bwb.hide === 'function') bwb.hide();
+          else if (typeof bwb.close === 'function') bwb.close();
+          else if (typeof bwb.toggleWidget === 'function') bwb.toggleWidget(widgetName);
+          else return { error: 'bottomWidgetBar has no supported close method' };
           performed = 'closed';
         }
         return { was_open: isOpen, performed: performed };
