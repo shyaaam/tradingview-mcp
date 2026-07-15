@@ -56,6 +56,20 @@ describe('CLI — help and routing', () => {
     assert.ok(stdout.includes('Usage: tv'));
   });
 
+  it('version reports the pinned observer release identity', () => {
+    const commit = '0123456789abcdef0123456789abcdef01234567';
+    const { stdout, exitCode } = run(['version'], {
+      env: { ...process.env, TRADINGVIEW_MCP_RELEASE_COMMIT: commit },
+    });
+    assert.equal(exitCode, 0);
+    const result = JSON.parse(stdout);
+    assert.equal(result.server_name, 'tradingview-mcp');
+    assert.equal(result.server_version, '2.0.0');
+    assert.equal(result.release_commit, commit);
+    assert.equal(result.release_ready, true);
+    assert.match(result.observer_manifest_hash, /^[0-9a-f]{64}$/);
+  });
+
   it('unknown command exits 1', () => {
     const { exitCode, stderr } = run(['nonexistent']);
     assert.equal(exitCode, 1);
