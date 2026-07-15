@@ -32,6 +32,7 @@ test('package, runtime pin, server, and observer contract share one version auth
   assert.equal(SERVER_VERSION, packageJson.version);
   assert.equal(packageJson.version, '2.0.0');
   assert.equal(packageJson.engines.node, pinnedNode);
+  assert.equal(process.versions.node, pinnedNode);
   assert.equal(buildObserverContract({ env: { TRADINGVIEW_MCP_RELEASE_COMMIT: COMMIT } }).serverVersion, packageJson.version);
 });
 
