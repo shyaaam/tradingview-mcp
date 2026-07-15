@@ -51,6 +51,17 @@ See [RESEARCH.md](RESEARCH.md) for open questions, findings, and related work.
 - **Claude Code** with MCP support (for MCP tools) or any terminal (for CLI)
 - **macOS, Windows, or Linux**
 
+## TV Observer release contract
+
+This repository exposes a pinned, machine-readable `tv-observer-v1` contract over stdio. Before integration, verify the exact server version, release commit, manifest hash, capability schemas, mutation classes, and lifecycle limits:
+
+```sh
+TRADINGVIEW_MCP_RELEASE_COMMIT=<40-character-commit> tv version
+TRADINGVIEW_MCP_RELEASE_COMMIT=<40-character-commit> tv contract
+```
+
+The MCP equivalent is the read-only `tv_observer_contract` tool. A packaged checkout without Git metadata must receive `TRADINGVIEW_MCP_RELEASE_COMMIT`; otherwise it reports `release_ready=false` and TV Observer must block. See [docs/tv-observer-v1-contract.md](docs/tv-observer-v1-contract.md).
+
 ## What It Does
 
 Gives your AI assistant eyes and hands on your own chart:
