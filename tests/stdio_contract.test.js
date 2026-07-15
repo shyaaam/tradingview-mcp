@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -63,20 +64,33 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
   assert.ok(stderrBytes <= observerCapabilityManifest.lifecycle.maxCapturedStderrBytes);
 });
 
-test('stdio transport does not leave a child after client close', async () => {
-  const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: ['src/server.js'],
+test('closing stdio terminates the server process without an orphan', async () => {
+  const child = spawn(process.execPath, ['src/server.js'], {
     cwd: ROOT,
     env: {
       ...process.env,
       TRADINGVIEW_MCP_RELEASE_COMMIT: COMMIT,
     },
-    stderr: 'pipe',
+    shell: false,
+    stdio: ['pipe', 'ignore', 'pipe'],
   });
-  const client = new Client({ name: 'tv-observer-orphan-test', version: '1.0.0' });
-  await deadline(client.connect(transport), observerCapabilityManifest.lifecycle.startupHandshakeTimeoutMs, 'MCP initialize');
-  const closed = once(transport, 'close').catch(() => []);
-  await deadline(client.close(), observerCapabilityManifest.lifecycle.shutdownGraceMs, 'MCP close');
-  await deadline(closed, observerCapabilityManifest.lifecycle.shutdownGraceMs, 'transport close event');
+  let stderrBytes = 0;
+  child.stderr.on('data', (chunk) => {
+    stderrBytes += Buffer.byteLength(chunk);
+  });
+
+  try {
+    await deadline(once(child.stderr, 'data'), observerCapabilityManifest.lifecycle.startupHandshakeTimeoutMs, 'server startup event');
+    child.stdin.end();
+    const [code, signal] = await deadline(
+      once(child, 'close'),
+      observerCapabilityManifest.lifecycle.shutdownGraceMs,
+      'server process close',
+    );
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+    assert.ok(stderrBytes <= observerCapabilityManifest.lifecycle.maxCapturedStderrBytes);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
 });
