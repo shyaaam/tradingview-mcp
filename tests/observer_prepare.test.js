@@ -2,23 +2,36 @@ import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
 import { prepare } from '../src/core/observer.js';
+import { list as listTabs } from '../src/core/tab.js';
+import { getObserverSession, invalidateObserverSession, requireObserverSession } from '../src/connection.js';
+import { resolveCdpBaseUrl, resolveCloakProfileId } from '../src/core/cloak.js';
+import { registerObserverTool } from '../src/release/observer-schema.js';
 
 const BASE_URL = 'http://127.0.0.1:8080/api';
 const PROFILE_ID = 'profile-a';
 
 let originalFetch;
 let originalBaseUrl;
+let originalCdpBaseUrl;
+let originalProfileId;
 
 beforeEach(() => {
   originalFetch = global.fetch;
   originalBaseUrl = process.env.CLOAK_BROWSER_BASE_URL;
+  originalCdpBaseUrl = process.env.CDP_BASE_URL;
+  originalProfileId = process.env.CLOAK_BROWSER_PROFILE_ID;
   process.env.CLOAK_BROWSER_BASE_URL = BASE_URL;
 });
 
-afterEach(() => {
+afterEach(async () => {
   global.fetch = originalFetch;
   if (originalBaseUrl === undefined) delete process.env.CLOAK_BROWSER_BASE_URL;
   else process.env.CLOAK_BROWSER_BASE_URL = originalBaseUrl;
+  if (originalCdpBaseUrl === undefined) delete process.env.CDP_BASE_URL;
+  else process.env.CDP_BASE_URL = originalCdpBaseUrl;
+  if (originalProfileId === undefined) delete process.env.CLOAK_BROWSER_PROFILE_ID;
+  else process.env.CLOAK_BROWSER_PROFILE_ID = originalProfileId;
+  await invalidateObserverSession();
 });
 
 test('observer preparation requires exact profile and never stops by default', async () => {
@@ -33,7 +46,7 @@ test('observer preparation requires exact profile and never stops by default', a
       return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
     }
     if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
-      return response([{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc' }]);
+      return response([{ id: 'chart-1', type: 'page', title: 'TradingView', url: 'https://www.tradingview.com/chart/abc' }]);
     }
     throw new Error(`unexpected request: ${url}`);
   };
@@ -55,10 +68,42 @@ test('observer preparation requires exact profile and never stops by default', a
   assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
   assert.equal(calls.some((call) => call.url.endsWith('/launch')), false);
   assert.equal(calls.every((call) => call.url.includes(`/profiles/${PROFILE_ID}`) || call.url.endsWith('/profiles')), true);
+
+  assert.deepEqual(getObserverSession(), {
+    managerBaseUrl: BASE_URL,
+    profileId: PROFILE_ID,
+    cdpUrl: `${BASE_URL}/profiles/${PROFILE_ID}/cdp`,
+    chartTargetId: 'chart-1',
+    chartTargetUrl: 'https://www.tradingview.com/chart/abc',
+  });
+  process.env.CDP_BASE_URL = 'http://127.0.0.1:9222';
+  process.env.CLOAK_BROWSER_PROFILE_ID = 'profile-b';
+  assert.equal(await resolveCdpBaseUrl(), `${BASE_URL}/profiles/${PROFILE_ID}/cdp`);
+  assert.equal(await resolveCloakProfileId(), PROFILE_ID);
+  const readback = await listTabs();
+  assert.equal(readback.tab_count, 1);
 });
 
 test('observer preparation rejects missing profile identity', async () => {
   await assert.rejects(() => prepare({}), /profile_id is required/);
+});
+
+test('observer session is required before admitted tool work', () => {
+  assert.throws(() => requireObserverSession(), /Observer session is not prepared/);
+});
+
+test('registered admitted tool rejects before observer preparation', async () => {
+  const handlers = new Map();
+  registerObserverTool({
+    registerTool(name, _definition, handler) {
+      handlers.set(name, handler);
+    },
+  }, 'tv_health_check', 'test health', async () => ({ success: true }));
+
+  await assert.rejects(
+    () => handlers.get('tv_health_check')({}, {}),
+    /Observer session is not prepared/,
+  );
 });
 
 test('observer preparation launches exact stopped profile without fallback', async () => {

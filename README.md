@@ -60,7 +60,7 @@ TRADINGVIEW_MCP_RELEASE_COMMIT=<40-character-commit> tv version
 TRADINGVIEW_MCP_RELEASE_COMMIT=<40-character-commit> tv contract
 ```
 
-The MCP equivalent is read-only `tv_observer_contract`. `TRADINGVIEW_MCP_RELEASE_COMMIT` is checked against Git `HEAD`; packaged installs require build-generated release metadata. Dirty, mismatched, or unverifiable identity reports `release_ready=false` and TV Observer must block. Observer bootstrap uses explicit Manager-only `tv_observer_prepare`; general `tv_launch` is outside observer allowlist. See [docs/tv-observer-v1-contract.md](docs/tv-observer-v1-contract.md).
+The MCP equivalent is read-only `tv_observer_contract`. `TRADINGVIEW_MCP_RELEASE_COMMIT` is checked against Git `HEAD`; packaged installs require build-generated release metadata. Dirty, mismatched, or unverifiable identity reports `release_ready=false` and TV Observer must block. Observer bootstrap uses explicit Manager-only `tv_observer_prepare`; it binds exact Manager URL, profile ID, CDP endpoint, and chart target. All other observer-admitted tools require that bound session and ignore global CDP/profile environment overrides. General `tv_launch` is outside observer allowlist and invalidates any observer binding. See [docs/tv-observer-v1-contract.md](docs/tv-observer-v1-contract.md).
 
 ## What It Does
 

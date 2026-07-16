@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { OBSERVER_CONTRACT_ID, OBSERVER_MANIFEST_SCHEMA_VERSION } from './constants.js';
+import { requireObserverSession } from '../connection.js';
 
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
@@ -175,12 +176,18 @@ export const observerToolDefinitions = Object.freeze({
 export function registerObserverTool(server, name, description, handler) {
   const definition = observerToolDefinitions[name];
   if (!definition) throw new Error(`Unknown observer capability: ${name}`);
+  const guardedHandler = async (args, extra) => {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare') {
+      requireObserverSession();
+    }
+    return handler(args, extra);
+  };
   if (typeof server.registerTool !== 'function') {
-    return server.tool(name, description, definition.inputSchema, handler);
+    return server.tool(name, description, definition.inputSchema, guardedHandler);
   }
   return server.registerTool(name, {
     description,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
-  }, handler);
+  }, guardedHandler);
 }

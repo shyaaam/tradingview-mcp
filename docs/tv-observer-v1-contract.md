@@ -46,6 +46,8 @@ Shutdown timeout closes the transport and invokes hard exit with code `1`; a han
 
 The general-purpose `tv_launch` tool is not observer-admitted. Observer preparation uses `tv_observer_prepare`, which requires exact `profile_id`, Manager mode, and explicit `restart` opt-in. It never auto-selects profiles, falls back to local TradingView, or runs broad process termination.
 
+Successful preparation creates one process-local bound observer session containing the exact Manager URL, profile ID, CDP endpoint, and TradingView chart target ID/URL. Preparation invalidates any previous CDP client before binding. Every other observer-admitted browser capability requires this session; calls before preparation fail closed. Bound resolution ignores `CDP_BASE_URL`, profile environment variables, automatic profile selection, and local CDP fallback. If the bound chart target disappears, the call fails and requires re-preparation rather than selecting another target. Explicit `tab_switch` may rebind only to the selected target on the same bound CDP endpoint. Calling general-purpose `tv_launch` invalidates the observer session, so TV Observer must prepare again.
+
 These are observer-enforced maximums, not generic retry instructions. Post-mutation timeout remains ambiguous and must not be retried automatically.
 
 ## Runtime pin

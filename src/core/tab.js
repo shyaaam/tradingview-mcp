@@ -2,7 +2,7 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate } from '../connection.js';
+import { getClient, evaluate, updateObserverSessionTarget } from '../connection.js';
 import { resolveCdpBaseUrl } from './cloak.js';
 
 /**
@@ -102,6 +102,10 @@ export async function switchTab({ index }) {
     await c.Page.enable();
     await c.Page.bringToFront();
     await c.close();
+    await updateObserverSessionTarget({
+      chartTargetId: target.id,
+      chartTargetUrl: target.url,
+    });
     return { success: true, action: 'switched', index: idx, tab_id: target.id, chart_id: target.chart_id };
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);

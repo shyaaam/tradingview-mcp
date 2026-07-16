@@ -1,10 +1,14 @@
 import { resolveCloakManagerBaseUrl } from './cloak.js';
+import { bindObserverSession, invalidateObserverSession } from '../connection.js';
 
 const CHART_URL = /tradingview\.com\/chart/i;
 
 export async function prepare({ profile_id, restart = false } = {}) {
   const profileId = String(profile_id || '').trim();
   if (!profileId) throw new Error('profile_id is required; observer preparation never auto-selects a profile.');
+
+  // Drop prior profile/client binding before preparing a new exact profile.
+  await invalidateObserverSession();
 
   const managerBaseUrl = await resolveCloakManagerBaseUrl();
   if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for observer preparation.');
@@ -36,6 +40,14 @@ export async function prepare({ profile_id, restart = false } = {}) {
   const version = await waitForVersion(cdpUrl);
   const chartTarget = await waitForChartTarget(cdpUrl);
   if (!chartTarget) throw new Error(`No TradingView chart target found for profile ${profileId}`);
+
+  await bindObserverSession({
+    managerBaseUrl,
+    profileId,
+    cdpUrl,
+    chartTargetId: chartTarget.id,
+    chartTargetUrl: chartTarget.url,
+  });
 
   return {
     success: true,
