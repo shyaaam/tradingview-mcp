@@ -1,29 +1,38 @@
 {
   "name": "tradingview-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "MCP bridge for TradingView Desktop via Chrome DevTools Protocol",
   "type": "module",
   "main": "src/server.js",
   "bin": {
+    "tradingview-mcp": "src/server.js",
     "tv": "src/cli/index.js"
   },
   "exports": {
     ".": "./src/server.js",
     "./core": "./src/core/index.js"
   },
+  "engines": {
+    "node": "22.22.3"
+  },
   "scripts": {
     "start": "node src/server.js",
+    "prepack": "node scripts/prepare-release-metadata.js",
+    "postpack": "node scripts/clean-release-metadata.js",
     "tv": "node src/cli/index.js",
-    "test": "node --test tests/e2e.test.js tests/pine_analyze.test.js",
+    "version": "node src/cli/index.js version",
+    "test": "node --test tests/release_contract.test.js tests/stdio_contract.test.js tests/e2e.test.js tests/pine_analyze.test.js",
+    "test:contract": "node --test tests/release_contract.test.js tests/stdio_contract.test.js",
     "test:e2e": "node --test tests/e2e.test.js",
-    "test:unit": "node --test tests/pine_analyze.test.js tests/cli.test.js tests/indicator_scoped.test.js",
+    "test:unit": "node --test tests/release_contract.test.js tests/stdio_contract.test.js tests/pine_analyze.test.js tests/cli.test.js tests/indicator_scoped.test.js tests/observer_prepare.test.js",
     "test:cli": "node --test tests/cli.test.js",
-    "test:all": "node --test tests/e2e.test.js tests/pine_analyze.test.js tests/cli.test.js tests/indicator_scoped.test.js",
-    "test:verbose": "node --test --test-reporter=spec tests/e2e.test.js tests/pine_analyze.test.js",
+    "test:all": "node --test tests/release_contract.test.js tests/stdio_contract.test.js tests/e2e.test.js tests/pine_analyze.test.js tests/cli.test.js tests/indicator_scoped.test.js tests/observer_prepare.test.js",
+    "test:verbose": "node --test --test-reporter=spec tests/release_contract.test.js tests/stdio_contract.test.js tests/e2e.test.js tests/pine_analyze.test.js",
     "test:count": "node --test --test-reporter=spec tests/e2e.test.js 2>&1 | tail -5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "chrome-remote-interface": "^0.33.2"
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "chrome-remote-interface": "0.33.3",
+    "zod": "4.3.6"
   }
 }

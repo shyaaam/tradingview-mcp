@@ -1,3 +1,5 @@
+import { getObserverSession } from './observer-session.js';
+
 const DEFAULT_CLOAK_PROFILE_ENV_KEYS = ['CLOAK_BROWSER_PROFILE_ID', 'CLOAK_PROFILE_ID'];
 const DEFAULT_CLOAK_MANAGER_BASE_URLS = [
   'http://127.0.0.1:8080/api',
@@ -50,6 +52,9 @@ async function probeManagerBaseUrl(baseUrl) {
 }
 
 export async function resolveCloakManagerBaseUrl() {
+  const boundSession = getObserverSession();
+  if (boundSession?.managerBaseUrl) return boundSession.managerBaseUrl;
+
   const explicit = readManagerBaseUrl();
   if (explicit) return explicit;
 
@@ -61,6 +66,9 @@ export async function resolveCloakManagerBaseUrl() {
 }
 
 export async function resolveCloakProfileId() {
+  const boundSession = getObserverSession();
+  if (boundSession?.profileId) return boundSession.profileId;
+
   const explicitProfileId = readProfileId();
   if (explicitProfileId) return explicitProfileId;
 
@@ -93,6 +101,9 @@ export async function resolveCloakProfileId() {
 }
 
 export async function resolveCdpBaseUrl() {
+  const boundSession = getObserverSession();
+  if (boundSession?.cdpUrl) return cleanBaseUrl(boundSession.cdpUrl);
+
   const explicitCdpBaseUrl = String(process.env.CDP_BASE_URL || '').trim();
   if (explicitCdpBaseUrl) return cleanBaseUrl(explicitCdpBaseUrl);
 

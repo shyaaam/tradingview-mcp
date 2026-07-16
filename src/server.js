@@ -1,5 +1,8 @@
+#!/usr/bin/env node
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { registerReleaseTools } from './tools/release.js';
 import { registerHealthTools } from './tools/health.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerPineTools } from './tools/pine.js';
@@ -14,15 +17,19 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { buildObserverContract, SERVER_NAME, SERVER_VERSION } from './release/identity.js';
+import { installStdioLifecycle } from './release/lifecycle.js';
 
 const server = new McpServer(
   {
-    name: 'tradingview',
-    version: '2.0.0',
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 80 tools for reading and controlling a live TradingView chart through CloakBrowser Manager.
+    instructions: `TradingView MCP — versioned tools for reading and controlling a live TradingView chart through CloakBrowser Manager.
+
+For TV Observer integration, call tv_observer_contract first and verify the exact release commit, manifest hash, lifecycle policy, capability names, schemas, and mutation classifications before any browser work.
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -70,7 +77,7 @@ CONTEXT MANAGEMENT:
   }
 );
 
-// Register all tool groups
+registerReleaseTools(server);
 registerHealthTools(server);
 registerChartTools(server);
 registerPineTools(server);
@@ -86,10 +93,30 @@ registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 
-// Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
-process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');
-process.stderr.write('   Ensure your usage complies with TradingView\'s Terms of Use.\n\n');
+const contract = buildObserverContract();
+const startupEvent = {
+  event: 'tradingview-mcp.start',
+  server: contract.serverName,
+  version: contract.serverVersion,
+  expectedCommit: contract.expectedCommit,
+  observedCommit: contract.observedCommit,
+  releaseCommit: contract.releaseCommit,
+  releaseCommitMatch: contract.releaseCommitMatch,
+  releaseDirty: contract.releaseDirty,
+  releaseReady: contract.releaseReady,
+  observerContract: contract.contractId,
+  manifestHash: contract.manifestHash,
+  disclaimer: 'Unofficial tool; ensure usage complies with TradingView Terms of Use.',
+};
+process.stderr.write(`${JSON.stringify(startupEvent)}\n`);
 
-// Start stdio transport
 const transport = new StdioServerTransport();
+installStdioLifecycle({
+  close: async () => {
+    if (typeof server.close === 'function') await server.close();
+    else if (typeof transport.close === 'function') await transport.close();
+  },
+  forceClose: () => transport.close?.(),
+  hardExit: (code) => process.exit(code),
+});
 await server.connect(transport);

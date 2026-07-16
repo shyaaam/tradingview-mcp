@@ -1,5 +1,13 @@
 import CDP from 'chrome-remote-interface';
 import { resolveCdpBaseUrl } from './core/cloak.js';
+import {
+  clearObserverSession,
+  getObserverSession as readObserverSession,
+  requireObserverSession as requireSession,
+  setObserverSession,
+} from './core/observer-session.js';
+
+export { getObserverSession, requireObserverSession } from './core/observer-session.js';
 
 let client = null;
 let targetInfo = null;
@@ -60,11 +68,36 @@ export async function getClient() {
   return connect();
 }
 
+export async function invalidateObserverSession() {
+  clearObserverSession();
+  await disconnect();
+}
+
+export async function bindObserverSession(session) {
+  await disconnect();
+  return setObserverSession(session);
+}
+
+export async function updateObserverSessionTarget({ chartTargetId, chartTargetUrl }) {
+  const current = requireSession();
+  if (typeof chartTargetId !== 'string' || !chartTargetId.trim()
+    || typeof chartTargetUrl !== 'string' || !chartTargetUrl.trim()) {
+    throw new Error('Observer session target requires chartTargetId and chartTargetUrl.');
+  }
+
+  await disconnect();
+  return setObserverSession({
+    ...current,
+    chartTargetId: chartTargetId.trim(),
+    chartTargetUrl: chartTargetUrl.trim(),
+  });
+}
+
 export async function connect() {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const target = await findChartTarget();
+      const target = await findChartTarget(readObserverSession());
       if (!target) {
         throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
       }
@@ -86,10 +119,20 @@ export async function connect() {
   throw new Error(`CDP connection failed after ${MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
-async function findChartTarget() {
-  const baseUrl = await resolveCdpBaseUrl();
+async function findChartTarget(session = readObserverSession()) {
+  const baseUrl = session?.cdpUrl || await resolveCdpBaseUrl();
   const resp = await fetch(`${baseUrl}/json/list`);
   const targets = await resp.json();
+  if (session) {
+    const boundTarget = targets.find((target) => target?.id === session.chartTargetId);
+    if (!boundTarget
+      || boundTarget.type !== 'page'
+      || boundTarget.url !== session.chartTargetUrl
+      || !/tradingview\.com\/chart/i.test(boundTarget.url || '')) {
+      throw new Error(`Bound observer chart target ${session.chartTargetId} changed or is unavailable. Re-run tv_observer_prepare.`);
+    }
+    return boundTarget;
+  }
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))

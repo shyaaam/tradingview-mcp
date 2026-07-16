@@ -23,6 +23,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
 import { resolveCdpBaseUrl } from '../src/core/cloak.js';
+import { compactStudyValues } from '../src/core/data.js';
 
 let client;
 let Runtime;
@@ -954,6 +955,7 @@ val = array.get(a, 5)`;
       `);
       assert.ok(result, 'Shape created');
       assert.ok(result.entity_id, 'Has entity_id');
+      await sleep(500);
     });
 
     it('draw_list — list drawings', async () => {
@@ -1042,7 +1044,15 @@ val = array.get(a, 5)`;
       const isOpen = await evaluate(`!!document.querySelector('.monaco-editor.pine-editor-monaco')`);
 
       // Close
-      await evaluate(`${BOTTOM_BAR}.hideWidget('pine-editor')`);
+      await evaluate(`
+        (function() {
+          var bwb = ${BOTTOM_BAR};
+          if (typeof bwb.hideWidget === 'function') return bwb.hideWidget('pine-editor');
+          if (typeof bwb.hide === 'function') return bwb.hide();
+          if (typeof bwb.close === 'function') return bwb.close();
+          throw new Error('bottomWidgetBar has no supported close method');
+        })()
+      `);
       await sleep(300);
 
       assert.ok(typeof isOpen === 'boolean', 'Panel toggle works');
@@ -1237,8 +1247,9 @@ val = array.get(a, 5)`;
       const started = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
       if (!started) return;
 
-      await evaluate(`${REPLAY_API}.stopReplay()`);
       await evaluate(`${REPLAY_API}.goToRealtime()`);
+      const stillStarted = await evaluate(wv(`${REPLAY_API}.isReplayStarted()`));
+      if (stillStarted) await evaluate(`${REPLAY_API}.stopReplay()`);
       await evaluate(`${REPLAY_API}.hideReplayToolbar()`);
       await sleep(500);
 
@@ -1481,7 +1492,8 @@ val = array.get(a, 5)`;
           return results;
         })()
       `);
-      const size = JSON.stringify({ success: true, studies: data }, null, 2).length;
+      const compacted = compactStudyValues(data);
+      const size = JSON.stringify({ success: true, studies: compacted }, null, 2).length;
       assert.ok(size < 2048, `data_get_study_values output is ${size} bytes (< 2KB)`);
     });
 

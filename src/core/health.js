@@ -2,7 +2,7 @@
  * Core health/discovery/launch logic.
  */
 import CDP from 'chrome-remote-interface';
-import { getClient, getTargetInfo, evaluate } from '../connection.js';
+import { getClient, getTargetInfo, evaluate, invalidateObserverSession } from '../connection.js';
 import { launchCloakProfile, resolveCloakManagerBaseUrl } from './cloak.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
@@ -230,6 +230,7 @@ export async function uiState() {
 }
 
 export async function launch({ port, kill_existing } = {}) {
+  await invalidateObserverSession();
   const managerBaseUrl = await resolveCloakManagerBaseUrl();
   if (managerBaseUrl) {
     const managerLaunch = await launchCloakProfile({
