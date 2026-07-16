@@ -5,6 +5,8 @@ const DEFAULT_SHUTDOWN_GRACE_MS = observerCapabilityManifest.lifecycle.shutdownG
 export function installStdioLifecycle({
   processLike = process,
   close,
+  forceClose = () => processLike.stdin?.destroy?.(),
+  hardExit = (code) => processLike.exit?.(code),
   shutdownGraceMs = DEFAULT_SHUTDOWN_GRACE_MS,
 } = {}) {
   if (typeof close !== 'function') throw new TypeError('close must be a function');
@@ -21,6 +23,8 @@ export function installStdioLifecycle({
       })
       .catch((error) => {
         processLike.exitCode = 1;
+        try { void forceClose?.(); } catch { /* hard exit remains authoritative */ }
+        try { hardExit?.(1); } catch { /* test doubles may not implement exit */ }
         return { reason, clean: false, error: error instanceof Error ? error.message : String(error) };
       })
       .finally(dispose);

@@ -23,6 +23,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import CDP from 'chrome-remote-interface';
 import { resolveCdpBaseUrl } from '../src/core/cloak.js';
+import { compactStudyValues } from '../src/core/data.js';
 
 let client;
 let Runtime;
@@ -1491,7 +1492,8 @@ val = array.get(a, 5)`;
           return results;
         })()
       `);
-      const size = JSON.stringify({ success: true, studies: data }, null, 2).length;
+      const compacted = compactStudyValues(data);
+      const size = JSON.stringify({ success: true, studies: compacted }, null, 2).length;
       assert.ok(size < 2048, `data_get_study_values output is ${size} bytes (< 2KB)`);
     });
 

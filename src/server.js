@@ -98,7 +98,11 @@ const startupEvent = {
   event: 'tradingview-mcp.start',
   server: contract.serverName,
   version: contract.serverVersion,
+  expectedCommit: contract.expectedCommit,
+  observedCommit: contract.observedCommit,
   releaseCommit: contract.releaseCommit,
+  releaseCommitMatch: contract.releaseCommitMatch,
+  releaseDirty: contract.releaseDirty,
   releaseReady: contract.releaseReady,
   observerContract: contract.contractId,
   manifestHash: contract.manifestHash,
@@ -112,5 +116,7 @@ installStdioLifecycle({
     if (typeof server.close === 'function') await server.close();
     else if (typeof transport.close === 'function') await transport.close();
   },
+  forceClose: () => transport.close?.(),
+  hardExit: (code) => process.exit(code),
 });
 await server.connect(transport);

@@ -17,11 +17,12 @@ The MCP tool `tv_observer_contract` and CLI commands `tv version` / `tv contract
 - server name and package-backed version;
 - running Node version;
 - exact release commit and its source;
+- expected commit, observed commit, match status, and dirty-check status;
 - `tv-observer-v1` contract/schema versions;
 - canonical SHA-256 manifest hash;
 - complete capability manifest and lifecycle limits.
 
-The commit is read from `TRADINGVIEW_MCP_RELEASE_COMMIT` when supplied. Otherwise a local Git checkout reports `git rev-parse HEAD`. A packaged checkout without either source returns `releaseReady=false`; TV Observer must block startup.
+`TRADINGVIEW_MCP_RELEASE_COMMIT` is an expected identity only. A Git checkout observes `git rev-parse HEAD` and fails readiness when tracked files are dirty or expected/observed commits differ. Packaged installs observe build-generated `src/release/release-metadata.json`; missing or mismatched metadata fails readiness. Runtime environment input never proves packaged code identity.
 
 ## Capability classes
 
@@ -30,7 +31,7 @@ The commit is read from `TRADINGVIEW_MCP_RELEASE_COMMIT` when supplied. Otherwis
 - `browser_focus_mutation`: changes selected tab/focus only.
 - `chart_mutation`: changes symbol or timeframe and requires exact readback.
 
-The manifest lists exact capability names and JSON input/result schemas. TV Observer must compare the expected manifest hash before admitting runtime preparation or observation work.
+The manifest lists exact capability names and JSON input/result schemas generated from the same Zod definitions registered with MCP. The release tests compare every admitted capability against live `tools/list` output. TV Observer must compare the expected manifest hash before admitting runtime preparation or observation work.
 
 ## Lifecycle limits
 
@@ -40,6 +41,10 @@ The manifest currently declares:
 - default call: 15 seconds;
 - graceful shutdown: 2 seconds;
 - captured stderr: 65,536 bytes.
+
+Shutdown timeout closes the transport and invokes hard exit with code `1`; a hanging cleanup cannot keep the MCP child alive.
+
+The general-purpose `tv_launch` tool is not observer-admitted. Observer preparation uses `tv_observer_prepare`, which requires exact `profile_id`, Manager mode, and explicit `restart` opt-in. It never auto-selects profiles, falls back to local TradingView, or runs broad process termination.
 
 These are observer-enforced maximums, not generic retry instructions. Post-mutation timeout remains ambiguous and must not be retried automatically.
 

@@ -1,12 +1,23 @@
 import { createHash } from 'node:crypto';
+import { toJSONSchema, z } from 'zod';
 
-export const OBSERVER_CONTRACT_ID = 'tv-observer-v1';
-export const OBSERVER_MANIFEST_SCHEMA_VERSION = 1;
+import { OBSERVER_CONTRACT_ID, OBSERVER_MANIFEST_SCHEMA_VERSION } from './constants.js';
+import { observerToolDefinitions } from './observer-schema.js';
 
-const JSON_OBJECT_RESULT = Object.freeze({
-  type: 'object',
-  additionalProperties: true,
-});
+export { OBSERVER_CONTRACT_ID, OBSERVER_MANIFEST_SCHEMA_VERSION } from './constants.js';
+
+const CAPABILITY_NAMES = [
+  'tv_observer_contract',
+  'tv_health_check',
+  'tv_observer_prepare',
+  'tab_list',
+  'tab_new',
+  'tab_switch',
+  'pane_list',
+  'chart_get_state',
+  'chart_set_symbol',
+  'chart_set_timeframe',
+];
 
 export const observerCapabilityManifest = deepFreeze({
   contractId: OBSERVER_CONTRACT_ID,
@@ -22,67 +33,15 @@ export const observerCapabilityManifest = deepFreeze({
     shutdownGraceMs: 2_000,
     maxCapturedStderrBytes: 65_536,
   },
-  capabilities: [
-    capability('tv_observer_contract', 'read_only', emptyObject(), {
-      type: 'object',
-      required: [
-        'contractId',
-        'schemaVersion',
-        'serverName',
-        'serverVersion',
-        'nodeVersion',
-        'manifestHash',
-        'releaseCommit',
-        'releaseCommitSource',
-        'releaseReady',
-        'manifest',
-      ],
-      properties: {
-        contractId: { const: OBSERVER_CONTRACT_ID },
-        schemaVersion: { const: OBSERVER_MANIFEST_SCHEMA_VERSION },
-        serverName: { type: 'string' },
-        serverVersion: { type: 'string' },
-        nodeVersion: { type: 'string' },
-        manifestHash: { type: 'string', pattern: '^[0-9a-f]{64}$' },
-        releaseCommit: { anyOf: [{ type: 'string', pattern: '^[0-9a-f]{40}$' }, { type: 'null' }] },
-        releaseCommitSource: { enum: ['environment', 'git', 'unavailable'] },
-        releaseReady: { type: 'boolean' },
-        manifest: { type: 'object' },
-      },
-      additionalProperties: false,
-    }),
-    capability('tv_health_check', 'read_only', emptyObject(), JSON_OBJECT_RESULT),
-    capability('tv_launch', 'bootstrap_mutation', {
-      type: 'object',
-      properties: {
-        port: { type: 'number' },
-        kill_existing: { type: 'boolean' },
-      },
-      additionalProperties: false,
-    }, JSON_OBJECT_RESULT),
-    capability('tab_list', 'read_only', emptyObject(), JSON_OBJECT_RESULT),
-    capability('tab_new', 'bootstrap_mutation', emptyObject(), JSON_OBJECT_RESULT),
-    capability('tab_switch', 'browser_focus_mutation', {
-      type: 'object',
-      required: ['index'],
-      properties: { index: { type: 'number', minimum: 0 } },
-      additionalProperties: false,
-    }, JSON_OBJECT_RESULT),
-    capability('pane_list', 'read_only', emptyObject(), JSON_OBJECT_RESULT),
-    capability('chart_get_state', 'read_only', emptyObject(), JSON_OBJECT_RESULT),
-    capability('chart_set_symbol', 'chart_mutation', {
-      type: 'object',
-      required: ['symbol'],
-      properties: { symbol: { type: 'string', minLength: 1 } },
-      additionalProperties: false,
-    }, JSON_OBJECT_RESULT),
-    capability('chart_set_timeframe', 'chart_mutation', {
-      type: 'object',
-      required: ['timeframe'],
-      properties: { timeframe: { type: 'string', minLength: 1 } },
-      additionalProperties: false,
-    }, JSON_OBJECT_RESULT),
-  ],
+  capabilities: CAPABILITY_NAMES.map((name) => {
+    const definition = observerToolDefinitions[name];
+    return {
+      name,
+      classification: definition.classification,
+      inputSchema: jsonSchema(definition.inputSchema, { stripRuntimeDefaults: true }),
+      resultSchema: jsonSchema(definition.outputSchema),
+    };
+  }),
 });
 
 export const observerManifestCanonicalJson = canonicalJson(observerCapabilityManifest);
@@ -94,12 +53,26 @@ export function canonicalJson(value) {
   return JSON.stringify(normalize(value));
 }
 
-function capability(name, classification, inputSchema, resultSchema) {
-  return { name, classification, inputSchema, resultSchema };
+function jsonSchema(shape, { stripRuntimeDefaults: strip = false } = {}) {
+  if (Object.keys(shape).length === 0) {
+    return {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {},
+    };
+  }
+  const schema = toJSONSchema(z.object(shape), { target: 'draft-07' });
+  return strip ? removeRuntimeDefaults(schema) : schema;
 }
 
-function emptyObject() {
-  return { type: 'object', properties: {}, additionalProperties: false };
+function removeRuntimeDefaults(value) {
+  if (Array.isArray(value)) return value.map(removeRuntimeDefaults);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== 'additionalProperties')
+      .map(([key, entry]) => [key, removeRuntimeDefaults(entry)]),
+  );
 }
 
 function normalize(value) {

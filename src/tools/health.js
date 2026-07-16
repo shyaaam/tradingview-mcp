@@ -1,11 +1,18 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/health.js';
+import * as observer from '../core/observer.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerHealthTools(server) {
-  server.tool('tv_health_check', 'Check CDP connection to TradingView and return current chart state', {}, async () => {
+  registerObserverTool(server, 'tv_health_check', 'Check CDP connection to TradingView and return current chart state', async () => {
     try { return jsonResult(await core.healthCheck()); }
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not attached through CloakBrowser Manager. Use tv_launch to attach the managed profile.' }, true); }
+  });
+
+  registerObserverTool(server, 'tv_observer_prepare', 'Prepare one explicit CloakBrowser Manager profile without local fallback or implicit profile selection', async ({ profile_id, restart }) => {
+    try { return jsonResult(await observer.prepare({ profile_id, restart })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
   server.tool('tv_discover', 'Report which known TradingView API paths are available and their methods', {}, async () => {

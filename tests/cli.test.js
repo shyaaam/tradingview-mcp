@@ -57,7 +57,7 @@ describe('CLI — help and routing', () => {
   });
 
   it('version reports the pinned observer release identity', () => {
-    const commit = '0123456789abcdef0123456789abcdef01234567';
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: join(__dirname, '..'), encoding: 'utf8' }).trim();
     const { stdout, exitCode } = run(['version'], {
       env: { ...process.env, TRADINGVIEW_MCP_RELEASE_COMMIT: commit },
     });
@@ -66,7 +66,10 @@ describe('CLI — help and routing', () => {
     assert.equal(result.server_name, 'tradingview-mcp');
     assert.equal(result.server_version, '2.0.0');
     assert.equal(result.release_commit, commit);
-    assert.equal(result.release_ready, true);
+    assert.equal(result.expected_commit, commit);
+    assert.equal(result.observed_commit, commit);
+    assert.equal(result.release_commit_match, true);
+    assert.equal(result.release_ready, !result.release_dirty);
     assert.match(result.observer_manifest_hash, /^[0-9a-f]{64}$/);
   });
 

@@ -5,6 +5,7 @@ import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
+export const MAX_STUDY_VALUES_BYTES = 1_600;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
 
@@ -354,7 +355,30 @@ export async function getStudyValues() {
       return results;
     })()
   `);
-  return { success: true, study_count: data?.length || 0, studies: data || [] };
+  const studies = compactStudyValues(data, MAX_STUDY_VALUES_BYTES);
+  return { success: true, study_count: studies.length, studies };
+}
+
+export function compactStudyValues(studies, maxBytes = MAX_STUDY_VALUES_BYTES) {
+  if (!Array.isArray(studies)) return [];
+  const compacted = [];
+  for (const study of studies) {
+    const name = String(study?.name || 'unknown').slice(0, 80);
+    const values = {};
+    for (const [title, value] of Object.entries(study?.values || {})) {
+      const key = String(title).slice(0, 64);
+      const next = { name, values: { ...values, [key]: String(value).slice(0, 64) } };
+      const projected = [...compacted, next];
+      const size = JSON.stringify({ success: true, study_count: projected.length, studies: projected }, null, 2).length;
+      if (size >= maxBytes) break;
+      values[key] = String(value).slice(0, 64);
+    }
+    if (Object.keys(values).length === 0) break;
+    compacted.push({ name, values });
+    const size = JSON.stringify({ success: true, study_count: compacted.length, studies: compacted }, null, 2).length;
+    if (size >= maxBytes) break;
+  }
+  return compacted;
 }
 
 export async function getPineLines({ study_filter, verbose } = {}) {

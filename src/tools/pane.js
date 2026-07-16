@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/pane.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerPaneTools(server) {
-  server.tool('pane_list', 'List all chart panes in the current layout with their symbols and active state', {}, async () => {
+  registerObserverTool(server, 'pane_list', 'List all chart panes in the current layout with their symbols and active state', async () => {
     try { return jsonResult(await core.list()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

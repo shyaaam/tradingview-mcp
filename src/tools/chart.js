@@ -1,23 +1,20 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerChartTools(server) {
-  server.tool('chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', {}, async () => {
+  registerObserverTool(server, 'chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', async () => {
     try { return jsonResult(await core.getState()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_symbol', 'Change the chart symbol', {
-    symbol: z.string().describe('Symbol to set (e.g., BTCUSD, AAPL, ES1!, NYMEX:CL1!)'),
-  }, async ({ symbol }) => {
+  registerObserverTool(server, 'chart_set_symbol', 'Change the chart symbol', async ({ symbol }) => {
     try { return jsonResult(await core.setSymbol({ symbol })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('chart_set_timeframe', 'Change the chart timeframe/resolution', {
-    timeframe: z.string().describe('Timeframe (e.g., 1, 5, 15, 60, D, W, M)'),
-  }, async ({ timeframe }) => {
+  registerObserverTool(server, 'chart_set_timeframe', 'Change the chart timeframe/resolution', async ({ timeframe }) => {
     try { return jsonResult(await core.setTimeframe({ timeframe })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
