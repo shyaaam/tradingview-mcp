@@ -21,6 +21,35 @@ const tabListOutput = {
   tabs: z.array(z.object(tabShape)),
 };
 
+const observerIdentityOutput = {
+  success: z.literal(true),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  layout_id: z.string().min(1),
+  account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+};
+
+const observerCaptureCandleInput = {
+  symbol: z.string().min(1),
+  timeframe: z.string().min(1),
+  source_candle_time: z.string().datetime(),
+};
+
+const observerCaptureCandleOutput = {
+  success: z.literal(true),
+  symbol: z.string().min(1),
+  timeframe: z.string().min(1),
+  source_candle_time: z.string().datetime(),
+  captured_at: z.string().datetime(),
+  open: z.number().finite(),
+  high: z.number().finite(),
+  low: z.number().finite(),
+  close: z.number().finite(),
+  volume: z.number().finite(),
+  adapter_version: z.string().min(1),
+};
+
 const manifestCapabilityShape = {
   name: z.string(),
   classification: z.enum(['read_only', 'bootstrap_mutation', 'browser_focus_mutation', 'chart_mutation']),
@@ -101,6 +130,17 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().nullable(),
     },
   },
+  tv_observer_identity: {
+    classification: 'read_only',
+    inputSchema: emptyInput,
+    outputSchema: observerIdentityOutput,
+    rejectUnexpectedInput: true,
+  },
+  tv_observer_capture_candle: {
+    classification: 'read_only',
+    inputSchema: observerCaptureCandleInput,
+    outputSchema: observerCaptureCandleOutput,
+  },
   tab_list: {
     classification: 'read_only',
     inputSchema: emptyInput,
@@ -177,6 +217,9 @@ export function registerObserverTool(server, name, description, handler) {
   const definition = observerToolDefinitions[name];
   if (!definition) throw new Error(`Unknown observer capability: ${name}`);
   const guardedHandler = async (args, extra) => {
+    if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
+      throw new Error(`${name} accepts no input arguments.`);
+    }
     if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare') {
       requireObserverSession();
     }

@@ -68,6 +68,58 @@ export async function getClient() {
   return connect();
 }
 
+/**
+ * Return a client for one already-prepared observer binding.
+ * Unlike the general client path, this path performs no reconnect retry loop.
+ */
+export async function getBoundClient() {
+  const session = requireSession();
+  const target = await findChartTarget(session);
+  if (!target) throw new Error('Bound observer chart target is unavailable. Re-run tv_observer_prepare.');
+
+  if (client) {
+    if (targetInfo?.id !== target.id || targetInfo?.url !== target.url) {
+      await disconnect();
+      throw new Error(`Bound observer chart target ${session.chartTargetId} changed or is unavailable. Re-run tv_observer_prepare.`);
+    }
+    try {
+      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      return client;
+    } catch {
+      await disconnect();
+    }
+  }
+
+  targetInfo = target;
+  client = await CDP({ target: target.webSocketDebuggerUrl, local: true });
+  try {
+    await client.Runtime.enable();
+    await client.Page.enable();
+    await client.DOM.enable();
+  } catch (error) {
+    await disconnect();
+    throw error;
+  }
+  return client;
+}
+
+export async function evaluateBound(expression, opts = {}) {
+  const c = await getBoundClient();
+  const result = await c.Runtime.evaluate({
+    expression,
+    returnByValue: true,
+    awaitPromise: opts.awaitPromise ?? false,
+    ...opts,
+  });
+  if (result.exceptionDetails) {
+    const msg = result.exceptionDetails.exception?.description
+      || result.exceptionDetails.text
+      || 'Unknown evaluation error';
+    throw new Error(`JS evaluation error: ${msg}`);
+  }
+  return result.result?.value;
+}
+
 export async function invalidateObserverSession() {
   clearObserverSession();
   await disconnect();

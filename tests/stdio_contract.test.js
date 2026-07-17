@@ -71,6 +71,8 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
   assert.match(contract.manifestHash, /^[0-9a-f]{64}$/);
 
   await deadline(client.close(), observerCapabilityManifest.lifecycle.shutdownGraceMs, 'MCP close');
+  await transport.close();
+  transport.stderr?.destroy();
   assert.ok(stderrBytes <= observerCapabilityManifest.lifecycle.maxCapturedStderrBytes);
 });
 
@@ -152,3 +154,10 @@ async function waitForProcessExit(pid) {
   }
   throw new Error(`process ${pid} still alive`);
 }
+
+test.after(() => {
+  // Node's test worker keeps its IPC poller alive after the SDK's stdio
+  // transport closes. Preserve the runner's failure status while releasing it.
+  const exitCode = process.exitCode ?? 0;
+  setImmediate(() => process.exit(exitCode));
+});

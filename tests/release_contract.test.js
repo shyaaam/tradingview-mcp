@@ -19,6 +19,7 @@ import {
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 import { registerReleaseTools } from '../src/tools/release.js';
 import { registerHealthTools } from '../src/tools/health.js';
+import { registerObserverEvidenceTools } from '../src/tools/observer-evidence.js';
 import { registerTabTools } from '../src/tools/tab.js';
 import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
@@ -62,6 +63,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_contract',
     'tv_health_check',
     'tv_observer_prepare',
+    'tv_observer_identity',
+    'tv_observer_capture_candle',
     'tab_list',
     'tab_new',
     'tab_switch',
@@ -70,6 +73,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_set_symbol',
     'chart_set_timeframe',
   ]);
+  assert.equal(names.includes('data_get_ohlcv'), false);
+  assert.equal(names.includes('capture_screenshot'), false);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(capability.inputSchema.type, 'object');
@@ -85,6 +90,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   const fakeServer = { tool: (name) => { registered.add(name); } };
   registerReleaseTools(fakeServer);
   registerHealthTools(fakeServer);
+  registerObserverEvidenceTools(fakeServer);
   registerTabTools(fakeServer);
   registerPaneTools(fakeServer);
   registerChartTools(fakeServer);
@@ -114,6 +120,27 @@ test('observer result fixtures satisfy registered output schemas', () => {
       success: true, manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', restart_requested: false,
       status: 'running', cdp_ready: true, cdp_url: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
       browser: 'Chrome/146', user_agent: 'test-agent', chart_target_id: 'chart-1', chart_target_url: 'https://www.tradingview.com/chart/x/',
+    },
+    tv_observer_identity: {
+      success: true,
+      profile_id: 'profile-a',
+      chart_target_id: 'chart-1',
+      chart_id: 'chart-id',
+      layout_id: 'layout-id',
+      account_subject_sha256: 'a'.repeat(64),
+    },
+    tv_observer_capture_candle: {
+      success: true,
+      symbol: 'AAPL',
+      timeframe: '60',
+      source_candle_time: '2026-07-17T10:00:00Z',
+      captured_at: '2026-07-17T10:00:01Z',
+      open: 100,
+      high: 110,
+      low: 95,
+      close: 105,
+      volume: 1234,
+      adapter_version: 'tradingview-mcp-observer-v1',
     },
     tab_list: tabs,
     tab_new: { ...tabs, action: 'new_tab_opened' },

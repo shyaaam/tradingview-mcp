@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { registerReleaseTools } from './tools/release.js';
 import { registerHealthTools } from './tools/health.js';
+import { registerObserverEvidenceTools } from './tools/observer-evidence.js';
 import { registerChartTools } from './tools/chart.js';
 import { registerPineTools } from './tools/pine.js';
 import { registerDataTools } from './tools/data.js';
@@ -79,6 +80,7 @@ CONTEXT MANAGEMENT:
 
 registerReleaseTools(server);
 registerHealthTools(server);
+registerObserverEvidenceTools(server);
 registerChartTools(server);
 registerPineTools(server);
 registerDataTools(server);
