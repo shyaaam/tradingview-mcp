@@ -6,6 +6,10 @@ import {
   requireObserverSession as requireSession,
   setObserverSession,
 } from './core/observer-session.js';
+import {
+  DisconnectedSessionRecoveryError,
+  recoverDisconnectedSession,
+} from './core/session-recovery.js';
 
 export { getObserverSession, requireObserverSession } from './core/observer-session.js';
 
@@ -59,10 +63,14 @@ export async function getClient() {
     try {
       // Quick liveness check
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await recoverDisconnectedSession(client);
       return client;
-    } catch {
-      client = null;
-      targetInfo = null;
+    } catch (error) {
+      if (error instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw error;
+      }
+      await disconnect();
     }
   }
   return connect();
@@ -84,8 +92,13 @@ export async function getBoundClient() {
     }
     try {
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await recoverDisconnectedSession(client);
       return client;
-    } catch {
+    } catch (error) {
+      if (error instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw error;
+      }
       await disconnect();
     }
   }
@@ -96,6 +109,7 @@ export async function getBoundClient() {
     await client.Runtime.enable();
     await client.Page.enable();
     await client.DOM.enable();
+    await recoverDisconnectedSession(client);
   } catch (error) {
     await disconnect();
     throw error;
@@ -160,9 +174,14 @@ export async function connect() {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
+      await recoverDisconnectedSession(client);
 
       return client;
     } catch (err) {
+      if (err instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw err;
+      }
       lastError = err;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));
