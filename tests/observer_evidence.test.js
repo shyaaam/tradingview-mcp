@@ -61,6 +61,8 @@ test('identity uses exact prepared binding and never returns raw account subject
     account_subject_sha256: 'a'.repeat(64),
   });
   assert.doesNotMatch(expression, /raw-account-subject|accountSubjectValue/);
+  assert.match(expression, /metaInfo\.username/);
+  assert.match(expression, /collection\.layout/);
 });
 
 test('identity refuses ambiguous authenticated identity without exposing its value', async () => {

@@ -30,7 +30,13 @@ export async function identity({ _deps } = {}) {
       chartIds = chartIds.filter(function(value, index) { return value && chartIds.indexOf(value) === index; });
 
       var layoutIds = [];
-      if (collection) layoutIds.push(read(collection._layoutId || collection.layoutId || collection._layout && collection._layout.id));
+      if (collection) layoutIds.push(read(
+        collection._layoutId
+        || collection.layoutId
+        || collection.layout
+        || collection._layout
+        && collection._layout.id,
+      ));
       if (active) layoutIds.push(read(active.layoutId || active._layoutId));
       layoutIds = layoutIds.filter(function(value, index) { return value && layoutIds.indexOf(value) === index; });
 
@@ -38,6 +44,7 @@ export async function identity({ _deps } = {}) {
       var candidates = [
         api && api._user && (api._user.id || api._user.user_id || api._user.username),
         window.TradingView && window.TradingView.user && (window.TradingView.user.id || window.TradingView.user.user_id || window.TradingView.user.username),
+        collection && collection.metaInfo && collection.metaInfo.username,
       ];
       for (var i = 0; i < candidates.length; i++) {
         var subject = read(candidates[i]);
