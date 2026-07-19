@@ -108,6 +108,12 @@ export const observerToolDefinitions = Object.freeze({
       chart_resolution: z.string(),
       chart_type: z.number().nullable(),
       api_available: z.boolean(),
+      session_state: z.enum(['connected', 'reclaimed']),
+      disconnect_popup_count: z.number().int().nonnegative(),
+      exact_connect_count: z.number().int().nonnegative(),
+      reclaim_attempted: z.boolean(),
+      reclaim_succeeded: z.boolean(),
+      reclaim_click_count: z.number().int().nonnegative(),
     },
   },
   tv_observer_prepare: {

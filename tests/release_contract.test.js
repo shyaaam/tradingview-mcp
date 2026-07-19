@@ -115,6 +115,8 @@ test('observer result fixtures satisfy registered output schemas', () => {
     tv_health_check: {
       success: true, cdp_connected: true, target_id: 'target-1', target_url: 'https://www.tradingview.com/chart/x/',
       target_title: 'AAPL', chart_symbol: 'AAPL', chart_resolution: '60', chart_type: 1, api_available: true,
+      session_state: 'connected', disconnect_popup_count: 0, exact_connect_count: 0,
+      reclaim_attempted: false, reclaim_succeeded: false, reclaim_click_count: 0,
     },
     tv_observer_prepare: {
       success: true, manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', restart_requested: false,

@@ -4,9 +4,10 @@ import * as core from '../core/health.js';
 import * as observer from '../core/observer.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
-export function registerHealthTools(server) {
+export function registerHealthTools(server, dependencies = {}) {
+  const healthCheck = dependencies.healthCheck || core.healthCheck;
   registerObserverTool(server, 'tv_health_check', 'Check CDP connection to TradingView and return current chart state', async () => {
-    try { return jsonResult(await core.healthCheck()); }
+    try { return jsonResult(await healthCheck()); }
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not attached through CloakBrowser Manager. Use tv_launch to attach the managed profile.' }, true); }
   });
 
