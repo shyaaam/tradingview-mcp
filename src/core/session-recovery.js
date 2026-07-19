@@ -18,18 +18,24 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
     .trim();
   const isDisconnectedSession = (element) => {
     const text = textOf(element);
-    return /session\\s+(?:has\\s+)?been\\s+disconnected/i.test(text)
+    return /session\\s+(?:has\\s+)?(?:been\\s+)?disconnected/i.test(text)
       || /disconnected.{0,160}another device/i.test(text)
       || /another device.{0,160}session/i.test(text)
       || /(?:disconnected|disconnection).{0,160}\\bdevice\\b/i.test(text)
       || /\\bdevice\\b.{0,160}(?:disconnected|disconnection)/i.test(text);
   };
 
-  const dialogs = Array.from(document.querySelectorAll(
+  const dialogCandidates = Array.from(document.querySelectorAll(
     '[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="dialog"], [class*="popup"]',
   ))
     .filter(isVisible)
     .filter(isDisconnectedSession);
+  // TradingView commonly nests a role=dialog wrapper around a modal-content
+  // element. Count the visible top-level dialog once, while retaining distinct
+  // dialogs as an ambiguity signal.
+  const dialogs = dialogCandidates.filter((element) => !dialogCandidates.some(
+    (parent) => parent !== element && parent.contains(element),
+  ));
 
   if (dialogs.length === 0) {
     return {
