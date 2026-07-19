@@ -37,10 +37,11 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       (descendant) => descendant !== element && element.contains(descendant),
     )
   ));
+  const MAX_CONTAINER_TEXT_LENGTH = 2000;
   const nearestContainerWithConnect = (anchor) => {
     let current = anchor;
     while (current && current !== document.body && current !== document.documentElement) {
-      if (isVisible(current)) {
+      if (isVisible(current) && textOf(current).length <= MAX_CONTAINER_TEXT_LENGTH) {
         const matchingControls = exactConnectControls.filter((control) => current.contains(control));
         if (matchingControls.length > 0) return current;
       }
