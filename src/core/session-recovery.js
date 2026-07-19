@@ -25,23 +25,51 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       || /\\bdevice\\b.{0,160}(?:disconnected|disconnection)/i.test(text);
   };
 
-  const dialogCandidates = Array.from(document.querySelectorAll(
-    '[role="dialog"], [aria-modal="true"], [class*="modal"], [class*="dialog"], [class*="popup"]',
-  ))
-    .filter(isVisible)
+  const allVisibleElements = Array.from(document.querySelectorAll('body *'))
+    .filter(isVisible);
+  const exactConnectControls = allVisibleElements
+    .filter((element) => element.matches('button, [role="button"], a'))
+    .filter((element) => /^connect$/i.test(textOf(element)));
+  const disconnectedTextElements = allVisibleElements
     .filter(isDisconnectedSession);
-  // TradingView commonly nests a role=dialog wrapper around a modal-content
-  // element. Count the visible top-level dialog once, while retaining distinct
-  // dialogs as an ambiguity signal.
-  const dialogs = dialogCandidates.filter((element) => !dialogCandidates.some(
-    (parent) => parent !== element && parent.contains(element),
+  const deepestTextAnchors = disconnectedTextElements.filter((element) => (
+    !disconnectedTextElements.some(
+      (descendant) => descendant !== element && element.contains(descendant),
+    )
+  ));
+  const nearestContainerWithConnect = (anchor) => {
+    let current = anchor;
+    while (current && current !== document.body && current !== document.documentElement) {
+      if (isVisible(current)) {
+        const matchingControls = exactConnectControls.filter((control) => current.contains(control));
+        if (matchingControls.length > 0) return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  };
+  const containerCandidates = deepestTextAnchors
+    .map(nearestContainerWithConnect)
+    .filter(Boolean);
+  const dialogs = Array.from(new Set(containerCandidates)).filter((candidate) => (
+    !containerCandidates.some(
+      (other) => other !== candidate && candidate.contains(other),
+    )
   ));
 
-  if (dialogs.length === 0) {
+  if (deepestTextAnchors.length === 0) {
     return {
       state: 'not-present',
       disconnect_popup_count: 0,
       exact_connect_count: 0,
+    };
+  }
+  if (dialogs.length === 0) {
+    return {
+      state: 'blocked',
+      reason: 'disconnect-popup-container-not-found',
+      disconnect_popup_count: deepestTextAnchors.length,
+      exact_connect_count: exactConnectControls.length,
     };
   }
   if (dialogs.length !== 1) {
@@ -49,13 +77,11 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       state: 'blocked',
       reason: 'multiple-disconnected-session-dialogs',
       disconnect_popup_count: dialogs.length,
-      exact_connect_count: 0,
+      exact_connect_count: exactConnectControls.length,
     };
   }
 
-  const buttons = Array.from(dialogs[0].querySelectorAll('button, [role="button"], a'))
-    .filter(isVisible)
-    .filter((element) => /^connect$/i.test(textOf(element)));
+  const buttons = exactConnectControls.filter((element) => dialogs[0].contains(element));
   if (buttons.length !== 1) {
     return {
       state: 'blocked',
