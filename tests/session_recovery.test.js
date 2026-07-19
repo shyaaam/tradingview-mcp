@@ -121,8 +121,13 @@ test('recognizes the exact modal family and exact Connect action', () => {
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /another device/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /disconnection/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /session\\s\+.*disconnected/);
-  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /dialogCandidates/);
-  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /parent.contains\(element\)/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /querySelectorAll\('body \*'\)/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /deepestTextAnchors/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /nearestContainerWithConnect/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /disconnect-popup-container-not-found/);
+  assert.doesNotMatch(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\[class\*=\\?['"]modal/);
+  assert.doesNotMatch(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\[class\*=\\?['"]dialog/);
+  assert.doesNotMatch(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\[class\*=\\?['"]popup/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\^connect\$/i);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /state: 'blocked'/);
 });
