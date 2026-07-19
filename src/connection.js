@@ -15,6 +15,7 @@ export { getObserverSession, requireObserverSession } from './core/observer-sess
 
 let client = null;
 let targetInfo = null;
+const sessionRecoveryEvidence = new WeakMap();
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 
@@ -58,12 +59,23 @@ export function requireFinite(value, name) {
   return n;
 }
 
+async function recoverAndRecordSession(activeClient) {
+  const evidence = await recoverDisconnectedSession(activeClient);
+  sessionRecoveryEvidence.set(activeClient, evidence);
+  return evidence;
+}
+
+export function getSessionRecoveryEvidence(activeClient) {
+  const evidence = sessionRecoveryEvidence.get(activeClient);
+  return evidence ? { ...evidence } : null;
+}
+
 export async function getClient() {
   if (client) {
     try {
       // Quick liveness check
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
-      await recoverDisconnectedSession(client);
+      await recoverAndRecordSession(client);
       return client;
     } catch (error) {
       if (error instanceof DisconnectedSessionRecoveryError) {
@@ -92,7 +104,7 @@ export async function getBoundClient() {
     }
     try {
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
-      await recoverDisconnectedSession(client);
+      await recoverAndRecordSession(client);
       return client;
     } catch (error) {
       if (error instanceof DisconnectedSessionRecoveryError) {
@@ -109,7 +121,7 @@ export async function getBoundClient() {
     await client.Runtime.enable();
     await client.Page.enable();
     await client.DOM.enable();
-    await recoverDisconnectedSession(client);
+    await recoverAndRecordSession(client);
   } catch (error) {
     await disconnect();
     throw error;
@@ -174,7 +186,7 @@ export async function connect() {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
-      await recoverDisconnectedSession(client);
+      await recoverAndRecordSession(client);
 
       return client;
     } catch (err) {
