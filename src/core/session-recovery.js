@@ -31,20 +31,40 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
     .filter(isVisible)
     .filter(isDisconnectedSession);
 
-  if (dialogs.length === 0) return { state: 'not-present' };
+  if (dialogs.length === 0) {
+    return {
+      state: 'not-present',
+      disconnect_popup_count: 0,
+      exact_connect_count: 0,
+    };
+  }
   if (dialogs.length !== 1) {
-    return { state: 'blocked', reason: 'multiple-disconnected-session-dialogs' };
+    return {
+      state: 'blocked',
+      reason: 'multiple-disconnected-session-dialogs',
+      disconnect_popup_count: dialogs.length,
+      exact_connect_count: 0,
+    };
   }
 
   const buttons = Array.from(dialogs[0].querySelectorAll('button, [role="button"], a'))
     .filter(isVisible)
     .filter((element) => /^connect$/i.test(textOf(element)));
   if (buttons.length !== 1) {
-    return { state: 'blocked', reason: 'connect-button-not-unique' };
+    return {
+      state: 'blocked',
+      reason: 'connect-button-not-unique',
+      disconnect_popup_count: 1,
+      exact_connect_count: buttons.length,
+    };
   }
 
   buttons[0].click();
-  return { state: 'clicked' };
+  return {
+    state: 'clicked',
+    disconnect_popup_count: 1,
+    exact_connect_count: 1,
+  };
 })()
 `;
 
@@ -75,7 +95,37 @@ async function evaluateRecoveryState(client) {
   if (!state || typeof state.state !== 'string') {
     throw new DisconnectedSessionRecoveryError('Disconnected-session recovery returned an invalid state.');
   }
+  if (!Number.isInteger(state.disconnect_popup_count) || state.disconnect_popup_count < 0) {
+    throw new DisconnectedSessionRecoveryError('Disconnected-session recovery returned an invalid popup count.');
+  }
+  if (!Number.isInteger(state.exact_connect_count) || state.exact_connect_count < 0) {
+    throw new DisconnectedSessionRecoveryError('Disconnected-session recovery returned an invalid Connect count.');
+  }
   return state;
+}
+
+function connectedEvidence(initial) {
+  return Object.freeze({
+    state: 'not-present',
+    session_state: 'connected',
+    disconnect_popup_count: initial.disconnect_popup_count,
+    exact_connect_count: initial.exact_connect_count,
+    reclaim_attempted: false,
+    reclaim_succeeded: false,
+    reclaim_click_count: 0,
+  });
+}
+
+function reclaimedEvidence(initial) {
+  return Object.freeze({
+    state: 'reclaimed',
+    session_state: 'reclaimed',
+    disconnect_popup_count: initial.disconnect_popup_count,
+    exact_connect_count: initial.exact_connect_count,
+    reclaim_attempted: true,
+    reclaim_succeeded: true,
+    reclaim_click_count: 1,
+  });
 }
 
 export async function recoverDisconnectedSession(client, options = {}) {
@@ -83,7 +133,14 @@ export async function recoverDisconnectedSession(client, options = {}) {
   const pollDelayMs = options.pollDelayMs ?? DEFAULT_POLL_DELAY_MS;
   const initial = await evaluateRecoveryState(client);
 
-  if (initial.state === 'not-present') return initial;
+  if (initial.state === 'not-present') {
+    if (initial.disconnect_popup_count !== 0 || initial.exact_connect_count !== 0) {
+      throw new DisconnectedSessionRecoveryError(
+        'Disconnected-session recovery returned inconsistent no-popup evidence.',
+      );
+    }
+    return connectedEvidence(initial);
+  }
   if (initial.state === 'blocked') {
     throw new DisconnectedSessionRecoveryError(
       `Disconnected-session recovery blocked: ${initial.reason || 'ambiguous-dialog'}`,
@@ -94,11 +151,23 @@ export async function recoverDisconnectedSession(client, options = {}) {
       `Disconnected-session recovery returned unexpected state: ${initial.state}`,
     );
   }
+  if (initial.disconnect_popup_count !== 1 || initial.exact_connect_count !== 1) {
+    throw new DisconnectedSessionRecoveryError(
+      'Disconnected-session recovery returned inconsistent click evidence.',
+    );
+  }
 
   for (let attempt = 0; attempt < pollCount; attempt += 1) {
     await delay(pollDelayMs);
     const current = await evaluateRecoveryState(client);
-    if (current.state === 'not-present') return { state: 'reclaimed' };
+    if (current.state === 'not-present') {
+      if (current.disconnect_popup_count !== 0 || current.exact_connect_count !== 0) {
+        throw new DisconnectedSessionRecoveryError(
+          'Disconnected-session recovery returned inconsistent cleared-popup evidence.',
+        );
+      }
+      return reclaimedEvidence(initial);
+    }
     if (current.state === 'blocked') {
       throw new DisconnectedSessionRecoveryError(
         `Disconnected-session recovery blocked: ${current.reason || 'ambiguous-dialog'}`,
