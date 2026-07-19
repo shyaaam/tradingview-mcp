@@ -20,7 +20,9 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
     const text = textOf(element);
     return /session\\s+(?:has\\s+)?been\\s+disconnected/i.test(text)
       || /disconnected.{0,160}another device/i.test(text)
-      || /another device.{0,160}session/i.test(text);
+      || /another device.{0,160}session/i.test(text)
+      || /(?:disconnected|disconnection).{0,160}\bdevice\b/i.test(text)
+      || /\bdevice\b.{0,160}(?:disconnected|disconnection)/i.test(text);
   };
 
   const dialogs = Array.from(document.querySelectorAll(

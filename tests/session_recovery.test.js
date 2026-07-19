@@ -67,6 +67,7 @@ test('fails closed when the modal does not clear after the bounded poll', async 
 
 test('recognizes the exact modal family and exact Connect action', () => {
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /another device/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /disconnection/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\^connect\$/i);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /state: 'blocked'/);
 });
