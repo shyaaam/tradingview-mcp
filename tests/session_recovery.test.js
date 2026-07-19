@@ -7,10 +7,12 @@ import {
 } from '../src/core/session-recovery.js';
 
 class FakeElement {
-  constructor(tagName, ownText = '', className = '') {
+  constructor(tagName, ownText = '', className = '', options = {}) {
     this.tagName = tagName.toUpperCase();
     this.ownText = ownText;
     this.className = className;
+    this.role = options.role || null;
+    this.visible = options.visible !== false;
     this.children = [];
     this.parentElement = null;
     this.clicks = 0;
@@ -23,6 +25,7 @@ class FakeElement {
   }
 
   get innerText() {
+    if (!this.visible) return '';
     return [this.ownText, ...this.children.map((child) => child.innerText)]
       .filter(Boolean)
       .join(' ');
@@ -38,7 +41,7 @@ class FakeElement {
 
   matches(selector) {
     if (selector !== 'button, [role="button"], a') return false;
-    return this.tagName === 'BUTTON' || this.tagName === 'A';
+    return this.tagName === 'BUTTON' || this.tagName === 'A' || this.role === 'button';
   }
 
   contains(other) {
@@ -59,8 +62,8 @@ function evaluateRecoveryExpression(configure) {
   const documentElement = new FakeElement('html');
   const body = documentElement.append(new FakeElement('body'));
   const all = [];
-  const append = (parent, tagName, text = '', className = '') => {
-    const element = parent.append(new FakeElement(tagName, text, className));
+  const append = (parent, tagName, text = '', className = '', options = {}) => {
+    const element = parent.append(new FakeElement(tagName, text, className, options));
     all.push(element);
     return element;
   };
@@ -74,8 +77,10 @@ function evaluateRecoveryExpression(configure) {
     },
   };
   const window = {
-    getComputedStyle() {
-      return { display: 'block', visibility: 'visible', opacity: '1' };
+    getComputedStyle(element) {
+      return element.visible
+        ? { display: 'block', visibility: 'visible', opacity: '1' }
+        : { display: 'none', visibility: 'hidden', opacity: '0' };
     },
   };
   const result = vm.runInNewContext(
@@ -207,11 +212,9 @@ test('detects and clicks a random-class TradingView disconnect popup', () => {
     return { connect };
   });
 
-  assert.deepEqual({ ...result }, {
-    state: 'clicked',
-    disconnect_popup_count: 1,
-    exact_connect_count: 1,
-  });
+  assert.equal(result.state, 'clicked');
+  assert.equal(result.disconnect_popup_count, 1);
+  assert.equal(result.exact_connect_count, 1);
   assert.equal(fixture.connect.clicks, 1);
 });
 
@@ -222,12 +225,10 @@ test('fails closed when disconnect text is visible without a bounded Connect con
     return {};
   });
 
-  assert.deepEqual({ ...result }, {
-    state: 'blocked',
-    reason: 'disconnect-popup-container-not-found',
-    disconnect_popup_count: 1,
-    exact_connect_count: 0,
-  });
+  assert.equal(result.state, 'blocked');
+  assert.equal(result.reason, 'disconnect-popup-container-not-found');
+  assert.equal(result.disconnect_popup_count, 1);
+  assert.equal(result.exact_connect_count, 0);
 });
 
 test('does not bind disconnect text to an unrelated global Connect action', () => {
@@ -239,13 +240,77 @@ test('does not bind disconnect text to an unrelated global Connect action', () =
     return { connect };
   });
 
+  assert.equal(result.state, 'blocked');
+  assert.equal(result.reason, 'disconnect-popup-container-not-found');
+  assert.equal(result.disconnect_popup_count, 1);
+  assert.equal(result.exact_connect_count, 1);
+  assert.equal(fixture.connect.clicks, 0);
+});
+
+test('blocks two distinct disconnected popup roots', () => {
+  const { result } = evaluateRecoveryExpression(({ body, append }) => {
+    for (const suffix of ['one', 'two']) {
+      const root = append(body, 'div', '', `wrapper-${suffix}`);
+      const main = append(root, 'div', '', `main-${suffix}`);
+      append(main, 'div', 'Session disconnected', `title-${suffix}`);
+      append(main, 'button', 'Connect', `connect-${suffix}`);
+    }
+  });
+
+  assert.equal(result.state, 'blocked');
+  assert.equal(result.reason, 'multiple-disconnected-session-dialogs');
+  assert.equal(result.disconnect_popup_count, 2);
+  assert.equal(result.diagnostics.deduplicated_popup_root_count, 2);
+});
+
+test('blocks two exact Connect controls inside one popup root', () => {
+  const { result, fixture } = evaluateRecoveryExpression(({ body, append }) => {
+    const root = append(body, 'div', '', 'wrapper-random');
+    const main = append(root, 'div', '', 'main-random');
+    append(main, 'div', 'Session disconnected', 'title-random');
+    const first = append(main, 'button', 'Connect', 'connect-one');
+    const second = append(main, 'button', 'Connect', 'connect-two');
+    return { first, second };
+  });
+
+  assert.equal(result.state, 'blocked');
+  assert.equal(result.reason, 'connect-button-not-unique');
+  assert.equal(fixture.first.clicks + fixture.second.clicks, 0);
+});
+
+test('counts nested text wrappers for one popup once', () => {
+  const { result, fixture } = evaluateRecoveryExpression(({ body, append }) => {
+    const root = append(body, 'div', '', 'wrapper-generated');
+    const main = append(root, 'div', '', 'main-generated');
+    const textWrapper = append(main, 'div', '', 'text-generated');
+    append(textWrapper, 'span', 'Session', 'label-generated');
+    append(textWrapper, 'span', 'disconnected', 'label-generated');
+    const connect = append(main, 'button', 'Connect', 'action-generated');
+    return { connect };
+  });
+
   assert.deepEqual({ ...result }, {
-    state: 'blocked',
-    reason: 'disconnect-popup-container-not-found',
+    state: 'clicked',
     disconnect_popup_count: 1,
     exact_connect_count: 1,
+    diagnostics: result.diagnostics,
   });
-  assert.equal(fixture.connect.clicks, 0);
+  assert.equal(result.diagnostics.deepest_text_anchor_count, 1);
+  assert.equal(fixture.connect.clicks, 1);
+});
+
+test('ignores hidden disconnect text and hidden Connect controls', () => {
+  const { result, fixture } = evaluateRecoveryExpression(({ body, append }) => {
+    const root = append(body, 'div', '', 'hidden-root');
+    append(root, 'div', 'Session disconnected', 'hidden-title', { visible: false });
+    const hiddenConnect = append(root, 'button', 'Connect', 'hidden-connect', { visible: false });
+    return { hiddenConnect };
+  });
+
+  assert.equal(result.state, 'not-present');
+  assert.equal(result.disconnect_popup_count, 0);
+  assert.equal(result.exact_connect_count, 0);
+  assert.equal(fixture.hiddenConnect.clicks, 0);
 });
 
 test('recognizes the exact modal family and exact Connect action', () => {

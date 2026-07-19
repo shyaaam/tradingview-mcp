@@ -38,12 +38,15 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
     )
   ));
   const MAX_CONTAINER_TEXT_LENGTH = 2000;
+  let broadRootTextLimitRejected = false;
   const nearestContainerWithConnect = (anchor) => {
     let current = anchor;
     while (current && current !== document.body && current !== document.documentElement) {
       if (isVisible(current) && textOf(current).length <= MAX_CONTAINER_TEXT_LENGTH) {
         const matchingControls = exactConnectControls.filter((control) => current.contains(control));
         if (matchingControls.length > 0) return current;
+      } else if (isVisible(current) && textOf(current).length > MAX_CONTAINER_TEXT_LENGTH) {
+        broadRootTextLimitRejected = true;
       }
       current = current.parentElement;
     }
@@ -57,12 +60,25 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       (other) => other !== candidate && candidate.contains(other),
     )
   ));
+  const diagnostics = {
+    visible_body_descendant_count: allVisibleElements.length,
+    visible_disconnected_text_count: disconnectedTextElements.length,
+    deepest_text_anchor_count: deepestTextAnchors.length,
+    bounded_container_candidate_count: containerCandidates.length,
+    deduplicated_popup_root_count: dialogs.length,
+    candidate_roots: dialogs.map((candidate) => ({
+      normalized_text_length: textOf(candidate).length,
+      exact_connect_count: exactConnectControls.filter((control) => candidate.contains(control)).length,
+    })),
+    broad_root_text_limit_rejected: broadRootTextLimitRejected,
+  };
 
   if (deepestTextAnchors.length === 0) {
     return {
       state: 'not-present',
       disconnect_popup_count: 0,
       exact_connect_count: 0,
+      diagnostics,
     };
   }
   if (dialogs.length === 0) {
@@ -71,6 +87,7 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       reason: 'disconnect-popup-container-not-found',
       disconnect_popup_count: deepestTextAnchors.length,
       exact_connect_count: exactConnectControls.length,
+      diagnostics,
     };
   }
   if (dialogs.length !== 1) {
@@ -79,6 +96,7 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       reason: 'multiple-disconnected-session-dialogs',
       disconnect_popup_count: dialogs.length,
       exact_connect_count: exactConnectControls.length,
+      diagnostics,
     };
   }
 
@@ -89,6 +107,7 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
       reason: 'connect-button-not-unique',
       disconnect_popup_count: 1,
       exact_connect_count: buttons.length,
+      diagnostics,
     };
   }
 
@@ -97,15 +116,17 @@ export const DISCONNECTED_SESSION_RECOVERY_EXPRESSION = `
     state: 'clicked',
     disconnect_popup_count: 1,
     exact_connect_count: 1,
+    diagnostics,
   };
 })()
 `;
 
 export class DisconnectedSessionRecoveryError extends Error {
-  constructor(message) {
+  constructor(message, details = undefined) {
     super(message);
     this.name = 'DisconnectedSessionRecoveryError';
     this.code = 'DISCONNECTED_SESSION_RECOVERY_FAILED';
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -177,6 +198,7 @@ export async function recoverDisconnectedSession(client, options = {}) {
   if (initial.state === 'blocked') {
     throw new DisconnectedSessionRecoveryError(
       `Disconnected-session recovery blocked: ${initial.reason || 'ambiguous-dialog'}`,
+      initial.diagnostics,
     );
   }
   if (initial.state !== 'clicked') {
@@ -204,6 +226,7 @@ export async function recoverDisconnectedSession(client, options = {}) {
     if (current.state === 'blocked') {
       throw new DisconnectedSessionRecoveryError(
         `Disconnected-session recovery blocked: ${current.reason || 'ambiguous-dialog'}`,
+        current.diagnostics,
       );
     }
   }

@@ -8,7 +8,12 @@ export function registerHealthTools(server, dependencies = {}) {
   const healthCheck = dependencies.healthCheck || core.healthCheck;
   registerObserverTool(server, 'tv_health_check', 'Check CDP connection to TradingView and return current chart state', async () => {
     try { return jsonResult(await healthCheck()); }
-    catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not attached through CloakBrowser Manager. Use tv_launch to attach the managed profile.' }, true); }
+    catch (err) {
+      const diagnostics = err?.details && typeof err.details === 'object'
+        ? { diagnostics: err.details }
+        : {};
+      return jsonResult({ success: false, error: err.message, ...diagnostics, hint: 'TradingView is not attached through CloakBrowser Manager. Use tv_launch to attach the managed profile.' }, true);
+    }
   });
 
   registerObserverTool(server, 'tv_observer_prepare', 'Prepare one explicit CloakBrowser Manager profile without local fallback or implicit profile selection', async ({ profile_id, restart }) => {
