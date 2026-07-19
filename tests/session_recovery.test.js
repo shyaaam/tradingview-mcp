@@ -19,30 +19,61 @@ class FakeClient {
 }
 
 test('does nothing when the disconnected-session modal is absent', async () => {
-  const client = new FakeClient([{ state: 'not-present' }]);
+  const client = new FakeClient([{
+    state: 'not-present',
+    disconnect_popup_count: 0,
+    exact_connect_count: 0,
+  }]);
 
   assert.deepEqual(await recoverDisconnectedSession(client, { pollDelayMs: 0 }), {
     state: 'not-present',
+    session_state: 'connected',
+    disconnect_popup_count: 0,
+    exact_connect_count: 0,
+    reclaim_attempted: false,
+    reclaim_succeeded: false,
+    reclaim_click_count: 0,
   });
   assert.equal(client.calls, 1);
 });
 
 test('clicks Connect once and waits for the modal to disappear', async () => {
   const client = new FakeClient([
-    { state: 'clicked' },
-    { state: 'not-present' },
+    {
+      state: 'clicked',
+      disconnect_popup_count: 1,
+      exact_connect_count: 1,
+    },
+    {
+      state: 'not-present',
+      disconnect_popup_count: 0,
+      exact_connect_count: 0,
+    },
   ]);
 
   assert.deepEqual(await recoverDisconnectedSession(client, {
     pollCount: 1,
     pollDelayMs: 0,
-  }), { state: 'reclaimed' });
+  }), {
+    state: 'reclaimed',
+    session_state: 'reclaimed',
+    disconnect_popup_count: 1,
+    exact_connect_count: 1,
+    reclaim_attempted: true,
+    reclaim_succeeded: true,
+    reclaim_click_count: 1,
+  });
   assert.equal(client.calls, 2);
 });
 
 test('fails closed when the Connect action is ambiguous', async () => {
   const client = new FakeClient([
-    { state: 'blocked', reason: 'connect-button-not-unique' },
+    {
+      state: 'blocked',
+      reason: 'connect-button-not-unique',
+      disconnect_popup_count: 1,
+      exact_connect_count: 2,
+    },
   ]);
 
   await assert.rejects(
@@ -54,8 +85,16 @@ test('fails closed when the Connect action is ambiguous', async () => {
 
 test('fails closed when the modal does not clear after the bounded poll', async () => {
   const client = new FakeClient([
-    { state: 'clicked' },
-    { state: 'clicked' },
+    {
+      state: 'clicked',
+      disconnect_popup_count: 1,
+      exact_connect_count: 1,
+    },
+    {
+      state: 'clicked',
+      disconnect_popup_count: 1,
+      exact_connect_count: 1,
+    },
   ]);
 
   await assert.rejects(
@@ -63,6 +102,19 @@ test('fails closed when the modal does not clear after the bounded poll', async 
     /Disconnected-session recovery timed out/,
   );
   assert.equal(client.calls, 2);
+});
+
+test('rejects inconsistent no-popup evidence', async () => {
+  const client = new FakeClient([{
+    state: 'not-present',
+    disconnect_popup_count: 1,
+    exact_connect_count: 0,
+  }]);
+
+  await assert.rejects(
+    recoverDisconnectedSession(client, { pollDelayMs: 0 }),
+    /inconsistent no-popup evidence/,
+  );
 });
 
 test('recognizes the exact modal family and exact Connect action', () => {
