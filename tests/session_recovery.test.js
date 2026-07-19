@@ -230,6 +230,24 @@ test('fails closed when disconnect text is visible without a bounded Connect con
   });
 });
 
+test('does not bind disconnect text to an unrelated global Connect action', () => {
+  const { result, fixture } = evaluateRecoveryExpression(({ body, append }) => {
+    const app = append(body, 'div', 'x'.repeat(2200), 'application-root');
+    const popup = append(app, 'div', '', 'wrapper-TjF5uzX4');
+    append(popup, 'div', 'Session disconnected', 'main-SiBYNi_V');
+    const connect = append(app, 'button', 'Connect', 'global-connect');
+    return { connect };
+  });
+
+  assert.deepEqual({ ...result }, {
+    state: 'blocked',
+    reason: 'disconnect-popup-container-not-found',
+    disconnect_popup_count: 1,
+    exact_connect_count: 1,
+  });
+  assert.equal(fixture.connect.clicks, 0);
+});
+
 test('recognizes the exact modal family and exact Connect action', () => {
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /another device/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /disconnection/);
@@ -237,6 +255,7 @@ test('recognizes the exact modal family and exact Connect action', () => {
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /querySelectorAll\('body \*'\)/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /deepestTextAnchors/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /nearestContainerWithConnect/);
+  assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /MAX_CONTAINER_TEXT_LENGTH/);
   assert.match(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /disconnect-popup-container-not-found/);
   assert.doesNotMatch(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\[class\*=\\?['"]modal/);
   assert.doesNotMatch(DISCONNECTED_SESSION_RECOVERY_EXPRESSION, /\[class\*=\\?['"]dialog/);
