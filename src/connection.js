@@ -6,11 +6,16 @@ import {
   requireObserverSession as requireSession,
   setObserverSession,
 } from './core/observer-session.js';
+import {
+  DisconnectedSessionRecoveryError,
+  recoverDisconnectedSession,
+} from './core/session-recovery.js';
 
 export { getObserverSession, requireObserverSession } from './core/observer-session.js';
 
 let client = null;
 let targetInfo = null;
+const sessionRecoveryEvidence = new WeakMap();
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
 
@@ -54,18 +59,91 @@ export function requireFinite(value, name) {
   return n;
 }
 
+async function recoverAndRecordSession(activeClient) {
+  const evidence = await recoverDisconnectedSession(activeClient);
+  sessionRecoveryEvidence.set(activeClient, evidence);
+  return evidence;
+}
+
+export function getSessionRecoveryEvidence(activeClient) {
+  const evidence = sessionRecoveryEvidence.get(activeClient);
+  return evidence ? { ...evidence } : null;
+}
+
 export async function getClient() {
   if (client) {
     try {
       // Quick liveness check
       await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await recoverAndRecordSession(client);
       return client;
-    } catch {
-      client = null;
-      targetInfo = null;
+    } catch (error) {
+      if (error instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw error;
+      }
+      await disconnect();
     }
   }
   return connect();
+}
+
+/**
+ * Return a client for one already-prepared observer binding.
+ * Unlike the general client path, this path performs no reconnect retry loop.
+ */
+export async function getBoundClient() {
+  const session = requireSession();
+  const target = await findChartTarget(session);
+  if (!target) throw new Error('Bound observer chart target is unavailable. Re-run tv_observer_prepare.');
+
+  if (client) {
+    if (targetInfo?.id !== target.id || targetInfo?.url !== target.url) {
+      await disconnect();
+      throw new Error(`Bound observer chart target ${session.chartTargetId} changed or is unavailable. Re-run tv_observer_prepare.`);
+    }
+    try {
+      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await recoverAndRecordSession(client);
+      return client;
+    } catch (error) {
+      if (error instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw error;
+      }
+      await disconnect();
+    }
+  }
+
+  targetInfo = target;
+  client = await CDP({ target: target.webSocketDebuggerUrl, local: true });
+  try {
+    await client.Runtime.enable();
+    await client.Page.enable();
+    await client.DOM.enable();
+    await recoverAndRecordSession(client);
+  } catch (error) {
+    await disconnect();
+    throw error;
+  }
+  return client;
+}
+
+export async function evaluateBound(expression, opts = {}) {
+  const c = await getBoundClient();
+  const result = await c.Runtime.evaluate({
+    expression,
+    returnByValue: true,
+    awaitPromise: opts.awaitPromise ?? false,
+    ...opts,
+  });
+  if (result.exceptionDetails) {
+    const msg = result.exceptionDetails.exception?.description
+      || result.exceptionDetails.text
+      || 'Unknown evaluation error';
+    throw new Error(`JS evaluation error: ${msg}`);
+  }
+  return result.result?.value;
 }
 
 export async function invalidateObserverSession() {
@@ -108,9 +186,14 @@ export async function connect() {
       await client.Runtime.enable();
       await client.Page.enable();
       await client.DOM.enable();
+      await recoverAndRecordSession(client);
 
       return client;
     } catch (err) {
+      if (err instanceof DisconnectedSessionRecoveryError) {
+        await disconnect();
+        throw err;
+      }
       lastError = err;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));

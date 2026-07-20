@@ -2,7 +2,13 @@
  * Core health/discovery/launch logic.
  */
 import CDP from 'chrome-remote-interface';
-import { getClient, getTargetInfo, evaluate, invalidateObserverSession } from '../connection.js';
+import {
+  getClient,
+  getSessionRecoveryEvidence,
+  getTargetInfo,
+  evaluate,
+  invalidateObserverSession,
+} from '../connection.js';
 import { launchCloakProfile, resolveCloakManagerBaseUrl } from './cloak.js';
 import { existsSync } from 'fs';
 import { execSync, spawn } from 'child_process';
@@ -76,7 +82,11 @@ async function openChartTarget(cdpUrl, browserWsUrl) {
 }
 
 export async function healthCheck() {
-  await getClient();
+  const client = await getClient();
+  const recovery = getSessionRecoveryEvidence(client);
+  if (!recovery) {
+    throw new Error('Session recovery evidence is unavailable.');
+  }
   const target = await getTargetInfo();
 
   const state = await evaluate(`
@@ -109,6 +119,12 @@ export async function healthCheck() {
     chart_resolution: state?.resolution || 'unknown',
     chart_type: state?.chartType ?? null,
     api_available: state?.apiAvailable ?? false,
+    session_state: recovery.session_state,
+    disconnect_popup_count: recovery.disconnect_popup_count,
+    exact_connect_count: recovery.exact_connect_count,
+    reclaim_attempted: recovery.reclaim_attempted,
+    reclaim_succeeded: recovery.reclaim_succeeded,
+    reclaim_click_count: recovery.reclaim_click_count,
   };
 }
 

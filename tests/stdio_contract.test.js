@@ -71,7 +71,48 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
   assert.match(contract.manifestHash, /^[0-9a-f]{64}$/);
 
   await deadline(client.close(), observerCapabilityManifest.lifecycle.shutdownGraceMs, 'MCP close');
+  await transport.close();
+  transport.stderr?.destroy();
   assert.ok(stderrBytes <= observerCapabilityManifest.lifecycle.maxCapturedStderrBytes);
+});
+
+test('stdio health response preserves complete session reclaim evidence', async () => {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ['tests/fixtures/health-evidence-stdio.js'],
+    cwd: ROOT,
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'health-evidence-stdio-test', version: '1.0.0' });
+  await deadline(client.connect(transport), 500, 'health fixture initialize');
+
+  const response = await deadline(
+    client.callTool({ name: 'tv_health_check', arguments: {} }),
+    500,
+    'health fixture call',
+  );
+  const text = response.content.find((entry) => entry.type === 'text')?.text;
+  assert.equal(typeof text, 'string');
+  const health = JSON.parse(text);
+  assert.deepEqual({
+    session_state: health.session_state,
+    disconnect_popup_count: health.disconnect_popup_count,
+    exact_connect_count: health.exact_connect_count,
+    reclaim_attempted: health.reclaim_attempted,
+    reclaim_succeeded: health.reclaim_succeeded,
+    reclaim_click_count: health.reclaim_click_count,
+  }, {
+    session_state: 'reclaimed',
+    disconnect_popup_count: 1,
+    exact_connect_count: 1,
+    reclaim_attempted: true,
+    reclaim_succeeded: true,
+    reclaim_click_count: 1,
+  });
+  assert.deepEqual(response.structuredContent, health);
+
+  await client.close();
+  await transport.close();
 });
 
 test('closing stdio terminates the server process without an orphan', async () => {
@@ -152,3 +193,10 @@ async function waitForProcessExit(pid) {
   }
   throw new Error(`process ${pid} still alive`);
 }
+
+test.after(() => {
+  // Node's test worker keeps its IPC poller alive after the SDK's stdio
+  // transport closes. Preserve the runner's failure status while releasing it.
+  const exitCode = process.exitCode ?? 0;
+  setImmediate(() => process.exit(exitCode));
+});

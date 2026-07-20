@@ -64,7 +64,11 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('TradingView MCP — Full E2E (70 tools)', () => {
+describe('TradingView MCP — Full E2E (70 tools)', {
+  skip: process.env.TRADINGVIEW_MCP_RUN_LIVE_E2E !== '1'
+    ? 'live TradingView E2E disabled; run npm run test:live when explicitly authorized'
+    : false,
+}, () => {
 
   before(async () => {
     try {
