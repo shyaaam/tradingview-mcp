@@ -50,6 +50,34 @@ function _settingsFromInputValues(inputValues) {
   return settings;
 }
 
+function _valuesFromDisplayedValues(values) {
+  if (!values || typeof values !== 'object') return {};
+  if (Array.isArray(values)) {
+    return Object.fromEntries(
+      values
+        .filter(item => item && typeof item === 'object' && item.title != null)
+        .map(item => [String(item.title), item.value]),
+    );
+  }
+  return { ...values };
+}
+
+function _settingsEvidenceFromStudy(study) {
+  const inputSettings = _settingsFromInputValues(study?.inputs || []);
+  if (Object.keys(inputSettings).length > 0) {
+    return { settings: inputSettings, source: 'input_values', unavailable_reason: null };
+  }
+  const displayedValues = _valuesFromDisplayedValues(study?.values);
+  if (Object.keys(displayedValues).length > 0) {
+    return { settings: { values: displayedValues }, source: 'displayed_values', unavailable_reason: null };
+  }
+  return {
+    settings: {},
+    source: 'unavailable',
+    unavailable_reason: 'study did not expose input values or displayed values',
+  };
+}
+
 async function _selectScopedChart({ tab_index, pane_index, _deps }) {
   const { focusPane, switchTab } = _resolve(_deps);
   await switchTab({ index: tab_index });
@@ -69,7 +97,7 @@ async function _getStudyByName({ indicator_name, _deps }) {
         if (name === ${safeString(indicator_name.toLowerCase())}) {
           var study = chart.getStudyById(item.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          return { id: item.id, name: item.name || item.title || ${safeString(indicator_name)}, inputs: inputs };
+          return { id: item.id, name: item.name || item.title || ${safeString(indicator_name)}, inputs: inputs, values: item.values || item.description || null };
         }
       }
       return null;
@@ -97,7 +125,7 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
           if (!added) return resolve({ error: 'indicator was not added' });
           var study = chart.getStudyById(added.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputs });
+          resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputs, values: added.values || added.description || null });
         }, 1200);
       });
     })()
@@ -125,7 +153,12 @@ async function _updateIndicatorSettings({ entity_id, expected_settings, _deps })
       }
       study.setInputValues(currentInputs);
       var updated = study.getInputValues ? study.getInputValues() : currentInputs;
-      return { id: ${safeString(entity_id)}, previous: previous, inputs: updated };
+      var studies = chart.getAllStudies ? chart.getAllStudies() : [];
+      var studyMeta = null;
+      for (var i = 0; i < studies.length; i++) {
+        if (studies[i] && studies[i].id === ${safeString(entity_id)}) { studyMeta = studies[i]; break; }
+      }
+      return { id: ${safeString(entity_id)}, previous: previous, inputs: updated, values: studyMeta ? (studyMeta.values || studyMeta.description || null) : null };
     })()
   `);
   if (result?.error) throw new Error(result.error);
@@ -136,12 +169,8 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
   const { evaluate } = _resolve(_deps);
   const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
-  if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) {
-    throw new Error('inputs must be a non-empty object, e.g. { length: 50 }');
-  }
-
+  if (!inputs || typeof inputs !== 'object' || Object.keys(inputs).length === 0) throw new Error('inputs must be a non-empty object, e.g. { length: 50 }');
   const inputsJson = JSON.stringify(inputs);
-
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -160,7 +189,6 @@ export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
       return { updated_inputs: updatedKeys };
     })()
   `);
-
   if (result && result.error) throw new Error(result.error);
   return { success: true, entity_id, updated_inputs: result.updated_inputs };
 }
@@ -169,57 +197,42 @@ export async function toggleVisibility({ entity_id, visible, _deps }) {
   const { evaluate } = _resolve(_deps);
   if (!entity_id) throw new Error('entity_id is required. Use chart_get_state to find study IDs.');
   if (typeof visible !== 'boolean') throw new Error('visible must be a boolean (true or false)');
-
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
       var study = chart.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       study.setVisible(${visible});
-      var actualVisible = study.isVisible();
-      return { visible: actualVisible };
+      return { visible: study.isVisible() };
     })()
   `);
-
   if (result && result.error) throw new Error(result.error);
   return { success: true, entity_id, visible: result.visible };
 }
 
-export async function applyScopedPlanItem({
-  profile_id,
-  tab_index,
-  pane_index,
-  indicator_name,
-  expected_settings: expectedSettingsRaw,
-  action = 'apply_indicator',
-  _deps,
-}) {
+export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_settings: expectedSettingsRaw, action = 'apply_indicator', _deps }) {
   const scope = _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name });
   if (!SUPPORTED_SCOPED_ACTIONS.has(action)) throw new Error(`unsupported scoped indicator action: ${action}`);
   const expectedSettings = _parseObject(expectedSettingsRaw, 'expected_settings');
-
   const focusResult = await _selectScopedChart({ ...scope, _deps });
   const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
-  let previousSettings = existingStudy ? _settingsFromInputValues(existingStudy.inputs) : {};
+  const previousEvidence = existingStudy ? _settingsEvidenceFromStudy(existingStudy) : { settings: {}, source: 'absent', unavailable_reason: null };
   let appliedStudy;
-
   if (action === 'apply_indicator') {
-    appliedStudy = await _applyIndicator({
-      indicator_name: scope.indicator_name,
-      expected_settings: expectedSettings,
-      _deps,
-    });
+    appliedStudy = await _applyIndicator({ indicator_name: scope.indicator_name, expected_settings: expectedSettings, _deps });
   } else {
     if (!existingStudy) throw new Error(`indicator not found for update: ${scope.indicator_name}`);
-    appliedStudy = await _updateIndicatorSettings({
-      entity_id: existingStudy.id,
-      expected_settings: expectedSettings,
-      _deps,
-    });
-    previousSettings = appliedStudy.previous || previousSettings;
+    appliedStudy = await _updateIndicatorSettings({ entity_id: existingStudy.id, expected_settings: expectedSettings, _deps });
+    if (appliedStudy.previous && Object.keys(appliedStudy.previous).length > 0) {
+      previousEvidence.settings = appliedStudy.previous;
+      previousEvidence.source = 'input_values';
+      previousEvidence.unavailable_reason = null;
+    }
   }
-
-  const newSettings = _settingsFromInputValues(appliedStudy.inputs);
+  const newEvidence = _settingsEvidenceFromStudy(appliedStudy);
+  const unavailableReasons = {};
+  if (previousEvidence.unavailable_reason) unavailableReasons.previous_settings = previousEvidence.unavailable_reason;
+  if (newEvidence.unavailable_reason) unavailableReasons.new_settings = newEvidence.unavailable_reason;
   return {
     success: true,
     profile_id: scope.profile_id,
@@ -229,8 +242,11 @@ export async function applyScopedPlanItem({
     action,
     applied: true,
     entity_id: appliedStudy.id || null,
-    previous_settings: previousSettings,
-    new_settings: newSettings,
+    previous_settings: previousEvidence.settings,
+    new_settings: newEvidence.settings,
+    previous_settings_source: previousEvidence.source,
+    new_settings_source: newEvidence.source,
+    settings_unavailable_reason: unavailableReasons,
     focus: focusResult,
     message: 'scoped indicator plan item applied',
   };
