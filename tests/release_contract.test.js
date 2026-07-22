@@ -65,6 +65,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_prepare',
     'tv_observer_identity',
     'tv_observer_capture_candle',
+    'tv_observer_capture_telemetry_ohlcv',
     'tab_list',
     'tab_new',
     'tab_switch',
@@ -144,6 +145,23 @@ test('observer result fixtures satisfy registered output schemas', () => {
       close: 105,
       volume: 1234,
       adapter_version: 'tradingview-mcp-observer-v1',
+    },
+    tv_observer_capture_telemetry_ohlcv: {
+      success: true,
+      extraction_version: 'observer-telemetry-ohlcv-v1',
+      symbol: 'AAPL',
+      timeframe: '60',
+      requested_count: 2,
+      captured_at: '2026-07-17T10:00:01Z',
+      candles: [
+        { opened_at: '2026-07-17T08:00:00Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' },
+        { opened_at: '2026-07-17T09:00:00Z', open: '105', high: '112', low: '101', close: '111', volume: null },
+      ],
+      studies: [{
+        study_id: 'study-rsi',
+        study_name: 'RSI',
+        values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }],
+      }],
     },
     tab_list: tabs,
     tab_new: { ...tabs, action: 'new_tab_opened' },
@@ -307,7 +325,10 @@ function schemaFor(shape, strip = false) {
       properties: {},
     };
   }
-  const schema = toJSONSchema(z.object(shape), { target: 'draft-07' });
+  const schema = toJSONSchema(z.object(shape), {
+    target: 'draft-07',
+    io: strip ? 'input' : 'output',
+  });
   return strip ? stripRuntimeDefaults(schema) : schema;
 }
 

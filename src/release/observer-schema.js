@@ -147,6 +147,39 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: observerCaptureCandleInput,
     outputSchema: observerCaptureCandleOutput,
   },
+  tv_observer_capture_telemetry_ohlcv: {
+    classification: 'read_only',
+    inputSchema: {
+      symbol: z.string().min(1),
+      timeframe: z.string().min(1),
+      count: z.coerce.number().int().positive().max(500),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      extraction_version: z.literal('observer-telemetry-ohlcv-v1'),
+      symbol: z.string().min(1),
+      timeframe: z.string().min(1),
+      requested_count: z.number().int().positive().max(500),
+      captured_at: z.string().datetime(),
+      candles: z.array(z.object({
+        opened_at: z.string().datetime(),
+        open: z.string(),
+        high: z.string(),
+        low: z.string(),
+        close: z.string(),
+        volume: z.string().nullable(),
+      })).min(1).max(500),
+      studies: z.array(z.object({
+        study_id: z.string().min(1),
+        study_name: z.string().min(1),
+        values: z.array(z.object({
+          source_label: z.string().min(1),
+          field_label: z.string().min(1),
+          raw_value: z.string(),
+        })),
+      })),
+    },
+  },
   tab_list: {
     classification: 'read_only',
     inputSchema: emptyInput,

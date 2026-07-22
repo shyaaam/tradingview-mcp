@@ -7,6 +7,7 @@ import {
 } from '../src/core/observer-session.js';
 import {
   captureCandle,
+  captureTelemetryOhlcv,
   identity,
 } from '../src/core/observer-evidence.js';
 import { registerObserverTool } from '../src/release/observer-schema.js';
@@ -126,6 +127,45 @@ test('candle capture refuses missing, duplicate, and non-finite readback', async
       /Requested candle|non-finite/,
     );
   }
+});
+
+test('bounded telemetry OHLCV extraction preserves exact binding and raw strings', async () => {
+  setObserverSession(session);
+  let expression;
+  const result = await captureTelemetryOhlcv({
+    symbol: 'NASDAQ:AAPL',
+    timeframe: '60',
+    count: 2,
+    _deps: {
+      evaluateBound: async (value) => {
+        expression = value;
+        return {
+          symbol: 'NASDAQ:AAPL',
+          timeframe: '60',
+          candles: [
+            { opened_at: '2026-07-17T08:00:00.000Z', open: '100.00', high: '110', low: '95', close: '105.25', volume: '1234' },
+            { opened_at: '2026-07-17T09:00:00.000Z', open: '105.25', high: '112', low: '101', close: '111', volume: null },
+          ],
+          studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3400' }] }],
+        };
+      },
+      now: () => new Date('2026-07-17T10:00:01Z'),
+    },
+  });
+  assert.equal(result.extraction_version, 'observer-telemetry-ohlcv-v1');
+  assert.equal(result.requested_count, 2);
+  assert.equal(result.candles[0].open, '100.00');
+  assert.equal(result.studies[0].values[0].raw_value, '52.3400');
+  assert.match(expression, /actualSymbol/);
+  assert.match(expression, /actualTimeframe/);
+  assert.match(expression, /end - 2 \+ 1/);
+  assert.doesNotMatch(expression, /setSymbol|setResolution|capture_screenshot/);
+});
+
+test('bounded telemetry OHLCV extraction fails closed on invalid count and binding errors', async () => {
+  setObserverSession(session);
+  await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 501 }), /between 1 and 500/);
+  await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 2, _deps: { evaluateBound: async () => ({ error: 'Bound chart symbol or timeframe does not match the requested extraction.' }) } }), /does not match/);
 });
 
 test('identity registration rejects unexpected arguments', async () => {
