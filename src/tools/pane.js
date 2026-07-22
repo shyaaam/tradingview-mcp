@@ -9,6 +9,20 @@ export function registerPaneTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'pane_probe_layout_capability', 'Probe one exact TradingView pane layout capability and restore the prior layout', async ({ pane_count, timeout_ms, poll_interval_ms, stable_polls, validate_focus }) => {
+    try {
+      return jsonResult(await core.probeLayoutCapability({
+        paneCount: pane_count,
+        timeoutMs: timeout_ms,
+        pollIntervalMs: poll_interval_ms,
+        stablePolls: stable_polls,
+        validateFocus: validate_focus,
+      }));
+    } catch (err) {
+      return jsonResult({ success: false, error: err.message }, true);
+    }
+  });
+
   server.tool('pane_set_layout', 'Change the chart grid layout (e.g., single, 2x2, 2h, 3v)', {
     layout: z.string().describe('Layout code: s (single), 2h, 2v, 2-1, 1-2, 3h, 3v, 4 (2x2), 6, 8. Also accepts: single, 2x1, 1x2, 2x2, quad'),
   }, async ({ layout }) => {
