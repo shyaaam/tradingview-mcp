@@ -40,8 +40,9 @@ export async function list() {
       if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
 
       var all = cwc.getAll();
+      var visibleCount = Number(count);
       var panes = [];
-      for (var i = 0; i < all.length; i++) {
+      for (var i = 0; i < all.length && i < visibleCount; i++) {
         try {
           var c = all[i];
           var model = c.model ? c.model() : null;
@@ -55,7 +56,7 @@ export async function list() {
       // Check which pane is active
       var activeChart = window.TradingViewApi._activeChartWidgetWV.value();
       var activeIndex = null;
-      for (var j = 0; j < all.length; j++) {
+      for (var j = 0; j < all.length && j < visibleCount; j++) {
         try {
           if (all[j].model && activeChart._chartWidget && all[j] === activeChart._chartWidget) { activeIndex = j; break; }
         } catch(e) {}
