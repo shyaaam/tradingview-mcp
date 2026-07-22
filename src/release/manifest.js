@@ -16,6 +16,7 @@ const CAPABILITY_NAMES = [
   'tab_new',
   'tab_switch',
   'pane_list',
+  'pane_probe_layout_capability',
   'chart_get_state',
   'chart_set_symbol',
   'chart_set_timeframe',
@@ -63,7 +64,10 @@ function jsonSchema(shape, { stripRuntimeDefaults: strip = false } = {}) {
       properties: {},
     };
   }
-  const schema = toJSONSchema(z.object(shape), { target: 'draft-07' });
+  const schema = toJSONSchema(z.object(shape), {
+    target: 'draft-07',
+    io: strip ? 'input' : 'output',
+  });
   return strip ? removeRuntimeDefaults(schema) : schema;
 }
 
