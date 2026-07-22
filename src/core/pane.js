@@ -6,7 +6,7 @@ import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
 
-const LAYOUT_NAMES = {
+export const LAYOUT_NAMES = {
   's': '1 chart',
   '2h': '2 horizontal',
   '2v': '2 vertical',
@@ -134,6 +134,158 @@ export async function focus({ index }) {
  * Set the symbol on a specific pane by index.
  * Works by focusing the pane, then using the active chart's setSymbol.
  */
+export const PANE_CAPABILITY_LAYOUTS = Object.freeze({
+  1: 's',
+  2: '2h',
+  4: '4',
+  8: '8',
+  16: '16',
+});
+
+/**
+ * Probe one exact TradingView pane capability and restore the prior layout.
+ * The probe returns supported=false for a clean subscription/layout mismatch,
+ * while unstable state, focus failure, and restoration failure are explicit.
+ */
+export async function probeLayoutCapability({
+  paneCount,
+  timeoutMs = 5000,
+  pollIntervalMs = 200,
+  stablePolls = 2,
+  validateFocus = true,
+}, operations = {}) {
+  const requestedPaneCount = Number(paneCount);
+  const requestedLayout = PANE_CAPABILITY_LAYOUTS[requestedPaneCount];
+  if (!requestedLayout) throw new Error(`Unsupported capability probe pane count: ${paneCount}`);
+  const timeout = Number(timeoutMs);
+  const interval = Number(pollIntervalMs);
+  const requiredStablePolls = Number(stablePolls);
+  if (!Number.isInteger(timeout) || timeout <= 0) throw new Error('timeoutMs must be a positive integer');
+  if (!Number.isInteger(interval) || interval <= 0) throw new Error('pollIntervalMs must be a positive integer');
+  if (!Number.isInteger(requiredStablePolls) || requiredStablePolls <= 0) throw new Error('stablePolls must be a positive integer');
+
+  const read = operations.list || list;
+  const mutateLayout = operations.setLayout || setLayout;
+  const focusPane = operations.focus || focus;
+  const sleep = operations.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = operations.now || (() => Date.now());
+
+  const before = await read();
+  const previousLayout = String(before.layout);
+  let observed = before;
+  let supported = false;
+  let stable = false;
+  let focusValidated = !validateFocus;
+  let failureReason = null;
+  let mutationError = null;
+  let restorationAttempted = false;
+  let restorationSucceeded = false;
+  let restored = null;
+  let stableCount = 0;
+  let priorSignature = null;
+  const observations = [];
+
+  try {
+    try {
+      await mutateLayout({ layout: requestedLayout });
+    } catch (error) {
+      mutationError = error instanceof Error ? error.message : String(error);
+      failureReason = 'layout_mutation_failed';
+    }
+
+    if (mutationError === null) {
+      const deadline = now() + timeout;
+      while (now() <= deadline) {
+        observed = await read();
+        const signature = JSON.stringify({
+          layout: String(observed.layout),
+          chart_count: Number(observed.chart_count),
+          pane_indexes: observed.panes.map((pane) => pane.index),
+        });
+        observations.push({
+          layout: String(observed.layout),
+          chart_count: Number(observed.chart_count),
+          active_index: observed.active_index,
+          panes: observed.panes,
+        });
+        stableCount = signature === priorSignature ? stableCount + 1 : 1;
+        priorSignature = signature;
+        if (Number(observed.chart_count) === requestedPaneCount && observed.panes.length === requestedPaneCount && stableCount >= requiredStablePolls) {
+          stable = true;
+          supported = true;
+          break;
+        }
+        await sleep(interval);
+      }
+      if (!stable) failureReason = 'requested_layout_not_observed';
+    }
+
+    if (supported && validateFocus) {
+      for (let index = 0; index < requestedPaneCount; index += 1) {
+        await focusPane({ index });
+        const focused = await read();
+        observations.push({
+          layout: String(focused.layout),
+          chart_count: Number(focused.chart_count),
+          active_index: focused.active_index,
+          panes: focused.panes,
+        });
+        if (focused.active_index !== index) {
+          supported = false;
+          failureReason = 'pane_focus_validation_failed';
+          break;
+        }
+      }
+      focusValidated = supported;
+    }
+  } catch (error) {
+    supported = false;
+    failureReason = failureReason || 'probe_failed';
+    mutationError = mutationError || (error instanceof Error ? error.message : String(error));
+  } finally {
+    restorationAttempted = true;
+    try {
+      await mutateLayout({ layout: previousLayout });
+      const deadline = now() + timeout;
+      while (now() <= deadline) {
+        restored = await read();
+        if (String(restored.layout) === previousLayout && Number(restored.chart_count) === Number(before.chart_count)) {
+          restorationSucceeded = true;
+          break;
+        }
+        await sleep(interval);
+      }
+    } catch (error) {
+      mutationError = mutationError || (error instanceof Error ? error.message : String(error));
+    }
+    if (!restorationSucceeded) {
+      supported = false;
+      failureReason = 'layout_restoration_failed';
+    }
+  }
+
+  return {
+    success: true,
+    probe_version: 'pane-layout-capability-probe-v1',
+    requested_layout: requestedLayout,
+    requested_pane_count: requestedPaneCount,
+    observed_layout: String(observed.layout),
+    observed_pane_count: Number(observed.chart_count),
+    supported,
+    stable,
+    focus_validation_requested: Boolean(validateFocus),
+    focus_validated: focusValidated,
+    restoration_attempted: restorationAttempted,
+    restoration_succeeded: restorationSucceeded,
+    failure_reason: failureReason,
+    error_detail: mutationError,
+    before,
+    observed,
+    restored,
+    observations,
+  };
+}
+
 export async function setSymbol({ index, symbol }) {
   const idx = Number(index);
 
