@@ -325,7 +325,10 @@ function schemaFor(shape, strip = false) {
       properties: {},
     };
   }
-  const schema = toJSONSchema(z.object(shape), { target: 'draft-07' });
+  const schema = toJSONSchema(z.object(shape), {
+    target: 'draft-07',
+    io: strip ? 'input' : 'output',
+  });
   return strip ? stripRuntimeDefaults(schema) : schema;
 }
 
