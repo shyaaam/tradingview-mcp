@@ -1,3 +1,4 @@
+import CDP from 'chrome-remote-interface';
 import { bindObserverSession, invalidateObserverSession } from '../connection.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 
@@ -15,7 +16,7 @@ export async function hydrateChartTarget(input = {}) {
   if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for chart target hydration.');
   const profile = await loadExactProfile(managerBaseUrl, profileId);
   const cdpUrl = await ensureProfileRunning(managerBaseUrl, profileId, profile);
-  await waitForVersion(cdpUrl);
+  const version = await waitForVersion(cdpUrl);
 
   const before = await listTargets(cdpUrl);
   const exactBefore = exactTargets(before, chartUrl, savedChartId);
@@ -24,9 +25,13 @@ export async function hydrateChartTarget(input = {}) {
   let target = exactBefore[0] || null;
   let navigationPerformed = false;
   if (!target) {
-    const created = await createTarget(cdpUrl, chartUrl);
+    const created = await (input._deps?.createTarget || createTarget)({
+      cdpUrl,
+      browserWebSocketUrl: version.webSocketDebuggerUrl,
+      chartUrl,
+    });
     navigationPerformed = true;
-    target = await waitForExactTarget(cdpUrl, created?.id, chartUrl, savedChartId);
+    target = await waitForExactTarget(cdpUrl, created?.targetId || created?.id, chartUrl, savedChartId);
   }
   if (!target) throw new Error('Authorized chart target hydration did not produce an exact target.');
 
@@ -94,8 +99,16 @@ async function ensureProfileRunning(managerBaseUrl, profileId, profile) {
   return new URL(value, `${managerBaseUrl}/`).toString().replace(/\/$/, '');
 }
 
-async function createTarget(cdpUrl, chartUrl) {
-  return fetchJson(new URL(`json/new?${encodeURIComponent(chartUrl)}`, `${cdpUrl}/`).toString(), { method: 'PUT' });
+async function createTarget({ browserWebSocketUrl, chartUrl }) {
+  if (typeof browserWebSocketUrl !== 'string' || browserWebSocketUrl.trim() === '') {
+    throw new Error('Profile CDP browser endpoint is unavailable for exact chart target hydration.');
+  }
+  const browserClient = await CDP({ target: browserWebSocketUrl, local: true });
+  try {
+    return await browserClient.Target.createTarget({ url: chartUrl });
+  } finally {
+    try { await browserClient.close(); } catch { /* preserve creation result */ }
+  }
 }
 
 async function waitForVersion(cdpUrl, attempts = 20) {

@@ -22,7 +22,7 @@ function startFakeManager({ initialTarget = null, loginAfterCreate = false } = {
     if (request.url === '/api/profiles') {
       return body([{ id: profileId, status: 'running', cdp_url: `http://127.0.0.1:${server.address().port}/cdp` }]);
     }
-    if (request.url === '/cdp/json/version') return body({ Browser: 'fake' });
+    if (request.url === '/cdp/json/version') return body({ Browser: 'fake', webSocketDebuggerUrl: 'ws://fake-browser' });
     if (request.url === '/cdp/json/list') return body(target ? [target] : []);
     if (request.url?.startsWith('/cdp/json/new?')) {
       createCount += 1;
@@ -37,6 +37,8 @@ function startFakeManager({ initialTarget = null, loginAfterCreate = false } = {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({
     server,
     baseUrl: `http://127.0.0.1:${server.address().port}/api`,
+    recordCreate() { createCount += 1; },
+    setTarget(value) { target = value; },
     get createCount() { return createCount; },
   })));
 }
@@ -96,6 +98,12 @@ test('creates missing exact target once and replays without navigation', async (
   const previousBaseUrl = process.env.CLOAK_BROWSER_BASE_URL;
   process.env.CLOAK_BROWSER_BASE_URL = fake.baseUrl;
   try {
+    const createTarget = async ({ chartUrl }) => {
+      fake.recordCreate();
+      const created = { id: 'target-created', type: 'page', url: chartUrl };
+      fake.setTarget(created);
+      return created;
+    };
     const first = await hydrateChartTarget({
       profile_id: profileId,
       authority_id: authorityId,
@@ -103,6 +111,7 @@ test('creates missing exact target once and replays without navigation', async (
       chart_url: 'https://www.tradingview.com/chart/AbCd12',
       saved_chart_id: savedChartId,
       allowed_origins: origins,
+      _deps: { createTarget },
     });
     const second = await hydrateChartTarget({
       profile_id: profileId,
@@ -126,8 +135,33 @@ test('creates missing exact target once and replays without navigation', async (
 });
 
 test('fails closed when missing target resolves to login', async () => {
-  await assert.rejects(
-    () => runHydration({ loginAfterCreate: true }),
-    /requires authenticated browser state/,
-  );
+  const fake = await startFakeManager();
+  const previousBaseUrl = process.env.CLOAK_BROWSER_BASE_URL;
+  process.env.CLOAK_BROWSER_BASE_URL = fake.baseUrl;
+  try {
+    await assert.rejects(
+      () => hydrateChartTarget({
+        profile_id: profileId,
+        authority_id: authorityId,
+        authority_hash: authorityHash,
+        chart_url: 'https://www.tradingview.com/chart/AbCd12',
+        saved_chart_id: savedChartId,
+        allowed_origins: origins,
+        _deps: {
+          createTarget: async () => {
+            fake.recordCreate();
+            const created = { id: 'target-login', type: 'page', url: 'https://www.tradingview.com/accounts/signin/' };
+            fake.setTarget(created);
+            return created;
+          },
+        },
+      }),
+      /requires authenticated browser state/,
+    );
+  } finally {
+    await invalidateObserverSession();
+    if (previousBaseUrl === undefined) delete process.env.CLOAK_BROWSER_BASE_URL;
+    else process.env.CLOAK_BROWSER_BASE_URL = previousBaseUrl;
+    await new Promise((resolve) => fake.server.close(resolve));
+  }
 });
