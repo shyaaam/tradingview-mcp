@@ -136,6 +136,30 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().nullable(),
     },
   },
+  tv_observer_hydrate_chart_target: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      authority_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      chart_url: z.string().url(),
+      saved_chart_id: z.string().min(1),
+      allowed_origins: z.array(z.string().url()).min(1),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      hydration_version: z.literal('chart-target-hydration-v1'),
+      authority_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      profile_id: z.string().min(1),
+      target_id: z.string().min(1),
+      target_url: z.string().url(),
+      saved_chart_id: z.string().min(1),
+      navigation_performed: z.boolean(),
+      authenticated: z.literal(true),
+      state: z.enum(['hydrated', 'existing-identical']),
+    },
+  },
   tv_observer_identity: {
     classification: 'read_only',
     inputSchema: emptyInput,
@@ -289,7 +313,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_hydrate_chart_target') {
       requireObserverSession();
     }
     return handler(args, extra);

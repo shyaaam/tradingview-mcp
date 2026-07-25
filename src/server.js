@@ -18,6 +18,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerChartTargetHydrationTool } from './tools/chart-target-hydration.js';
 import { buildObserverContract, SERVER_NAME, SERVER_VERSION } from './release/identity.js';
 import { installStdioLifecycle } from './release/lifecycle.js';
 
@@ -94,6 +95,7 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerChartTargetHydrationTool(server);
 
 const contract = buildObserverContract();
 const startupEvent = {
