@@ -130,8 +130,9 @@ async function listTargets(cdpUrl) {
 function exactTargets(targets, chartUrl, savedChartId) {
   return targets.filter((target) => {
     try {
-      const normalized = new URL(target.url).toString();
-      return normalized === chartUrl && target.url.match(SAVED_CHART_PATH)?.[1] === savedChartId;
+      const parsed = new URL(target.url);
+      const normalized = parsed.toString();
+      return normalized === chartUrl && parsed.pathname.match(SAVED_CHART_PATH)?.[1] === savedChartId;
     } catch { return false; }
   });
 }

@@ -23,6 +23,7 @@ import { registerObserverEvidenceTools } from '../src/tools/observer-evidence.js
 import { registerTabTools } from '../src/tools/tab.js';
 import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
+import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json');
@@ -63,6 +64,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_contract',
     'tv_health_check',
     'tv_observer_prepare',
+    'tv_observer_hydrate_chart_target',
     'tv_observer_identity',
     'tv_observer_capture_candle',
     'tv_observer_capture_telemetry_ohlcv',
@@ -96,6 +98,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerTabTools(fakeServer);
   registerPaneTools(fakeServer);
   registerChartTools(fakeServer);
+  registerChartTargetHydrationTool(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(registered.has(capability.name), true, `missing MCP tool: ${capability.name}`);
@@ -124,6 +127,19 @@ test('observer result fixtures satisfy registered output schemas', () => {
       success: true, manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', restart_requested: false,
       status: 'running', cdp_ready: true, cdp_url: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
       browser: 'Chrome/146', user_agent: 'test-agent', chart_target_id: 'chart-1', chart_target_url: 'https://www.tradingview.com/chart/x/',
+    },
+    tv_observer_hydrate_chart_target: {
+      success: true,
+      hydration_version: 'chart-target-hydration-v1',
+      authority_id: `chart-target-authority-v1:${'a'.repeat(64)}`,
+      authority_hash: 'b'.repeat(64),
+      profile_id: 'profile-a',
+      target_id: 'chart-1',
+      target_url: 'https://www.tradingview.com/chart/x/',
+      saved_chart_id: 'x',
+      navigation_performed: false,
+      authenticated: true,
+      state: 'existing-identical',
     },
     tv_observer_identity: {
       success: true,

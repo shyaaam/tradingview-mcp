@@ -10,6 +10,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_contract',
   'tv_health_check',
   'tv_observer_prepare',
+  'tv_observer_hydrate_chart_target',
   'tv_observer_identity',
   'tv_observer_capture_candle',
   'tv_observer_capture_telemetry_ohlcv',
