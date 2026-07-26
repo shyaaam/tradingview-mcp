@@ -20,7 +20,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
   const request = normalizeRequest(input);
   const deps = input._deps || {};
   const session = (deps.requireObserverSession || requireObserverSession)();
-  if (session.profileId !== request.profile_id || session.chartTargetId !== request.runtime_target_id) {
+  if (session.profileId !== request.profile_id || session.chartTargetId !== request.chart_target_id) {
     throw new Error('Prepared observer session does not match screenshot authority.');
   }
 
@@ -101,6 +101,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
     capture_version: OBSERVER_REVIEW_SCREENSHOT_VERSION,
     profile_id: request.profile_id,
     runtime_target_id: request.runtime_target_id,
+    chart_target_id: request.chart_target_id,
     symbol: request.symbol,
     timeframe: request.timeframe,
     source_candle_time: request.source_candle_time,
@@ -125,6 +126,7 @@ function normalizeRequest(input) {
   return {
     profile_id: requireSafeString(input.profile_id, 'profile_id', 160),
     runtime_target_id: requirePattern(input.runtime_target_id, 'runtime_target_id', DOMAIN_ID),
+    chart_target_id: requireSafeString(input.chart_target_id, 'chart_target_id', 200),
     symbol: requireSafeString(input.symbol, 'symbol', 160),
     timeframe: requirePattern(input.timeframe, 'timeframe', TIMEFRAME),
     source_candle_time: requirePattern(input.source_candle_time, 'source_candle_time', ISO_DATE_TIME),
