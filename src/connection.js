@@ -168,6 +168,7 @@ export async function updateObserverSessionTarget({ chartTargetId, chartTargetUr
     ...current,
     chartTargetId: chartTargetId.trim(),
     chartTargetUrl: chartTargetUrl.trim(),
+    reviewAuthority: undefined,
   });
 }
 

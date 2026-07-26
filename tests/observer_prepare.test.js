@@ -6,6 +6,7 @@ import { list as listTabs } from '../src/core/tab.js';
 import { getObserverSession, invalidateObserverSession, requireObserverSession } from '../src/connection.js';
 import { resolveCdpBaseUrl, resolveCloakProfileId } from '../src/core/cloak.js';
 import { registerObserverTool } from '../src/release/observer-schema.js';
+import { registerHealthTools } from '../src/tools/health.js';
 
 const BASE_URL = 'http://127.0.0.1:8080/api';
 const PROFILE_ID = 'profile-a';
@@ -82,6 +83,69 @@ test('observer preparation requires exact profile and never stops by default', a
   assert.equal(await resolveCloakProfileId(), PROFILE_ID);
   const readback = await listTabs();
   assert.equal(readback.tab_count, 1);
+});
+
+test('registered observer preparation preserves exact review authority', async () => {
+  const handlers = new Map();
+  registerHealthTools({
+    registerTool(name, _definition, handler) {
+      handlers.set(name, handler);
+    },
+    tool() {},
+  });
+  global.fetch = async (input) => {
+    const url = String(input);
+    if (url === `${BASE_URL}/profiles`) {
+      return response([{ id: PROFILE_ID, status: 'running', cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'chart-1', type: 'page', title: 'TradingView', url: 'https://www.tradingview.com/chart/abc' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const reviewAuthority = {
+    profile_id: PROFILE_ID,
+    runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+    chart_target_id: 'chart-1',
+    symbol: 'BINANCE:ADAUSDT',
+    timeframe: '5',
+    source_candle_time: '2026-07-26T19:25:00.000Z',
+    pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+    sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+    active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+    active_layout_transition_hash: 'e'.repeat(64),
+    tab_index: 0,
+    pane_index: 5,
+    mcp_release_commit: 'f'.repeat(40),
+    mcp_manifest_hash: '0'.repeat(64),
+  };
+
+  await handlers.get('tv_observer_prepare')({
+    profile_id: PROFILE_ID,
+    restart: false,
+    review_authority: reviewAuthority,
+  });
+
+  assert.deepEqual(getObserverSession()?.reviewAuthority, {
+    profileId: PROFILE_ID,
+    runtimeTargetId: reviewAuthority.runtime_target_id,
+    chartTargetId: 'chart-1',
+    symbol: reviewAuthority.symbol,
+    timeframe: reviewAuthority.timeframe,
+    sourceCandleTime: reviewAuthority.source_candle_time,
+    paneCapabilitySnapshotId: reviewAuthority.pane_capability_snapshot_id,
+    stickyPlacementEpochId: reviewAuthority.sticky_placement_epoch_id,
+    activeLayoutTransitionId: reviewAuthority.active_layout_transition_id,
+    activeLayoutTransitionHash: reviewAuthority.active_layout_transition_hash,
+    tabIndex: 0,
+    paneIndex: 5,
+    mcpReleaseCommit: reviewAuthority.mcp_release_commit,
+    mcpManifestHash: reviewAuthority.mcp_manifest_hash,
+  });
 });
 
 test('observer preparation rejects missing profile identity', async () => {

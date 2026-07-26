@@ -24,6 +24,7 @@ import { registerTabTools } from '../src/tools/tab.js';
 import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
+import { registerObserverScreenshotTool } from '../src/tools/observer-screenshot.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json');
@@ -67,6 +68,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_hydrate_chart_target',
     'tv_observer_identity',
     'tv_observer_capture_candle',
+    'tv_observer_capture_screenshot',
     'tv_observer_capture_telemetry_ohlcv',
     'tab_list',
     'tab_new',
@@ -99,6 +101,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerPaneTools(fakeServer);
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
+  registerObserverScreenshotTool(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(registered.has(capability.name), true, `missing MCP tool: ${capability.name}`);
@@ -161,6 +164,29 @@ test('observer result fixtures satisfy registered output schemas', () => {
       close: 105,
       volume: 1234,
       adapter_version: 'tradingview-mcp-observer-v1',
+    },
+    tv_observer_capture_screenshot: {
+      success: true,
+      capture_version: 'observer-review-screenshot-v1',
+      profile_id: 'profile-a',
+      runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+      chart_target_id: 'chart-1',
+      symbol: 'AAPL',
+      timeframe: '60',
+      source_candle_time: '2026-07-17T10:00:00.000Z',
+      pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+      sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+      active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+      active_layout_transition_hash: 'e'.repeat(64),
+      tab_index: 0,
+      pane_index: 0,
+      mcp_release_commit: COMMIT,
+      mcp_manifest_hash: 'f'.repeat(64),
+      captured_at: '2026-07-17T10:00:01.000Z',
+      content_type: 'image/png',
+      byte_length: 68,
+      sha256: '0'.repeat(64),
+      png_base64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
     },
     tv_observer_capture_telemetry_ohlcv: {
       success: true,
