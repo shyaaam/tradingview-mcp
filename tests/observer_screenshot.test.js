@@ -17,6 +17,7 @@ function input(overrides = {}) {
   return {
     profile_id: 'profile-1',
     runtime_target_id: ids.runtime,
+    chart_target_id: 'cdp-target-1',
     symbol: 'NASDAQ:AAPL',
     timeframe: '1h',
     source_candle_time: '2026-07-26T17:00:00.000Z',
@@ -30,13 +31,13 @@ function input(overrides = {}) {
     mcp_manifest_hash: '7'.repeat(64),
     format: 'png',
     _deps: {
-      requireObserverSession: () => ({ profileId: 'profile-1', chartTargetId: ids.runtime }),
+      requireObserverSession: () => ({ profileId: 'profile-1', chartTargetId: 'cdp-target-1' }),
       buildObserverContract: () => ({
         releaseReady: true,
         releaseCommit: '6'.repeat(40),
         manifestHash: '7'.repeat(64),
       }),
-      listTabs: async () => ({ tabs: [{ index: 0, id: ids.runtime }] }),
+      listTabs: async () => ({ tabs: [{ index: 0, id: 'cdp-target-1' }] }),
       listPanes: async () => ({
         active_index: 1,
         panes: [{ index: 1, symbol: 'NASDAQ:AAPL', resolution: '1h' }],
@@ -55,12 +56,17 @@ test('captures exact immutable observer screenshot authority', async () => {
   assert.equal(result.capture_version, 'observer-review-screenshot-v1');
   assert.equal(result.profile_id, 'profile-1');
   assert.equal(result.runtime_target_id, ids.runtime);
+  assert.equal(result.chart_target_id, 'cdp-target-1');
   assert.equal(result.byte_length, png.length);
   assert.equal(result.sha256, createHash('sha256').update(png).digest('hex'));
   assert.equal(result.png_base64, pngBase64);
 });
 
-test('fails closed on release, tab, pane, and source authority mismatch', async () => {
+test('fails closed on session, release, tab, pane, and source authority mismatch', async () => {
+  await assert.rejects(
+    captureObserverReviewScreenshot(input({ chart_target_id: 'cdp-target-2' })),
+    /Prepared observer session/,
+  );
   await assert.rejects(
     captureObserverReviewScreenshot(input({
       _deps: { ...input()._deps, buildObserverContract: () => ({ releaseReady: false }) },
