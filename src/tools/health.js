@@ -16,8 +16,8 @@ export function registerHealthTools(server, dependencies = {}) {
     }
   });
 
-  registerObserverTool(server, 'tv_observer_prepare', 'Prepare one explicit CloakBrowser Manager profile without local fallback or implicit profile selection', async ({ profile_id, restart }) => {
-    try { return jsonResult(await observer.prepare({ profile_id, restart })); }
+  registerObserverTool(server, 'tv_observer_prepare', 'Prepare one explicit CloakBrowser Manager profile without local fallback or implicit profile selection', async ({ profile_id, restart, review_authority }) => {
+    try { return jsonResult(await observer.prepare({ profile_id, restart, review_authority })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
