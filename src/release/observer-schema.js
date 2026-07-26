@@ -176,6 +176,7 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: {
       profile_id: z.string().min(1).max(160),
       runtime_target_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+      chart_target_id: z.string().min(1).max(200),
       symbol: z.string().min(1).max(160),
       timeframe: z.string().regex(/^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/),
       source_candle_time: z.string().datetime(),
@@ -194,6 +195,7 @@ export const observerToolDefinitions = Object.freeze({
       capture_version: z.literal('observer-review-screenshot-v1'),
       profile_id: z.string().min(1).max(160),
       runtime_target_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+      chart_target_id: z.string().min(1).max(200),
       symbol: z.string().min(1).max(160),
       timeframe: z.string().min(1).max(32),
       source_candle_time: z.string().datetime(),
