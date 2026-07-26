@@ -3,7 +3,8 @@ import { bindObserverSession, invalidateObserverSession } from '../connection.js
 
 const CHART_URL = /tradingview\.com\/chart/i;
 
-export async function prepare({ profile_id, restart = false } = {}) {
+export async function prepare(input = {}) {
+  const { profile_id, restart = false } = input;
   const profileId = String(profile_id || '').trim();
   if (!profileId) throw new Error('profile_id is required; observer preparation never auto-selects a profile.');
 
