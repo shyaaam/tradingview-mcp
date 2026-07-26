@@ -47,6 +47,7 @@ export async function prepare({ profile_id, restart = false } = {}) {
     cdpUrl,
     chartTargetId: chartTarget.id,
     chartTargetUrl: chartTarget.url,
+    reviewAuthority: input.review_authority,
   });
 
   return {

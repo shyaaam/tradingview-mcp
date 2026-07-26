@@ -24,6 +24,9 @@ const CAPABILITY_NAMES = [
   'chart_set_symbol',
   'chart_set_timeframe',
 ];
+if (new Set(CAPABILITY_NAMES).size !== CAPABILITY_NAMES.length) {
+  throw new Error('Observer capability manifest contains duplicate names.');
+}
 
 export const observerCapabilityManifest = deepFreeze({
   contractId: OBSERVER_CONTRACT_ID,

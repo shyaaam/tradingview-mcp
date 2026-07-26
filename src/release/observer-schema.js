@@ -121,6 +121,22 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: {
       profile_id: z.string().min(1).describe('Exact CloakBrowser Manager profile ID; never auto-selected.'),
       restart: z.boolean().optional().describe('Stop and relaunch exact profile before preparation (default false).'),
+      review_authority: z.object({
+        profile_id: z.string().min(1).max(160),
+        runtime_target_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+        chart_target_id: z.string().min(1).max(200),
+        symbol: z.string().min(1).max(160),
+        timeframe: z.string().regex(/^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/),
+        source_candle_time: z.string().datetime(),
+        pane_capability_snapshot_id: z.string().regex(/^pane-capability-snapshot-v1:[0-9a-f]{64}$/),
+        sticky_placement_epoch_id: z.string().regex(/^sticky-symbol-placement-epoch-v1:[0-9a-f]{64}$/),
+        active_layout_transition_id: z.string().regex(/^active-pane-layout-transition-v1:[0-9a-f]{64}$/),
+        active_layout_transition_hash: z.string().regex(/^[0-9a-f]{64}$/),
+        tab_index: z.number().int().nonnegative(),
+        pane_index: z.number().int().nonnegative(),
+        mcp_release_commit: z.string().regex(/^[0-9a-f]{40}$/),
+        mcp_manifest_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      }).optional(),
     },
     outputSchema: {
       success: z.literal(true),
