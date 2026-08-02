@@ -258,6 +258,23 @@ export async function disconnect() {
   }
 }
 
+/**
+ * Close the shared observer CDP client and preserve close failures for the
+ * owning process lifecycle. Ordinary request-path disconnects intentionally
+ * remain best-effort through disconnect().
+ */
+export async function disconnectStrict() {
+  if (!client) return;
+  const activeClient = client;
+  client = null;
+  targetInfo = null;
+  await closeClientStrict(activeClient);
+}
+
+export async function closeClientStrict(activeClient) {
+  if (activeClient) await activeClient.close();
+}
+
 // --- Direct API path helpers ---
 // Each returns the STRING expression path after verifying it exists.
 // Callers use the returned string in their own evaluate() calls.
