@@ -10,6 +10,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 import { observerCapabilityManifest } from '../src/release/manifest.js';
+import { closeClientStrict } from '../src/connection.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const COMMIT = String(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })).trim();
@@ -181,6 +182,16 @@ test('client disconnect during in-flight call still force-exits hung server clea
 
   await deadline(waitForProcessExit(pid), 500, 'in-flight forced shutdown');
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
+});
+
+test('strict observer client cleanup propagates close failure and closes once', async () => {
+  let closeCount = 0;
+  await closeClientStrict({ close: async () => { closeCount += 1; } });
+  assert.equal(closeCount, 1);
+  await assert.rejects(
+    closeClientStrict({ close: async () => { throw new Error('CDP close failed'); } }),
+    /CDP close failed/,
+  );
 });
 
 async function waitForProcessExit(pid) {
