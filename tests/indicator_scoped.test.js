@@ -8,7 +8,7 @@ import { applyScopedPlanItem, updateScopedSettings } from '../src/core/indicator
 function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, name: study.name, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
-    switchedTabs: [], focusedPanes: [], created: [],
+    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [],
   };
   return {
     state,
@@ -30,13 +30,16 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
         };
       },
       async evaluate(expression) {
+        state.evaluateCalls.push(expression);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
           const found = state.studies.find(study => study.name.toLowerCase() === name);
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
         }
-        if (expression.includes('chart.createStudy')) {
-          const name = expression.match(/chart.createStudy\("([^"]+)"/)?.[1] || 'Unknown';
+        if (expression.includes('insertStudyWithParams')) {
+          const name = expression.includes('Private No-Input Study')
+            ? 'Private No-Input Study'
+            : 'Relative Strength Index';
           const id = `study-${state.studies.length + 1}`;
           const inputs = [{ id: 'length', value: 14 }];
           state.studies.push({ id, name, inputs }); state.created.push({ id, name, inputs });
@@ -70,6 +73,14 @@ describe('scoped indicator plan primitives', () => {
     const result = await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Private No-Input Study', expected_settings: {}, _deps: deps });
     assert.equal(result.success, true);
     assert.equal(result.post_mutation_indicator.indicator_name, 'Private No-Input Study');
+  });
+
+  it('uses canonical pane metadata for scoped Pine study insertion', async () => {
+    const { deps, state } = makeDeps();
+    await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps });
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('canonicalMatches')));
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('insertStudyWithParams')));
+    assert.equal(state.created.length, 1);
   });
 
   it('updates indicator settings and returns previous/new scoped evidence', async () => {

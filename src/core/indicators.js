@@ -6,6 +6,7 @@ import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from
 import { switchTab as _switchTab } from './tab.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+const CHART_COLLECTION = 'window.TradingViewApi._chartWidgetCollection';
 
 const SUPPORTED_SCOPED_ACTIONS = new Set(['apply_indicator', 'update_indicator_settings']);
 
@@ -109,29 +110,84 @@ async function _getStudyByName({ indicator_name, _deps }) {
 
 async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
   const { evaluate } = _resolve(_deps);
-  const inputArr = Object.entries(expected_settings).map(([id, value]) => ({ id, value }));
-  const inputArrJson = JSON.stringify(inputArr);
+  const expectedSettingsJson = JSON.stringify(expected_settings);
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
+      var collection = ${CHART_COLLECTION};
+      var charts = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
+      var canonicalWidget = charts[0];
+      var canonicalModel = canonicalWidget && typeof canonicalWidget.model === 'function'
+        ? canonicalWidget.model().model()
+        : null;
+      var canonicalSources = canonicalModel && typeof canonicalModel.dataSources === 'function'
+        ? canonicalModel.dataSources()
+        : [];
+      var canonicalMatches = canonicalSources.filter(function(source) {
+        if (!source || typeof source.metaInfo !== 'function') return false;
+        var meta = source.metaInfo();
+        var name = String(meta && (meta.description || meta.shortDescription || '')).trim();
+        return name.toLowerCase() === ${safeString(indicator_name.trim().toLowerCase())};
+      });
+      if (canonicalMatches.length !== 1) {
+        return { error: 'scoped indicator add requires exactly one canonical pane indicator: ' + ${safeString(indicator_name)} };
+      }
+      var canonicalMeta = canonicalMatches[0].metaInfo();
+      var canonicalInputs = typeof canonicalMatches[0].inputs === 'function'
+        ? canonicalMatches[0].inputs()
+        : {};
+      if (!canonicalInputs || typeof canonicalInputs !== 'object' || Array.isArray(canonicalInputs)) {
+        return { error: 'scoped indicator add canonical inputs are unavailable: ' + ${safeString(indicator_name)} };
+      }
+      var expectedSettings = ${expectedSettingsJson};
+      var inputs = Object.assign({}, canonicalInputs);
+      Object.keys(expectedSettings).forEach(function(key) {
+        var value = expectedSettings[key];
+        if (value && typeof value === 'object' && !Array.isArray(value)
+          && Object.prototype.hasOwnProperty.call(value, 'v')
+          && Object.keys(value).every(function(field) { return field === 'f' || field === 't' || field === 'v'; })) {
+          inputs[key] = value.v;
+        } else {
+          inputs[key] = value;
+        }
+      });
+      var targetModel = chart && chart._chartWidget && typeof chart._chartWidget.model === 'function'
+        ? chart._chartWidget.model().model()
+        : null;
+      if (!targetModel || typeof targetModel.insertStudyWithParams !== 'function') {
+        return { error: 'scoped indicator add target study insertion is unavailable' };
+      }
       var before = chart.getAllStudies ? chart.getAllStudies().map(function(s) { return s.id; }) : [];
-      chart.createStudy(${safeString(indicator_name)}, false, false, ${inputArrJson});
-      return new Promise(function(resolve) {
-        setTimeout(function() {
-          var after = chart.getAllStudies ? chart.getAllStudies() : [];
-          var addedStudies = after.filter(function(study) {
-            return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
+      var insertion = targetModel.insertStudyWithParams({
+        studyMetaInfo: canonicalMeta,
+        inputs: inputs,
+        forceOverlay: canonicalMeta.is_price_study === true,
+      });
+      if (!insertion || !insertion.startPromise) {
+        return { error: 'scoped indicator add did not return an insertion handle' };
+      }
+      return Promise.resolve(insertion.startPromise).then(function() {
+        return Promise.resolve(insertion.study).then(function() {
+          return new Promise(function(resolve) {
+            setTimeout(function() {
+              var after = chart.getAllStudies ? chart.getAllStudies() : [];
+              var addedStudies = after.filter(function(study) {
+                return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
+              });
+              if (addedStudies.length !== 1) return resolve({ error: 'scoped indicator add did not produce exactly one identifiable study' });
+              var added = addedStudies[0];
+              var addedName = String(added.name || added.title || '').trim();
+              if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
+                return resolve({ error: 'scoped indicator add resolved an unexpected study name' });
+              }
+              var study = chart.getStudyById(added.id);
+              var inputValues = study && study.getInputValues ? study.getInputValues() : [];
+              resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputValues, values: added.values || added.description || null });
+            }, 1200);
           });
-          if (addedStudies.length !== 1) return resolve({ error: 'scoped indicator add did not produce exactly one identifiable study' });
-          var added = addedStudies[0];
-          var addedName = String(added.name || added.title || '').trim();
-          if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
-            return resolve({ error: 'scoped indicator add resolved an unexpected study name' });
-          }
-          var study = chart.getStudyById(added.id);
-          var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputs, values: added.values || added.description || null });
-        }, 1200);
+        });
+      }).catch(function(error) {
+        return { error: String(error && error.message ? error.message : error) };
       });
     })()
   `);
