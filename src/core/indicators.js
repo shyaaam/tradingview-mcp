@@ -203,6 +203,38 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
       var chart = ${CHART_API};
       var study = chart.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
+      var underlyingStudy = typeof study.study === 'function' ? study.study() : null;
+      var inputProperties = underlyingStudy && typeof underlyingStudy.properties === 'function'
+        ? underlyingStudy.properties()?.childs?.()?.inputs?.childs?.()
+        : null;
+      var inputMetadata = {};
+      try {
+        var metadata = underlyingStudy && typeof underlyingStudy.metaInfo === 'function' ? underlyingStudy.metaInfo() : null;
+        (metadata?.inputs || []).forEach(function(input) { if (input && input.id) inputMetadata[input.id] = input; });
+      } catch (_) {}
+      function propertyValue(key, value) {
+        var metadata = inputMetadata[key];
+        if (metadata?.type !== 'color' || typeof value !== 'number' || !Number.isFinite(value)) return value;
+        var integer = value >>> 0;
+        var alpha = ((integer >>> 24) & 255) / 255;
+        var alphaText = alpha === 1 ? '1' : String(Number(alpha.toFixed(6)));
+        return 'rgba(' + (integer & 255) + ',' + ((integer >>> 8) & 255) + ',' + ((integer >>> 16) & 255) + ',' + alphaText + ')';
+      }
+      function apiColorValue(value) {
+        if (typeof value !== 'string') return value;
+        var rgba = value.match(/^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?\\s*\\)$/i);
+        if (rgba) {
+          var alpha = rgba[4] === undefined ? 255 : Math.round(Number(rgba[4]) * 255);
+          return ((((alpha & 255) << 24) >>> 0) + ((Number(rgba[3]) & 255) << 16) + ((Number(rgba[2]) & 255) << 8) + (Number(rgba[1]) & 255)) >>> 0;
+        }
+        var hex = value.match(/^#([0-9a-f]{6})([0-9a-f]{2})?$/i);
+        if (hex) {
+          var rgb = hex[1];
+          var alpha = hex[2] === undefined ? 255 : parseInt(hex[2], 16);
+          return ((((alpha & 255) << 24) >>> 0) + parseInt(rgb.slice(0, 2), 16) + (parseInt(rgb.slice(2, 4), 16) << 8) + (parseInt(rgb.slice(4, 6), 16) << 16)) >>> 0;
+        }
+        return value;
+      }
       var currentInputs = study.getInputValues ? study.getInputValues() : [];
       var targetInputValuesAvailable = Array.isArray(currentInputs) && currentInputs.length > 0;
       var previous = {};
@@ -219,6 +251,7 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
       var missing = Object.keys(overrides).filter(function(key) {
         return !Array.isArray(currentInputs) || !currentInputs.some(function(input) { return input && input.id === key; });
       });
+      var usePublicInputSetter = targetInputValuesAvailable && missing.length === 0;
       if (missing.length > 0) {
         var collection = ${CHART_COLLECTION};
         var charts = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
@@ -259,12 +292,25 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
           return !currentInputs.some(function(input) { return input && input.id === key; });
         });
         if (restoredMissing.length > 0) return { error: 'scoped indicator update input(s) not found: ' + restoredMissing.join(',') };
+        if (!usePublicInputSetter && !targetInputValuesAvailable && inputProperties && typeof inputProperties === 'object'
+          && typeof canonicalMatches[0].properties === 'function') {
+          var canonicalPropertyState = canonicalMatches[0].properties()?.state?.()?.inputs;
+          if (!canonicalPropertyState || typeof canonicalPropertyState !== 'object') {
+            return { error: 'scoped indicator update canonical property state unavailable: ' + ${safeString(indicator_name)} };
+          }
+          Object.keys(canonicalPropertyState).forEach(function(key) {
+            if (key === 'first_visible_bar_time' || key === 'last_visible_bar_time' || key === 'subscribeRealtime') return;
+            if (inputProperties[key] && typeof inputProperties[key].setValue === 'function') {
+              inputProperties[key].setValue(canonicalPropertyState[key]);
+            }
+          });
+        }
       }
-      if (targetInputValuesAvailable) {
+      if (usePublicInputSetter) {
         for (var i = 0; i < currentInputs.length; i++) {
           if (overrides.hasOwnProperty(currentInputs[i].id)) {
             previous[currentInputs[i].id] = currentInputs[i].value;
-            currentInputs[i].value = overrides[currentInputs[i].id];
+            currentInputs[i].value = propertyValue(currentInputs[i].id, overrides[currentInputs[i].id]);
           }
         }
         study.setInputValues(currentInputs);
@@ -274,10 +320,6 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
         // The public setter intentionally ignores IDs absent from
         // getInputValues(), so restore only verified override IDs through the
         // study's own input property collection.
-        var underlyingStudy = typeof study.study === 'function' ? study.study() : null;
-        var inputProperties = underlyingStudy && typeof underlyingStudy.properties === 'function'
-          ? underlyingStudy.properties()?.childs?.()?.inputs?.childs?.()
-          : null;
         if (!inputProperties || typeof inputProperties !== 'object') {
           return { error: 'scoped indicator update target input properties unavailable: ' + ${safeString(indicator_name)} };
         }
@@ -293,10 +335,23 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
           previous[key] = priorValue && typeof priorValue === 'object' && Object.prototype.hasOwnProperty.call(priorValue, 'v')
             ? priorValue.v
             : priorValue;
-          property.setValue(overrides[key]);
+          property.setValue(propertyValue(key, overrides[key]));
         });
       }
       var updated = study.getInputValues ? study.getInputValues() : currentInputs;
+      if (!Array.isArray(updated) || updated.length === 0) {
+        var rawInputs = {};
+        try { rawInputs = underlyingStudy?.inputs?.({ asObject: true }) || {}; } catch (_) {}
+        if (!rawInputs || Object.keys(rawInputs).length === 0) {
+          try { rawInputs = underlyingStudy?.inputs?.({ asObject: true, valuesAsIsFromProperties: true }) || {}; } catch (_) {}
+        }
+        updated = Object.keys(rawInputs).map(function(key) {
+          var value = rawInputs[key];
+          if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'v')) value = value.v;
+          if (inputMetadata[key]?.type === 'color') value = apiColorValue(value);
+          return { id: key, value: value };
+        });
+      }
       var studies = chart.getAllStudies ? chart.getAllStudies() : [];
       var studyMeta = null;
       for (var i = 0; i < studies.length; i++) {
