@@ -204,6 +204,7 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
       var study = chart.getStudyById(${safeString(entity_id)});
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       var currentInputs = study.getInputValues ? study.getInputValues() : [];
+      var targetInputValuesAvailable = Array.isArray(currentInputs) && currentInputs.length > 0;
       var previous = {};
       var rawOverrides = ${settingsJson};
       var overrides = {};
@@ -259,13 +260,42 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
         });
         if (restoredMissing.length > 0) return { error: 'scoped indicator update input(s) not found: ' + restoredMissing.join(',') };
       }
-      for (var i = 0; i < currentInputs.length; i++) {
-        if (overrides.hasOwnProperty(currentInputs[i].id)) {
-          previous[currentInputs[i].id] = currentInputs[i].value;
-          currentInputs[i].value = overrides[currentInputs[i].id];
+      if (targetInputValuesAvailable) {
+        for (var i = 0; i < currentInputs.length; i++) {
+          if (overrides.hasOwnProperty(currentInputs[i].id)) {
+            previous[currentInputs[i].id] = currentInputs[i].value;
+            currentInputs[i].value = overrides[currentInputs[i].id];
+          }
         }
+        study.setInputValues(currentInputs);
+      } else {
+        // A partially corrupted TradingView study can expose no public input
+        // values even though its underlying property nodes remain repairable.
+        // The public setter intentionally ignores IDs absent from
+        // getInputValues(), so restore only verified override IDs through the
+        // study's own input property collection.
+        var underlyingStudy = typeof study.study === 'function' ? study.study() : null;
+        var inputProperties = underlyingStudy && typeof underlyingStudy.properties === 'function'
+          ? underlyingStudy.properties()?.childs?.()?.inputs?.childs?.()
+          : null;
+        if (!inputProperties || typeof inputProperties !== 'object') {
+          return { error: 'scoped indicator update target input properties unavailable: ' + ${safeString(indicator_name)} };
+        }
+        var missingInputProperties = Object.keys(overrides).filter(function(key) {
+          return !inputProperties[key] || typeof inputProperties[key].setValue !== 'function';
+        });
+        if (missingInputProperties.length > 0) {
+          return { error: 'scoped indicator update input(s) not found: ' + missingInputProperties.join(',') };
+        }
+        Object.keys(overrides).forEach(function(key) {
+          var property = inputProperties[key];
+          var priorValue = property.value();
+          previous[key] = priorValue && typeof priorValue === 'object' && Object.prototype.hasOwnProperty.call(priorValue, 'v')
+            ? priorValue.v
+            : priorValue;
+          property.setValue(overrides[key]);
+        });
       }
-      study.setInputValues(currentInputs);
       var updated = study.getInputValues ? study.getInputValues() : currentInputs;
       var studies = chart.getAllStudies ? chart.getAllStudies() : [];
       var studyMeta = null;

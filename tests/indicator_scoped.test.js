@@ -111,6 +111,11 @@ describe('scoped indicator plan primitives', () => {
       new_settings: 'study did not expose input values or displayed values',
     });
   });
+  it('includes underlying property restoration when public input values are empty', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'study-cvd', name: 'CVD', inputs: [] }] });
+    await updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 1, indicator_name: 'CVD', expected_settings: { in_11: 4278190208 }, _deps: deps });
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('underlyingStudy') && expression.includes('inputProperties')));
+  });
 
   it('blocks missing profile scope', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: '', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /profile_id is required/);
