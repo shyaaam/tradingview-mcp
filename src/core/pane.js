@@ -2,9 +2,16 @@
  * Core pane/layout management logic.
  * Controls multi-chart layouts (split panes) in TradingView.
  */
+import { createHash } from 'node:crypto';
 import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+export const PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION = 'pane-indicator-signatures-v1';
+const VOLATILE_INDICATOR_INPUT_KEYS = new Set([
+  'first_visible_bar_time',
+  'last_visible_bar_time',
+  'subscribeRealtime',
+]);
 
 export const LAYOUT_NAMES = {
   's': '1 chart',
@@ -74,6 +81,140 @@ export async function list() {
     active_index: result.active_index,
     panes: result.panes,
   };
+}
+
+/**
+ * Read every pane's indicator inventory without focusing or mutating a pane.
+ * Pane zero is the canonical inventory; pane indexes never enter signatures.
+ */
+export async function indicatorSignatures({ _deps } = {}) {
+  const evaluateFn = _deps?.evaluate || evaluate;
+  const raw = await evaluateFn(`
+    (function() {
+      var cwc = ${CWC};
+      var count = cwc && cwc.inlineChartsCount;
+      if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
+      var visibleCount = Number(count);
+      var all = cwc && typeof cwc.getAll === 'function' ? cwc.getAll() : [];
+      if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
+        return { error: 'TradingView pane indicator inventory is unavailable.' };
+      }
+      var panes = [];
+      for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
+        var widget = all[paneIndex];
+        var model = widget && typeof widget.model === 'function' ? widget.model() : null;
+        var chartModel = model && typeof model.model === 'function' ? model.model() : null;
+        var sources = chartModel && typeof chartModel.dataSources === 'function'
+          ? chartModel.dataSources()
+          : null;
+        if (!Array.isArray(sources)) {
+          return { error: 'TradingView pane indicator inventory is unavailable.' };
+        }
+        var indicators = [];
+        for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+          var source = sources[sourceIndex];
+          if (!source || typeof source.metaInfo !== 'function') continue;
+          var meta = source.metaInfo();
+          if (!meta || typeof meta.id !== 'string' || meta.id.length === 0) continue;
+          if (typeof source.inputs !== 'function') {
+            return { error: 'TradingView pane indicator settings are unavailable.' };
+          }
+          var settings;
+          try {
+            settings = source.inputs();
+            JSON.stringify(settings);
+          } catch (error) {
+            return { error: 'TradingView pane indicator settings are unavailable.' };
+          }
+          indicators.push({
+            indicator_id: meta.id,
+            indicator_name: String(meta.description || meta.shortDescription || meta.id),
+            is_price_study: meta.is_price_study === true,
+            settings: settings,
+          });
+        }
+        panes.push({ index: paneIndex, indicators: indicators });
+      }
+      return { pane_count: visibleCount, panes: panes };
+    })()
+  `);
+  if (!raw || typeof raw !== 'object' || raw.error) {
+    throw new Error(raw?.error || 'TradingView pane indicator inventory is unavailable.');
+  }
+  const paneCount = Number(raw.pane_count);
+  if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
+    throw new Error('TradingView pane indicator inventory is incompatible.');
+  }
+  const panes = raw.panes.map((pane, index) => {
+    if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
+      throw new Error('TradingView pane indicator inventory is incompatible.');
+    }
+    const indicators = pane.indicators.map((indicator) => normalizeIndicator(indicator));
+    indicators.sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+    return {
+      index,
+      signature: derivePaneIndicatorSignature(indicators),
+      indicators,
+    };
+  });
+  return {
+    success: true,
+    schema_version: PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION,
+    pane_count: paneCount,
+    canonical_pane_index: 0,
+    panes,
+  };
+}
+
+export function derivePaneIndicatorSignature(indicators) {
+  return createHash('sha256')
+    .update(canonicalJson({
+      schema_version: PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION,
+      indicators,
+    }), 'utf8')
+    .digest('hex');
+}
+
+function normalizeIndicator(indicator) {
+  if (!indicator || typeof indicator !== 'object' || Array.isArray(indicator)) {
+    throw new Error('TradingView pane indicator inventory is incompatible.');
+  }
+  const id = String(indicator.indicator_id || '').trim();
+  const name = String(indicator.indicator_name || '').trim();
+  if (!id || !name || typeof indicator.is_price_study !== 'boolean') {
+    throw new Error('TradingView pane indicator inventory is incompatible.');
+  }
+  return {
+    indicator_id: id,
+    indicator_name: name,
+    is_price_study: indicator.is_price_study,
+    settings: normalizeJsonValue(indicator.settings, 'indicator settings'),
+  };
+}
+
+function normalizeJsonValue(value, label) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error(`${label} contains a non-finite number.`);
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((entry) => normalizeJsonValue(entry, label));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .filter((key) => !VOLATILE_INDICATOR_INPUT_KEYS.has(key))
+        .sort()
+        .map((key) => [key, normalizeJsonValue(value[key], `${label}.${key}`)]),
+    );
+  }
+  throw new Error(`${label} is not JSON-compatible.`);
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
 }
 
 /**

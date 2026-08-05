@@ -19,6 +19,7 @@ const CAPABILITY_NAMES = [
   'tab_new',
   'tab_switch',
   'pane_list',
+  'pane_indicator_signatures',
   'pane_probe_layout_capability',
   'chart_get_state',
   'chart_set_symbol',

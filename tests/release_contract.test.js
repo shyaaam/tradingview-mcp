@@ -74,6 +74,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tab_new',
     'tab_switch',
     'pane_list',
+    'pane_indicator_signatures',
     'pane_probe_layout_capability',
     'chart_get_state',
     'chart_set_symbol',
@@ -211,6 +212,22 @@ test('observer result fixtures satisfy registered output schemas', () => {
     pane_list: {
       success: true, layout: 's', layout_name: '1 chart', chart_count: 1, active_index: 0,
       panes: [{ index: 0, symbol: 'AAPL', resolution: '60' }],
+    },
+    pane_indicator_signatures: {
+      success: true,
+      schema_version: 'pane-indicator-signatures-v1',
+      pane_count: 1,
+      canonical_pane_index: 0,
+      panes: [{
+        index: 0,
+        signature: 'a'.repeat(64),
+        indicators: [{
+          indicator_id: 'RSI@tv-basicstudies',
+          indicator_name: 'Relative Strength Index',
+          is_price_study: false,
+          settings: { length: 14 },
+        }],
+      }],
     },
     pane_probe_layout_capability: {
       success: true,

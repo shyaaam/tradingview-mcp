@@ -304,6 +304,27 @@ export const observerToolDefinitions = Object.freeze({
       })),
     },
   },
+  pane_indicator_signatures: {
+    classification: 'read_only',
+    inputSchema: emptyInput,
+    outputSchema: {
+      success: z.literal(true),
+      schema_version: z.literal('pane-indicator-signatures-v1'),
+      pane_count: z.number().int().min(1).max(16),
+      canonical_pane_index: z.literal(0),
+      panes: z.array(z.object({
+        index: z.number().int().nonnegative(),
+        signature: z.string().regex(/^[0-9a-f]{64}$/),
+        indicators: z.array(z.object({
+          indicator_id: z.string().min(1),
+          indicator_name: z.string().min(1),
+          is_price_study: z.boolean(),
+          settings: jsonObject,
+        })),
+      })),
+    },
+    rejectUnexpectedInput: true,
+  },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',
     inputSchema: {
