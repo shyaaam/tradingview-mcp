@@ -65,6 +65,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_contract',
     'tv_health_check',
     'tv_observer_prepare',
+    'tv_observer_attach_existing_read_only',
     'tv_observer_hydrate_chart_target',
     'tv_observer_identity',
     'tv_observer_capture_candle',
@@ -131,6 +132,13 @@ test('observer result fixtures satisfy registered output schemas', () => {
       success: true, manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', restart_requested: false,
       status: 'running', cdp_ready: true, cdp_url: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
       browser: 'Chrome/146', user_agent: 'test-agent', chart_target_id: 'chart-1', chart_target_url: 'https://www.tradingview.com/chart/x/',
+    },
+    tv_observer_attach_existing_read_only: {
+      success: true,
+      manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', status: 'running',
+      cdp_ready: true, cdp_url: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+      browser: 'Chrome/146', user_agent: 'test-agent', chart_target_id: 'chart-1',
+      chart_target_url: 'https://www.tradingview.com/chart/x/', mutations_performed: false,
     },
     tv_observer_hydrate_chart_target: {
       success: true,

@@ -3,7 +3,9 @@
  */
 import { evaluate as _evaluate, safeString } from '../connection.js';
 import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from './pane.js';
-import { switchTab as _switchTab } from './tab.js';
+import { switchTab as _switchTab, list as _listTabs } from './tab.js';
+import { getObserverSession } from './observer-session.js';
+import { resolveCloakManagerBaseUrl } from './cloak.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const CHART_COLLECTION = 'window.TradingViewApi._chartWidgetCollection';
@@ -16,6 +18,8 @@ function _resolve(deps) {
     focusPane: deps?.focusPane || _focusPane,
     indicatorSignatures: deps?.indicatorSignatures || _indicatorSignatures,
     switchTab: deps?.switchTab || _switchTab,
+    listTabs: deps?.listTabs || _listTabs,
+    verifyMutationAuthority: deps?.verifyMutationAuthority || (deps ? async () => {} : _verifyMutationAuthority),
   };
 }
 
@@ -28,7 +32,7 @@ function _parseObject(value, name, { allowEmpty = false } = {}) {
   return parsed;
 }
 
-function _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name }) {
+function _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id }, allowMissingAuthority = false) {
   if (!profile_id || typeof profile_id !== 'string' || !profile_id.trim()) {
     throw new Error('profile_id is required for scoped indicator mutation');
   }
@@ -39,7 +43,12 @@ function _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_na
   const paneIndex = Number(pane_index);
   if (!Number.isInteger(tabIndex) || tabIndex < 0) throw new Error('tab_index must be a non-negative integer');
   if (!Number.isInteger(paneIndex) || paneIndex < 0) throw new Error('pane_index must be a non-negative integer');
-  return { profile_id: profile_id.trim(), tab_index: tabIndex, pane_index: paneIndex, indicator_name: indicator_name.trim() };
+  if (!allowMissingAuthority && (!expected_chart_target_id || typeof expected_chart_target_id !== 'string' || !expected_chart_target_id.trim())) throw new Error('expected_chart_target_id is required');
+  if (!allowMissingAuthority && (!expected_chart_id || typeof expected_chart_id !== 'string' || !expected_chart_id.trim())) throw new Error('expected_chart_id is required');
+  if (!allowMissingAuthority && (!expected_layout_id || typeof expected_layout_id !== 'string' || !expected_layout_id.trim())) throw new Error('expected_layout_id is required');
+  if (!allowMissingAuthority && (!expected_pane_signature || !/^[0-9a-f]{64}$/i.test(String(expected_pane_signature)))) throw new Error('expected_pane_signature must be a SHA-256 hash');
+  if (expected_entity_id !== undefined && (typeof expected_entity_id !== 'string' || !expected_entity_id.trim())) throw new Error('expected_entity_id must be non-empty when supplied');
+  return { profile_id: profile_id.trim(), tab_index: tabIndex, pane_index: paneIndex, indicator_name: indicator_name.trim(), ...(expected_chart_target_id === undefined ? {} : { expected_chart_target_id: expected_chart_target_id.trim() }), ...(expected_chart_id === undefined ? {} : { expected_chart_id: expected_chart_id.trim() }), ...(expected_layout_id === undefined ? {} : { expected_layout_id: expected_layout_id.trim() }), ...(expected_pane_signature === undefined ? {} : { expected_pane_signature: String(expected_pane_signature).toLowerCase() }), ...(expected_entity_id === undefined ? {} : { expected_entity_id: expected_entity_id.trim() }) };
 }
 
 function _settingsFromInputValues(inputValues) {
@@ -93,15 +102,18 @@ async function _getStudyByName({ indicator_name, _deps }) {
     (function() {
       var chart = ${CHART_API};
       var studies = chart.getAllStudies ? chart.getAllStudies() : [];
+      var matches = [];
       for (var i = 0; i < studies.length; i++) {
         var item = studies[i] || {};
         var name = String(item.name || item.title || '').toLowerCase();
         if (name === ${safeString(indicator_name.toLowerCase())}) {
           var study = chart.getStudyById(item.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
-          return { id: item.id, name: item.name || item.title || ${safeString(indicator_name)}, inputs: inputs, values: item.values || item.description || null };
+          matches.push({ id: item.id, name: item.name || item.title || ${safeString(indicator_name)}, inputs: inputs, values: item.values || item.description || null });
         }
       }
+      if (matches.length > 1) return { error: 'scoped indicator mutation found duplicate matching studies: ' + ${safeString(indicator_name)} };
+      if (matches.length === 1) return matches[0];
       return null;
     })()
   `);
@@ -414,12 +426,20 @@ export async function toggleVisibility({ entity_id, visible, _deps }) {
   return { success: true, entity_id, visible: result.visible };
 }
 
-export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_settings: expectedSettingsRaw, action = 'apply_indicator', _deps }) {
-  const scope = _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name });
+export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id, expected_settings: expectedSettingsRaw, action = 'apply_indicator', _deps }) {
+  const scope = _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id }, _deps !== undefined);
   if (!SUPPORTED_SCOPED_ACTIONS.has(action)) throw new Error(`unsupported scoped indicator action: ${action}`);
   const expectedSettings = _parseObject(expectedSettingsRaw, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
+  await _resolve(_deps).verifyMutationAuthority(scope, { action, _deps });
   const focusResult = await _selectScopedChart({ ...scope, _deps });
   const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
+  if (existingStudy?.error) throw new Error(existingStudy.error);
+  if (existingStudy && scope.expected_entity_id !== undefined && existingStudy.id !== scope.expected_entity_id) {
+    throw new Error('scoped indicator mutation entity ID does not match reviewed entity');
+  }
+  if (action === 'apply_indicator' && existingStudy) {
+    throw new Error(`scoped indicator add found an existing matching study: ${scope.indicator_name}`);
+  }
   const previousEvidence = existingStudy ? _settingsEvidenceFromStudy(existingStudy) : { settings: {}, source: 'absent', unavailable_reason: null };
   let appliedStudy;
   if (action === 'apply_indicator') {
@@ -464,6 +484,42 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
     focus: focusResult,
     message: 'scoped indicator plan item applied',
   };
+}
+
+async function _verifyMutationAuthority(scope, { action, _deps }) {
+  const session = getObserverSession();
+  if (!session || session.profileId !== scope.profile_id || session.chartTargetId !== scope.expected_chart_target_id) {
+    throw new Error('scoped indicator mutation session identity does not match reviewed authority');
+  }
+  const managerBaseUrl = await resolveCloakManagerBaseUrl();
+  if (!managerBaseUrl) throw new Error('scoped indicator mutation Manager is unavailable');
+  const response = await fetch(new URL('profiles', `${managerBaseUrl}/`).toString());
+  if (!response.ok) throw new Error('scoped indicator mutation Manager identity read failed');
+  const payload = await response.json();
+  const profiles = Array.isArray(payload) ? payload : payload?.profiles;
+  const matches = Array.isArray(profiles) ? profiles.filter((profile) => {
+    const id = profile?.id || profile?.profile_id || profile?.profileId;
+    return String(id || '') === scope.profile_id;
+  }) : [];
+  if (matches.length !== 1 || !['running', 'active'].includes(String(matches[0]?.status || matches[0]?.state || '').toLowerCase())) {
+    throw new Error('scoped indicator mutation live Manager profile identity is not approved');
+  }
+  const { evaluate, indicatorSignatures, listTabs } = _resolve(_deps);
+  const tabs = await listTabs();
+  const tabMatches = tabs.tabs.filter((tab) => tab.index === scope.tab_index && tab.id === scope.expected_chart_target_id);
+  if (tabMatches.length !== 1) throw new Error('scoped indicator mutation target tab identity is not unique');
+  const tab = tabMatches[0];
+  const expectedUrl = `https://www.tradingview.com/chart/${scope.expected_chart_id}/`;
+  if (tab.chart_id !== scope.expected_chart_id || tab.url !== expectedUrl) throw new Error('scoped indicator mutation chart identity does not match reviewed authority');
+  const chartState = await evaluate(`(function(){var c=window.TradingViewApi&&window.TradingViewApi._chartWidgetCollection; var l=c&&c._layoutType; if(l&&typeof l.value==='function') l=l.value(); return {layout_id:String(l||'')};})()`);
+  if (!chartState || chartState.layout_id !== scope.expected_layout_id) throw new Error('scoped indicator mutation layout identity does not match reviewed authority');
+  const inventory = await indicatorSignatures({ _deps });
+  const pane = inventory.panes.find((entry) => entry.index === scope.pane_index);
+  if (!pane || pane.signature !== scope.expected_pane_signature) throw new Error('scoped indicator mutation pre-mutation pane signature does not match reviewed authority');
+  const matching = pane.indicators.filter((entry) => entry.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
+  if (action === 'update_indicator_settings' && matching.length !== 1) throw new Error('scoped indicator update requires exactly one matching target study');
+  if (action === 'update_indicator_settings' && scope.expected_entity_id !== undefined && matching[0]?.indicator_id !== scope.expected_entity_id) throw new Error('scoped indicator mutation reviewed entity ID is not present');
+  if (action === 'apply_indicator' && matching.length > 1) throw new Error('scoped indicator add refuses duplicate matching studies');
 }
 
 export async function updateScopedSettings(args) {

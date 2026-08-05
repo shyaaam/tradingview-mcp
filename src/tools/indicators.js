@@ -24,9 +24,14 @@ export function registerIndicatorTools(server) {
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
     indicator_name: z.string().describe('TradingView-recognized study name/title to apply, including custom/private confluence indicators'),
+    expected_chart_target_id: z.string().min(1),
+    expected_chart_id: z.string().min(1),
+    expected_layout_id: z.string().min(1),
+    expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+    expected_entity_id: z.string().min(1).optional(),
     expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
-  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
-    try { return jsonResult(await core.applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_settings, action: 'apply_indicator' })); }
+  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id, expected_settings }) => {
+    try { return jsonResult(await core.applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, ...(expected_entity_id === undefined ? {} : { expected_entity_id }), expected_settings, action: 'apply_indicator' })); }
     catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'apply_indicator', applied: false, error: err.message }, true); }
   });
 
@@ -35,9 +40,14 @@ export function registerIndicatorTools(server) {
     tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
     pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
     indicator_name: z.string().describe('Existing indicator/study name/title to update, including custom/private confluence indicators'),
+    expected_chart_target_id: z.string().min(1),
+    expected_chart_id: z.string().min(1),
+    expected_layout_id: z.string().min(1),
+    expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+    expected_entity_id: z.string().min(1).optional(),
     expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
-  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
-    try { return jsonResult(await core.updateScopedSettings({ profile_id, tab_index, pane_index, indicator_name, expected_settings })); }
+  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id, expected_settings }) => {
+    try { return jsonResult(await core.updateScopedSettings({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, ...(expected_entity_id === undefined ? {} : { expected_entity_id }), expected_settings })); }
     catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'update_indicator_settings', applied: false, error: err.message }, true); }
   });
 }

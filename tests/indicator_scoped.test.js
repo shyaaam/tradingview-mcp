@@ -33,7 +33,9 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
         state.evaluateCalls.push(expression);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
-          const found = state.studies.find(study => study.name.toLowerCase() === name);
+          const matching = state.studies.filter(study => study.name.toLowerCase() === name);
+          if (matching.length > 1) return { error: `scoped indicator mutation found duplicate matching studies: ${name}` };
+          const found = matching[0];
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
         }
         if (expression.includes('insertStudyWithParams')) {
@@ -119,6 +121,16 @@ describe('scoped indicator plan primitives', () => {
 
   it('blocks missing profile scope', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: '', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /profile_id is required/);
+  });
+  it('requires reviewed target and pane authority for direct production calls', async () => {
+    await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 } }), /expected_chart_target_id is required/);
+  });
+  it('rejects duplicate same-name studies instead of selecting first match', async () => {
+    const { deps } = makeDeps({ studies: [
+      { id: 'study-rsi-1', name: 'RSI', inputs: [{ id: 'length', value: 14 }] },
+      { id: 'study-rsi-2', name: 'RSI', inputs: [{ id: 'length', value: 14 }] },
+    ] });
+    await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 50 }, _deps: deps }), /duplicate matching studies/);
   });
   it('blocks ambiguous tab target selection', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps({ failSwitch: true }).deps }), /tab target ambiguous/);

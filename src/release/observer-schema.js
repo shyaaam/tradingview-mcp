@@ -152,6 +152,26 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().nullable(),
     },
   },
+  tv_observer_attach_existing_read_only: {
+    classification: 'read_only',
+    inputSchema: {
+      profile_id: z.string().min(1).describe('Exact CloakBrowser Manager profile ID; no profile selection or launch is performed.'),
+      chart_target_id: z.string().min(1).describe('Exact existing TradingView target ID to attach without navigation or hydration.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      manager_base_url: z.string(),
+      profile_id: z.string(),
+      status: z.string(),
+      cdp_ready: z.literal(true),
+      cdp_url: z.string(),
+      browser: z.string().nullable(),
+      user_agent: z.string().nullable(),
+      chart_target_id: z.string(),
+      chart_target_url: z.string().url(),
+      mutations_performed: z.literal(false),
+    },
+  },
   tv_observer_hydrate_chart_target: {
     classification: 'bootstrap_mutation',
     inputSchema: {
@@ -393,7 +413,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_hydrate_chart_target') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target') {
       requireObserverSession();
     }
     return handler(args, extra);

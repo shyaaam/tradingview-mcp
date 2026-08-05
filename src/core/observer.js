@@ -66,6 +66,53 @@ export async function prepare(input = {}) {
   };
 }
 
+export async function attachExistingReadOnly(input = {}) {
+  const profileId = String(input.profile_id || '').trim();
+  const chartTargetId = String(input.chart_target_id || '').trim();
+  if (!profileId) throw new Error('profile_id is required for read-only observer attachment.');
+  if (!chartTargetId) throw new Error('chart_target_id is required for read-only observer attachment.');
+
+  await invalidateObserverSession();
+  const managerBaseUrl = await resolveCloakManagerBaseUrl();
+  if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for read-only observer attachment.');
+  const profiles = await fetchJson(new URL('profiles', `${managerBaseUrl}/`).toString());
+  const profileList = Array.isArray(profiles) ? profiles : profiles?.profiles;
+  const profile = Array.isArray(profileList)
+    ? profileList.find((entry) => profileIdFromEntry(entry) === profileId)
+    : null;
+  if (!profile) throw new Error(`Configured CloakBrowser profile not found: ${profileId}`);
+  const profileStatus = String(profile.status || profile.state || '').toLowerCase();
+  if (!['running', 'active'].includes(profileStatus)) {
+    throw new Error(`CloakBrowser profile is not active: ${profileId}`);
+  }
+  const cdpUrlValue = profile.cdp_url || profile.cdp_endpoint || profile.cdpUrl
+    || `${managerBaseUrl}/profiles/${encodeURIComponent(profileId)}/cdp`;
+  const cdpUrl = new URL(cdpUrlValue, `${managerBaseUrl}/`).toString().replace(/\/$/, '');
+  const version = await waitForVersion(cdpUrl);
+  const chartTarget = await waitForExactChartTarget(cdpUrl, chartTargetId);
+  if (!chartTarget) throw new Error(`Requested TradingView chart target not found: ${chartTargetId}`);
+  await bindObserverSession({
+    managerBaseUrl,
+    profileId,
+    cdpUrl,
+    chartTargetId: chartTarget.id,
+    chartTargetUrl: chartTarget.url,
+  });
+  return {
+    success: true,
+    manager_base_url: managerBaseUrl,
+    profile_id: profileId,
+    status: profile.status || profile.state || 'running',
+    cdp_ready: true,
+    cdp_url: cdpUrl,
+    browser: version.Browser || null,
+    user_agent: version['User-Agent'] || null,
+    chart_target_id: chartTarget.id,
+    chart_target_url: chartTarget.url,
+    mutations_performed: false,
+  };
+}
+
 async function waitForVersion(cdpUrl, attempts = 15, delayMs = 250) {
   let lastError;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -84,6 +131,20 @@ async function waitForChartTarget(cdpUrl, attempts = 15, delayMs = 250) {
     const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString());
     const chartTarget = Array.isArray(targets)
       ? targets.find((target) => target?.type === 'page' && CHART_URL.test(target.url || ''))
+      : null;
+    if (chartTarget) return chartTarget;
+    await delay(delayMs);
+  }
+  return null;
+}
+
+async function waitForExactChartTarget(cdpUrl, chartTargetId, attempts = 15, delayMs = 250) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString());
+    const chartTarget = Array.isArray(targets)
+      ? targets.find((target) => target?.id === chartTargetId
+        && target?.type === 'page'
+        && CHART_URL.test(target.url || ''))
       : null;
     if (chartTarget) return chartTarget;
     await delay(delayMs);
