@@ -15,6 +15,20 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
     deps: {
       async switchTab({ index }) { if (failSwitch) throw new Error('tab target ambiguous'); state.switchedTabs.push(index); return { success: true, action: 'switched', index }; },
       async focusPane({ index }) { if (failFocus) throw new Error('pane target ambiguous'); state.focusedPanes.push(index); return { success: true, focused_index: index, total: 8 }; },
+      async indicatorSignatures() {
+        return {
+          panes: Array.from({ length: 8 }, (_, index) => ({
+            index,
+            signature: 'a'.repeat(64),
+            indicators: state.studies.map((study) => ({
+              indicator_id: study.id,
+              indicator_name: study.name,
+              is_price_study: false,
+              settings: {},
+            })),
+          })),
+        };
+      },
       async evaluate(expression) {
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
@@ -49,6 +63,13 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.success, true);
     assert.deepEqual(result.previous_settings, {});
     assert.deepEqual(result.new_settings, { length: 14 });
+  });
+
+  it('allows scoped apply with empty settings for studies without exposed inputs', async () => {
+    const { deps } = makeDeps();
+    const result = await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Private No-Input Study', expected_settings: {}, _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.post_mutation_indicator.indicator_name, 'Private No-Input Study');
   });
 
   it('updates indicator settings and returns previous/new scoped evidence', async () => {

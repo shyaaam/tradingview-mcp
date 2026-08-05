@@ -2,7 +2,7 @@
  * Core indicator settings logic.
  */
 import { evaluate as _evaluate, safeString } from '../connection.js';
-import { focus as _focusPane } from './pane.js';
+import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from './pane.js';
 import { switchTab as _switchTab } from './tab.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
@@ -13,16 +13,17 @@ function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     focusPane: deps?.focusPane || _focusPane,
+    indicatorSignatures: deps?.indicatorSignatures || _indicatorSignatures,
     switchTab: deps?.switchTab || _switchTab,
   };
 }
 
-function _parseObject(value, name) {
+function _parseObject(value, name, { allowEmpty = false } = {}) {
   const parsed = value ? (typeof value === 'string' ? JSON.parse(value) : value) : undefined;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${name} must be a non-empty object`);
+    throw new Error(`${name} must be an object`);
   }
-  if (Object.keys(parsed).length === 0) throw new Error(`${name} must be a non-empty object`);
+  if (!allowEmpty && Object.keys(parsed).length === 0) throw new Error(`${name} must be a non-empty object`);
   return parsed;
 }
 
@@ -118,11 +119,15 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
       return new Promise(function(resolve) {
         setTimeout(function() {
           var after = chart.getAllStudies ? chart.getAllStudies() : [];
-          var added = null;
-          for (var i = 0; i < after.length; i++) {
-            if (before.indexOf(after[i].id) === -1) { added = after[i]; break; }
+          var addedStudies = after.filter(function(study) {
+            return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
+          });
+          if (addedStudies.length !== 1) return resolve({ error: 'scoped indicator add did not produce exactly one identifiable study' });
+          var added = addedStudies[0];
+          var addedName = String(added.name || added.title || '').trim();
+          if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
+            return resolve({ error: 'scoped indicator add resolved an unexpected study name' });
           }
-          if (!added) return resolve({ error: 'indicator was not added' });
           var study = chart.getStudyById(added.id);
           var inputs = study && study.getInputValues ? study.getInputValues() : [];
           resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputs, values: added.values || added.description || null });
@@ -145,6 +150,10 @@ async function _updateIndicatorSettings({ entity_id, expected_settings, _deps })
       var currentInputs = study.getInputValues ? study.getInputValues() : [];
       var previous = {};
       var overrides = ${settingsJson};
+      var missing = Object.keys(overrides).filter(function(key) {
+        return !currentInputs.some(function(input) { return input && input.id === key; });
+      });
+      if (missing.length > 0) return { error: 'scoped indicator update input(s) not found: ' + missing.join(',') };
       for (var i = 0; i < currentInputs.length; i++) {
         if (overrides.hasOwnProperty(currentInputs[i].id)) {
           previous[currentInputs[i].id] = currentInputs[i].value;
@@ -158,6 +167,11 @@ async function _updateIndicatorSettings({ entity_id, expected_settings, _deps })
       for (var i = 0; i < studies.length; i++) {
         if (studies[i] && studies[i].id === ${safeString(entity_id)}) { studyMeta = studies[i]; break; }
       }
+      var mismatched = Object.keys(overrides).filter(function(key) {
+        var readback = updated.find(function(input) { return input && input.id === key; });
+        return !readback || JSON.stringify(readback.value) !== JSON.stringify(overrides[key]);
+      });
+      if (mismatched.length > 0) return { error: 'scoped indicator update readback mismatch: ' + mismatched.join(',') };
       return { id: ${safeString(entity_id)}, previous: previous, inputs: updated, values: studyMeta ? (studyMeta.values || studyMeta.description || null) : null };
     })()
   `);
@@ -213,7 +227,7 @@ export async function toggleVisibility({ entity_id, visible, _deps }) {
 export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_settings: expectedSettingsRaw, action = 'apply_indicator', _deps }) {
   const scope = _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name });
   if (!SUPPORTED_SCOPED_ACTIONS.has(action)) throw new Error(`unsupported scoped indicator action: ${action}`);
-  const expectedSettings = _parseObject(expectedSettingsRaw, 'expected_settings');
+  const expectedSettings = _parseObject(expectedSettingsRaw, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
   const focusResult = await _selectScopedChart({ ...scope, _deps });
   const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
   const previousEvidence = existingStudy ? _settingsEvidenceFromStudy(existingStudy) : { settings: {}, source: 'absent', unavailable_reason: null };
@@ -230,6 +244,13 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
     }
   }
   const newEvidence = _settingsEvidenceFromStudy(appliedStudy);
+  const { indicatorSignatures } = _resolve(_deps);
+  const postInventory = await indicatorSignatures({ _deps });
+  const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
+  if (!postPane) throw new Error(`scoped indicator mutation pane ${scope.pane_index} missing from post-mutation inventory`);
+  const matchingIndicators = postPane.indicators.filter((indicator) => indicator.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
+  if (matchingIndicators.length !== 1) throw new Error(`scoped indicator mutation did not produce exactly one post-mutation ${scope.indicator_name} indicator`);
+  const postIndicator = matchingIndicators[0];
   const unavailableReasons = {};
   if (previousEvidence.unavailable_reason) unavailableReasons.previous_settings = previousEvidence.unavailable_reason;
   if (newEvidence.unavailable_reason) unavailableReasons.new_settings = newEvidence.unavailable_reason;
@@ -247,6 +268,9 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
     previous_settings_source: previousEvidence.source,
     new_settings_source: newEvidence.source,
     settings_unavailable_reason: unavailableReasons,
+    post_mutation_signature: postPane.signature,
+    post_mutation_indicator: postIndicator,
+    post_mutation_indicator_count: postPane.indicators.length,
     focus: focusResult,
     message: 'scoped indicator plan item applied',
   };
