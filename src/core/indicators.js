@@ -195,7 +195,7 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
   return result;
 }
 
-async function _updateIndicatorSettings({ entity_id, expected_settings, _deps }) {
+async function _updateIndicatorSettings({ entity_id, indicator_name, expected_settings, _deps }) {
   const { evaluate } = _resolve(_deps);
   const settingsJson = JSON.stringify(expected_settings);
   const result = await evaluate(`
@@ -205,11 +205,60 @@ async function _updateIndicatorSettings({ entity_id, expected_settings, _deps })
       if (!study) return { error: 'Study not found: ' + ${safeString(entity_id)} };
       var currentInputs = study.getInputValues ? study.getInputValues() : [];
       var previous = {};
-      var overrides = ${settingsJson};
-      var missing = Object.keys(overrides).filter(function(key) {
-        return !currentInputs.some(function(input) { return input && input.id === key; });
+      var rawOverrides = ${settingsJson};
+      var overrides = {};
+      Object.keys(rawOverrides).forEach(function(key) {
+        var value = rawOverrides[key];
+        overrides[key] = value && typeof value === 'object' && !Array.isArray(value)
+          && Object.prototype.hasOwnProperty.call(value, 'v')
+          && Object.keys(value).every(function(field) { return field === 'f' || field === 't' || field === 'v'; })
+          ? value.v
+          : value;
       });
-      if (missing.length > 0) return { error: 'scoped indicator update input(s) not found: ' + missing.join(',') };
+      var missing = Object.keys(overrides).filter(function(key) {
+        return !Array.isArray(currentInputs) || !currentInputs.some(function(input) { return input && input.id === key; });
+      });
+      if (missing.length > 0) {
+        var collection = ${CHART_COLLECTION};
+        var charts = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
+        var canonicalWidget = charts[0];
+        var canonicalModel = canonicalWidget && typeof canonicalWidget.model === 'function'
+          ? canonicalWidget.model().model()
+          : null;
+        var sources = canonicalModel && typeof canonicalModel.dataSources === 'function'
+          ? canonicalModel.dataSources()
+          : [];
+        var canonicalMatches = sources.filter(function(source) {
+          if (!source || typeof source.metaInfo !== 'function') return false;
+          var meta = source.metaInfo();
+          var name = String(meta && (meta.description || meta.shortDescription || '')).trim();
+          return name.toLowerCase() === ${safeString(indicator_name.trim().toLowerCase())};
+        });
+        if (canonicalMatches.length !== 1 || typeof canonicalMatches[0].inputs !== 'function') {
+          return { error: 'scoped indicator update canonical inputs unavailable: ' + ${safeString(indicator_name)} };
+        }
+        var canonicalInputs = canonicalMatches[0].inputs();
+        if (!canonicalInputs || typeof canonicalInputs !== 'object' || Array.isArray(canonicalInputs)) {
+          return { error: 'scoped indicator update canonical inputs unavailable: ' + ${safeString(indicator_name)} };
+        }
+        currentInputs = Object.keys(canonicalInputs)
+          .filter(function(key) { return key.indexOf('in_') === 0 || key.indexOf('__') === 0; })
+          .map(function(key) {
+            var value = canonicalInputs[key];
+            return {
+              id: key,
+              value: value && typeof value === 'object' && !Array.isArray(value)
+                && Object.prototype.hasOwnProperty.call(value, 'v')
+                && Object.keys(value).every(function(field) { return field === 'f' || field === 't' || field === 'v'; })
+                ? value.v
+                : value,
+            };
+          });
+        var restoredMissing = missing.filter(function(key) {
+          return !currentInputs.some(function(input) { return input && input.id === key; });
+        });
+        if (restoredMissing.length > 0) return { error: 'scoped indicator update input(s) not found: ' + restoredMissing.join(',') };
+      }
       for (var i = 0; i < currentInputs.length; i++) {
         if (overrides.hasOwnProperty(currentInputs[i].id)) {
           previous[currentInputs[i].id] = currentInputs[i].value;
@@ -292,7 +341,7 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
     appliedStudy = await _applyIndicator({ indicator_name: scope.indicator_name, expected_settings: expectedSettings, _deps });
   } else {
     if (!existingStudy) throw new Error(`indicator not found for update: ${scope.indicator_name}`);
-    appliedStudy = await _updateIndicatorSettings({ entity_id: existingStudy.id, expected_settings: expectedSettings, _deps });
+    appliedStudy = await _updateIndicatorSettings({ entity_id: existingStudy.id, indicator_name: scope.indicator_name, expected_settings: expectedSettings, _deps });
     if (appliedStudy.previous && Object.keys(appliedStudy.previous).length > 0) {
       previousEvidence.settings = appliedStudy.previous;
       previousEvidence.source = 'input_values';
