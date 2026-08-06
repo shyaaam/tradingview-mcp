@@ -22,6 +22,7 @@ import { registerTabTools } from './tools/tab.js';
 import { registerChartTargetHydrationTool } from './tools/chart-target-hydration.js';
 import { buildObserverContract, SERVER_NAME, SERVER_VERSION } from './release/identity.js';
 import { installStdioLifecycle } from './release/lifecycle.js';
+import { disconnectStrict } from './connection.js';
 
 const server = new McpServer(
   {
@@ -119,8 +120,21 @@ process.stderr.write(`${JSON.stringify(startupEvent)}\n`);
 const transport = new StdioServerTransport();
 installStdioLifecycle({
   close: async () => {
-    if (typeof server.close === 'function') await server.close();
-    else if (typeof transport.close === 'function') await transport.close();
+    const failures = [];
+    try {
+      if (typeof server.close === 'function') await server.close();
+      else if (typeof transport.close === 'function') await transport.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await disconnectStrict();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'MCP observer shutdown failed');
+    }
   },
   forceClose: () => transport.close?.(),
   hardExit: (code) => process.exit(code),
