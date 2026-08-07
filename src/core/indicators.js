@@ -545,9 +545,9 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   if (!pane || pane.signature !== scope.expected_pane_signature) throw new Error('scoped indicator mutation pre-mutation pane signature does not match reviewed authority');
   const matching = pane.indicators.filter((entry) => entry.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
   if (action === 'update_indicator_settings' && matching.length !== 1) throw new Error('scoped indicator update requires exactly one matching target study');
-  if (action === 'update_indicator_settings' && scope.expected_entity_id !== undefined && matching[0]?.indicator_id !== scope.expected_entity_id) throw new Error('scoped indicator mutation reviewed entity ID is not present');
+  if (action === 'update_indicator_settings' && scope.expected_entity_id !== undefined && matching[0]?.entity_id !== scope.expected_entity_id) throw new Error('scoped indicator mutation reviewed entity ID is not present');
   if (action === 'remove_indicator' && matching.length !== 1) throw new Error('scoped indicator removal requires exactly one matching target study');
-  if (action === 'remove_indicator' && matching[0]?.indicator_id !== scope.expected_entity_id) throw new Error('scoped indicator removal reviewed entity ID is not present');
+  if (action === 'remove_indicator' && matching[0]?.entity_id !== scope.expected_entity_id) throw new Error('scoped indicator removal reviewed entity ID is not present');
   if (action === 'apply_indicator' && matching.length > 1) throw new Error('scoped indicator add refuses duplicate matching studies');
 }
 

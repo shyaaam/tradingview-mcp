@@ -231,6 +231,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
         signature: 'a'.repeat(64),
         indicators: [{
           indicator_id: 'RSI@tv-basicstudies',
+          entity_id: 'study-rsi-1',
           indicator_name: 'Relative Strength Index',
           is_price_study: false,
           settings: { length: 14 },

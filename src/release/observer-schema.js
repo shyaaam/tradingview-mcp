@@ -337,6 +337,7 @@ export const observerToolDefinitions = Object.freeze({
         signature: z.string().regex(/^[0-9a-f]{64}$/),
         indicators: z.array(z.object({
           indicator_id: z.string().min(1),
+          entity_id: z.string().min(1),
           indicator_name: z.string().min(1),
           is_price_study: z.boolean(),
           settings: jsonObject,

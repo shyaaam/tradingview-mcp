@@ -13,6 +13,7 @@ function inventory({ changedPane = null } = {}) {
       index,
       indicators: [{
         indicator_id: 'RSI@tv-basicstudies',
+        entity_id: `study-rsi-${index}`,
         indicator_name: 'Relative Strength Index',
         is_price_study: false,
         settings: {
@@ -52,6 +53,18 @@ test('stable indicator settings change signature while volatile viewport inputs 
   assert.notEqual(baseline.panes[0].signature, changed.panes[3].signature);
   assert.equal(baseline.panes[0].signature, derivePaneIndicatorSignature(baseline.panes[0].indicators));
   assert.equal(baseline.panes[0].signature, baseline.panes[7].signature);
+});
+
+test('live entity identity is excluded from stable parity signatures', async () => {
+  const baseline = await indicatorSignatures({ _deps: { evaluate: async () => inventory() } });
+  const rotated = await indicatorSignatures({ _deps: { evaluate: async () => ({
+    ...inventory(),
+    panes: inventory().panes.map((pane) => ({
+      ...pane,
+      indicators: pane.indicators.map((indicator) => ({ ...indicator, entity_id: `new-${indicator.entity_id}` })),
+    })),
+  }) } });
+  assert.deepEqual(rotated.panes.map((pane) => pane.signature), baseline.panes.map((pane) => pane.signature));
 });
 
 test('pane indicator signatures fail closed for incomplete pane evidence', async () => {

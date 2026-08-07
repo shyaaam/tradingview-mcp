@@ -22,6 +22,7 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
             signature: 'a'.repeat(64),
             indicators: state.studies.map((study) => ({
               indicator_id: study.id,
+              entity_id: study.id,
               indicator_name: study.name,
               is_price_study: false,
               settings: {},

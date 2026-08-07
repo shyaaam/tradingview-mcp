@@ -116,6 +116,14 @@ export async function indicatorSignatures({ _deps } = {}) {
           if (!source || typeof source.metaInfo !== 'function') continue;
           var meta = source.metaInfo();
           if (!meta || typeof meta.id !== 'string' || meta.id.length === 0) continue;
+          var entityId = '';
+          try {
+            if (source && typeof source.id === 'function') entityId = String(source.id() || '').trim();
+            if (!entityId && source && source._id !== undefined) entityId = String(source._id || '').trim();
+          } catch (error) {
+            return { error: 'TradingView pane indicator live entity identity is unavailable.' };
+          }
+          if (!entityId) return { error: 'TradingView pane indicator live entity identity is unavailable.' };
           if (typeof source.inputs !== 'function') {
             return { error: 'TradingView pane indicator settings are unavailable.' };
           }
@@ -128,6 +136,7 @@ export async function indicatorSignatures({ _deps } = {}) {
           }
           indicators.push({
             indicator_id: meta.id,
+            entity_id: entityId,
             indicator_name: String(meta.description || meta.shortDescription || meta.id),
             is_price_study: meta.is_price_study === true,
             settings: settings,
@@ -150,7 +159,7 @@ export async function indicatorSignatures({ _deps } = {}) {
       throw new Error('TradingView pane indicator inventory is incompatible.');
     }
     const indicators = pane.indicators.map((indicator) => normalizeIndicator(indicator));
-    indicators.sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+    indicators.sort((left, right) => canonicalJson(stableIndicator(left)).localeCompare(canonicalJson(stableIndicator(right))));
     return {
       index,
       signature: derivePaneIndicatorSignature(indicators),
@@ -170,7 +179,7 @@ export function derivePaneIndicatorSignature(indicators) {
   return createHash('sha256')
     .update(canonicalJson({
       schema_version: PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION,
-      indicators,
+      indicators: indicators.map((indicator) => stableIndicator(indicator)),
     }), 'utf8')
     .digest('hex');
 }
@@ -180,15 +189,26 @@ function normalizeIndicator(indicator) {
     throw new Error('TradingView pane indicator inventory is incompatible.');
   }
   const id = String(indicator.indicator_id || '').trim();
+  const entityId = String(indicator.entity_id || '').trim();
   const name = String(indicator.indicator_name || '').trim();
-  if (!id || !name || typeof indicator.is_price_study !== 'boolean') {
+  if (!id || !entityId || !name || typeof indicator.is_price_study !== 'boolean') {
     throw new Error('TradingView pane indicator inventory is incompatible.');
   }
   return {
     indicator_id: id,
+    entity_id: entityId,
     indicator_name: name,
     is_price_study: indicator.is_price_study,
     settings: normalizeJsonValue(indicator.settings, 'indicator settings'),
+  };
+}
+
+function stableIndicator(indicator) {
+  return {
+    indicator_id: indicator.indicator_id,
+    indicator_name: indicator.indicator_name,
+    is_price_study: indicator.is_price_study,
+    settings: indicator.settings,
   };
 }
 
