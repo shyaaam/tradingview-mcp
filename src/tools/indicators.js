@@ -50,4 +50,19 @@ export function registerIndicatorTools(server) {
     try { return jsonResult(await core.updateScopedSettings({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, ...(expected_entity_id === undefined ? {} : { expected_entity_id }), expected_settings })); }
     catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'update_indicator_settings', applied: false, error: err.message }, true); }
   });
+
+  server.tool('indicator_remove_scoped', 'Remove one exact indicator from a scoped tab/pane and return post-mutation evidence', {
+    profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+    tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+    pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+    indicator_name: z.string().describe('Exact TradingView study name/title'),
+    expected_chart_target_id: z.string().min(1),
+    expected_chart_id: z.string().min(1),
+    expected_layout_id: z.string().min(1),
+    expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+    expected_entity_id: z.string().min(1),
+  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id }) => {
+    try { return jsonResult(await core.removeScopedIndicator({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id })); }
+    catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'remove_indicator', applied: false, error: err.message }, true); }
+  });
 }

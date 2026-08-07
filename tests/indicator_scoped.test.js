@@ -3,7 +3,7 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyScopedPlanItem, updateScopedSettings } from '../src/core/indicators.js';
+import { applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
 
 function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) {
   const state = {
@@ -54,6 +54,13 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
           const previous = Object.fromEntries(study.inputs.map(input => [input.id, input.value]));
           study.inputs = study.inputs.map(input => ({ ...input, value: 50 }));
           return { id, previous, inputs: study.inputs, values: study.values };
+        }
+        if (expression.includes('removeEntity')) {
+          const id = expression.match(/getStudyById\("([^"]+)"\)/)?.[1];
+          const index = state.studies.findIndex((study) => study.id === id);
+          if (index < 0) return { error: `Study not found: ${id}` };
+          state.studies.splice(index, 1);
+          return { id, removed: true };
         }
         throw new Error(`unexpected evaluate expression: ${expression.slice(0, 80)}`);
       },
@@ -143,5 +150,15 @@ describe('scoped indicator plan primitives', () => {
   });
   it('blocks update when target indicator is missing', async () => {
     await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /indicator not found for update/);
+  });
+  it('removes one exact scoped indicator and proves post-mutation absence', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'study-rsi', name: 'RSI', inputs: [{ id: 'length', value: 14 }] }] });
+    const result = await removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_entity_id: 'study-rsi', _deps: deps });
+    assert.equal(result.action, 'remove_indicator');
+    assert.equal(result.post_mutation_indicator, null);
+    assert.equal(state.studies.length, 0);
+  });
+  it('rejects scoped removal without exact entity identity', async () => {
+    await assert.rejects(() => removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: {}, _deps: makeDeps().deps }), /expected_entity_id/);
   });
 });

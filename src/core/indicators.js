@@ -10,7 +10,7 @@ import { resolveCloakManagerBaseUrl } from './cloak.js';
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const CHART_COLLECTION = 'window.TradingViewApi._chartWidgetCollection';
 
-const SUPPORTED_SCOPED_ACTIONS = new Set(['apply_indicator', 'update_indicator_settings']);
+const SUPPORTED_SCOPED_ACTIONS = new Set(['apply_indicator', 'update_indicator_settings', 'remove_indicator']);
 
 function _resolve(deps) {
   return {
@@ -381,6 +381,23 @@ async function _updateIndicatorSettings({ entity_id, indicator_name, expected_se
   return result;
 }
 
+async function _removeIndicator({ entity_id, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const result = await evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.removeEntity !== 'function') return { error: 'scoped indicator removal API is unavailable' };
+      var study = chart.getStudyById ? chart.getStudyById(${safeString(entity_id)}) : null;
+      if (!study) return { error: 'scoped indicator removal target is unavailable' };
+      chart.removeEntity(${safeString(entity_id)});
+      return { id: ${safeString(entity_id)}, removed: true };
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  if (result?.removed !== true || result.id !== entity_id) throw new Error('scoped indicator removal readback failed');
+  return result;
+}
+
 export async function setInputs({ entity_id, inputs: inputsRaw, _deps }) {
   const { evaluate } = _resolve(_deps);
   const inputs = inputsRaw ? (typeof inputsRaw === 'string' ? JSON.parse(inputsRaw) : inputsRaw) : undefined;
@@ -429,7 +446,10 @@ export async function toggleVisibility({ entity_id, visible, _deps }) {
 export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id, expected_settings: expectedSettingsRaw, action = 'apply_indicator', _deps }) {
   const scope = _requireScopedRequest({ profile_id, tab_index, pane_index, indicator_name, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_entity_id }, _deps !== undefined);
   if (!SUPPORTED_SCOPED_ACTIONS.has(action)) throw new Error(`unsupported scoped indicator action: ${action}`);
-  const expectedSettings = _parseObject(expectedSettingsRaw, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
+  if (action === 'remove_indicator' && scope.expected_entity_id === undefined) throw new Error('scoped indicator removal requires expected_entity_id');
+  const expectedSettings = action === 'remove_indicator'
+    ? {}
+    : _parseObject(expectedSettingsRaw, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
   await _resolve(_deps).verifyMutationAuthority(scope, { action, _deps });
   const focusResult = await _selectScopedChart({ ...scope, _deps });
   const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
@@ -444,7 +464,7 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
   let appliedStudy;
   if (action === 'apply_indicator') {
     appliedStudy = await _applyIndicator({ indicator_name: scope.indicator_name, expected_settings: expectedSettings, _deps });
-  } else {
+  } else if (action === 'update_indicator_settings') {
     if (!existingStudy) throw new Error(`indicator not found for update: ${scope.indicator_name}`);
     appliedStudy = await _updateIndicatorSettings({ entity_id: existingStudy.id, indicator_name: scope.indicator_name, expected_settings: expectedSettings, _deps });
     if (appliedStudy.previous && Object.keys(appliedStudy.previous).length > 0) {
@@ -452,6 +472,9 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
       previousEvidence.source = 'input_values';
       previousEvidence.unavailable_reason = null;
     }
+  } else {
+    if (!existingStudy) throw new Error(`indicator not found for removal: ${scope.indicator_name}`);
+    appliedStudy = await _removeIndicator({ entity_id: existingStudy.id, _deps });
   }
   const newEvidence = _settingsEvidenceFromStudy(appliedStudy);
   const { indicatorSignatures } = _resolve(_deps);
@@ -459,8 +482,12 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
   const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
   if (!postPane) throw new Error(`scoped indicator mutation pane ${scope.pane_index} missing from post-mutation inventory`);
   const matchingIndicators = postPane.indicators.filter((indicator) => indicator.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
-  if (matchingIndicators.length !== 1) throw new Error(`scoped indicator mutation did not produce exactly one post-mutation ${scope.indicator_name} indicator`);
-  const postIndicator = matchingIndicators[0];
+  if (action === 'remove_indicator') {
+    if (matchingIndicators.length !== 0) throw new Error(`scoped indicator removal did not remove ${scope.indicator_name}`);
+  } else if (matchingIndicators.length !== 1) {
+    throw new Error(`scoped indicator mutation did not produce exactly one post-mutation ${scope.indicator_name} indicator`);
+  }
+  const postIndicator = matchingIndicators[0] || null;
   const unavailableReasons = {};
   if (previousEvidence.unavailable_reason) unavailableReasons.previous_settings = previousEvidence.unavailable_reason;
   if (newEvidence.unavailable_reason) unavailableReasons.new_settings = newEvidence.unavailable_reason;
@@ -519,9 +546,15 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   const matching = pane.indicators.filter((entry) => entry.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
   if (action === 'update_indicator_settings' && matching.length !== 1) throw new Error('scoped indicator update requires exactly one matching target study');
   if (action === 'update_indicator_settings' && scope.expected_entity_id !== undefined && matching[0]?.indicator_id !== scope.expected_entity_id) throw new Error('scoped indicator mutation reviewed entity ID is not present');
+  if (action === 'remove_indicator' && matching.length !== 1) throw new Error('scoped indicator removal requires exactly one matching target study');
+  if (action === 'remove_indicator' && matching[0]?.indicator_id !== scope.expected_entity_id) throw new Error('scoped indicator removal reviewed entity ID is not present');
   if (action === 'apply_indicator' && matching.length > 1) throw new Error('scoped indicator add refuses duplicate matching studies');
 }
 
 export async function updateScopedSettings(args) {
   return applyScopedPlanItem({ ...args, action: 'update_indicator_settings' });
+}
+
+export async function removeScopedIndicator(args) {
+  return applyScopedPlanItem({ ...args, action: 'remove_indicator' });
 }
