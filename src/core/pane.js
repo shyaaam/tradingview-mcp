@@ -194,26 +194,34 @@ export async function mutationIdentityInventory({ _deps } = {}) {
       if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
         return { error: 'TradingView pane mutation identity inventory is unavailable.' };
       }
+      var activeChart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+        && typeof window.TradingViewApi._activeChartWidgetWV.value === 'function'
+        ? window.TradingViewApi._activeChartWidgetWV.value()
+        : null;
+      var publicStudies = activeChart && typeof activeChart.getAllStudies === 'function'
+        ? activeChart.getAllStudies()
+        : null;
+      if (!Array.isArray(publicStudies)) {
+        return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+      }
+      var publicStudyIds = Object.create(null);
+      for (var publicStudyIndex = 0; publicStudyIndex < publicStudies.length; publicStudyIndex++) {
+        var publicStudy = publicStudies[publicStudyIndex];
+        var publicStudyId = publicStudy && typeof publicStudy.id === 'string' ? publicStudy.id.trim() : '';
+        if (!publicStudyId || publicStudyIds[publicStudyId]) {
+          return { error: 'TradingView pane mutation identity inventory contains duplicate getAllStudies identity.' };
+        }
+        publicStudyIds[publicStudyId] = true;
+      }
       var panes = [];
       for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
         var widget = all[paneIndex];
         var model = widget && typeof widget.model === 'function' ? widget.model() : null;
         var chartModel = model && typeof model.model === 'function' ? model.model() : null;
         var sources = chartModel && typeof chartModel.dataSources === 'function' ? chartModel.dataSources() : null;
-        var chartApiHolder = chartModel && typeof chartModel.chartApi === 'function' ? chartModel.chartApi() : null;
-        var chartApi = chartApiHolder && typeof chartApiHolder.chartApi === 'function' ? chartApiHolder.chartApi() : null;
-        var allStudies = chartApi && typeof chartApi.getAllStudies === 'function'
-          ? chartApi.getAllStudies()
-          : (chartModel && typeof chartModel.getAllStudies === 'function' ? chartModel.getAllStudies() : null);
         if (!Array.isArray(sources) || !chartModel || typeof chartModel.getStudyById !== 'function'
-          || !Array.isArray(allStudies)) {
+          || !activeChart) {
           return { error: 'TradingView pane mutation identity inventory is unavailable.' };
-        }
-        var allStudyIds = Object.create(null);
-        for (var allStudyIndex = 0; allStudyIndex < allStudies.length; allStudyIndex++) {
-          var allStudy = allStudies[allStudyIndex];
-          var allStudyId = allStudy && typeof allStudy.id === 'string' ? allStudy.id.trim() : '';
-          if (allStudyId) allStudyIds[allStudyId] = true;
         }
         var indicators = [];
         for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
@@ -244,7 +252,7 @@ export async function mutationIdentityInventory({ _deps } = {}) {
           } catch (error) {
             return { error: 'TradingView pane indicator settings are unavailable.' };
           }
-          var presentInGetAllStudies = allStudyIds[entityId] === true;
+          var presentInGetAllStudies = publicStudyIds[entityId] === true;
           indicators.push({
             indicator_id: meta.id,
             entity_id: entityId,
@@ -268,19 +276,12 @@ export async function mutationIdentityInventory({ _deps } = {}) {
   if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
     throw new Error('TradingView pane mutation identity inventory is incompatible.');
   }
-  const seenEntityIds = new Set();
   const panes = raw.panes.map((pane, index) => {
     if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
       throw new Error('TradingView pane mutation identity inventory is incompatible.');
     }
     const indicators = pane.indicators.map((indicator) => normalizeMutationIndicator(indicator));
     assertUniqueMutationIdentity(indicators, pane.index);
-    for (const indicator of indicators) {
-      if (seenEntityIds.has(indicator.entity_id)) {
-        throw new Error('TradingView pane mutation identity inventory contains duplicate entity identity.');
-      }
-      seenEntityIds.add(indicator.entity_id);
-    }
     indicators.sort((left, right) => canonicalJson(stableMutationIndicator(left)).localeCompare(canonicalJson(stableMutationIndicator(right))));
     return {
       index,

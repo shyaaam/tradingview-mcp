@@ -209,11 +209,26 @@ test('mutation identity inventory canonicalizes order and rejects duplicate iden
       _deps: { evaluate: async () => ({
         pane_count: 2,
         panes: [
-          raw.panes[0],
-          { index: 1, indicators: [{ ...raw.panes[0].indicators[0], indicator_id: 'C', entity_id: 'entity-b' }] },
+          {
+            ...raw.panes[0],
+            indicators: [
+              { ...raw.panes[0].indicators[0], indicator_id: 'C', entity_id: 'entity-b' },
+              { ...raw.panes[0].indicators[1], indicator_id: 'D', entity_id: 'entity-b' },
+            ],
+          },
+          { index: 1, indicators: [] },
         ],
       }) },
     }),
     /duplicate entity identity/,
+  );
+
+  await assert.doesNotReject(
+    mutationIdentityInventory({
+      _deps: { evaluate: async () => ({
+        pane_count: 2,
+        panes: [raw.panes[0], { index: 1, indicators: [{ ...raw.panes[0].indicators[0] }] }],
+      }) },
+    }),
   );
 });
