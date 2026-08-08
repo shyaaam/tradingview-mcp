@@ -5,10 +5,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
 
-function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) {
+function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, name: study.name, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
-    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [],
+    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], canonicalPriceStudy,
   };
   return {
     state,
@@ -40,6 +40,9 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
         }
         if (expression.includes('insertStudyWithParams')) {
+          if (state.canonicalPriceStudy && !expression.includes('forceOverlay: canonicalMeta.is_price_study === true')) {
+            throw new Error('price-study insertion omitted forceOverlay');
+          }
           const name = expression.includes('Private No-Input Study')
             ? 'Private No-Input Study'
             : 'Relative Strength Index';
@@ -90,6 +93,28 @@ describe('scoped indicator plan primitives', () => {
     await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps });
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('canonicalMatches')));
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('insertStudyWithParams')));
+    assert.equal(state.created.length, 1);
+  });
+
+  it('uses forceOverlay for a canonical price-study insertion', async () => {
+    const { deps, state } = makeDeps({ canonicalPriceStudy: true });
+    let authorizedScope;
+    deps.verifyMutationAuthority = async (scope) => { authorizedScope = scope; };
+    await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 4, pane_index: 2, indicator_name: 'Relative Strength Index', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_settings: {}, action: 'apply_indicator', _deps: deps });
+    assert.equal(state.canonicalPriceStudy, true);
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('forceOverlay: canonicalMeta.is_price_study === true')));
+    assert.deepEqual(authorizedScope, {
+      profile_id: 'profile-a',
+      tab_index: 4,
+      pane_index: 2,
+      indicator_name: 'Relative Strength Index',
+      expected_chart_target_id: 'target-1',
+      expected_chart_id: 'chart-1',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+    });
+    assert.deepEqual(state.switchedTabs, [4]);
+    assert.deepEqual(state.focusedPanes, [2]);
     assert.equal(state.created.length, 1);
   });
 
