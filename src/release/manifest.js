@@ -21,8 +21,10 @@ const CAPABILITY_NAMES = [
   'tab_switch',
   'pane_list',
   'pane_indicator_signatures',
+  'pane_indicator_mutation_inventory',
   'pane_probe_layout_capability',
   'chart_get_state',
+  'chart_save_existing_scoped',
   'chart_set_symbol',
   'chart_set_timeframe',
 ];

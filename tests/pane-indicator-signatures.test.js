@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   derivePaneIndicatorSignature,
   indicatorSignatures,
+  mutationIdentityInventory,
 } from '../src/core/pane.js';
 
 function inventory({ changedPane = null } = {}) {
@@ -70,6 +71,77 @@ test('live entity identity is excluded from stable parity signatures', async () 
 test('pane indicator signatures fail closed for incomplete pane evidence', async () => {
   await assert.rejects(
     indicatorSignatures({ _deps: { evaluate: async () => ({ pane_count: 8, panes: [] }) } }),
+    /incompatible/,
+  );
+});
+
+test('mutation identity inventory exposes stable, live, and mutation-visible identities', async () => {
+  const result = await mutationIdentityInventory({
+    _deps: {
+      evaluate: async () => ({
+        pane_count: 2,
+        panes: [
+          {
+            index: 0,
+            indicators: [
+              {
+                indicator_id: 'RSI@tv-basicstudies',
+                entity_id: 'entity-rsi-0',
+                indicator_name: 'Relative Strength Index',
+                is_price_study: false,
+                settings: { length: 14 },
+                get_study_by_id_resolves: true,
+                present_in_get_all_studies: true,
+                mutation_visible: true,
+              },
+              {
+                indicator_id: 'ESD$TV_VOLUME',
+                entity_id: 'entity-volume-0',
+                indicator_name: 'Volume',
+                is_price_study: false,
+                settings: {},
+                get_study_by_id_resolves: true,
+                present_in_get_all_studies: false,
+                mutation_visible: false,
+              },
+            ],
+          },
+          {
+            index: 1,
+            indicators: [],
+          },
+        ],
+      }),
+    },
+  });
+  assert.equal(result.schema_version, 'pane-indicator-mutation-inventory-v1');
+  assert.equal(result.panes[0].indicators[0].mutation_visible, true);
+  assert.equal(result.panes[0].indicators[1].present_in_get_all_studies, false);
+  assert.equal(result.panes[0].indicators[1].mutation_visible, false);
+});
+
+test('mutation identity inventory rejects contradictory visibility evidence', async () => {
+  await assert.rejects(
+    mutationIdentityInventory({
+      _deps: {
+        evaluate: async () => ({
+          pane_count: 1,
+          panes: [{
+            index: 0,
+            indicators: [{
+              indicator_id: 'RSI@tv-basicstudies',
+              entity_id: 'entity-rsi-0',
+              indicator_name: 'Relative Strength Index',
+              is_price_study: false,
+              settings: {},
+              get_study_by_id_resolves: true,
+              present_in_get_all_studies: false,
+              mutation_visible: true,
+            }],
+          }],
+        }),
+      },
+    }),
     /incompatible/,
   );
 });

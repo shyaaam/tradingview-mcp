@@ -9,6 +9,11 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'chart_save_existing_scoped', 'Save the exact existing chart/layout after strict target, authority, and parity checks', async (input) => {
+    try { return jsonResult(await core.saveExistingChartScoped(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   registerObserverTool(server, 'chart_set_symbol', 'Change the chart symbol', async ({ symbol }) => {
     try { return jsonResult(await core.setSymbol({ symbol })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

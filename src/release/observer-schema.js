@@ -346,6 +346,30 @@ export const observerToolDefinitions = Object.freeze({
     },
     rejectUnexpectedInput: true,
   },
+  pane_indicator_mutation_inventory: {
+    classification: 'read_only',
+    inputSchema: emptyInput,
+    outputSchema: {
+      success: z.literal(true),
+      schema_version: z.literal('pane-indicator-mutation-inventory-v1'),
+      pane_count: z.number().int().min(1).max(16),
+      canonical_pane_index: z.literal(0),
+      panes: z.array(z.object({
+        index: z.number().int().nonnegative(),
+        indicators: z.array(z.object({
+          indicator_id: z.string().min(1),
+          entity_id: z.string().min(1),
+          indicator_name: z.string().min(1),
+          is_price_study: z.boolean(),
+          settings: jsonObject,
+          get_study_by_id_resolves: z.boolean(),
+          present_in_get_all_studies: z.boolean(),
+          mutation_visible: z.boolean(),
+        })),
+      })),
+    },
+    rejectUnexpectedInput: true,
+  },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',
     inputSchema: {
@@ -385,6 +409,31 @@ export const observerToolDefinitions = Object.freeze({
       resolution: z.string(),
       chartType: z.number(),
       studies: z.array(z.object({ id: z.string(), name: z.string() })),
+    },
+  },
+  chart_save_existing_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      tab_index: z.number().int().nonnegative(),
+      chart_target_id: z.string().min(1),
+      chart_id: z.string().min(1),
+      layout_id: z.string().min(1),
+      expected_pane_count: z.number().int().min(1).max(16),
+      expected_indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      save_version: z.literal('chart-save-existing-scoped-v1'),
+      profile_id: z.string().min(1),
+      chart_target_id: z.string().min(1),
+      chart_id: z.string().min(1),
+      layout_id: z.string().min(1),
+      pane_count: z.number().int().min(1).max(16),
+      indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      saved_layout_id: z.string().min(1),
+      saved_existing: z.literal(true),
+      mutations_performed: z.literal(true),
     },
   },
   chart_set_symbol: {

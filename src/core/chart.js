@@ -1,7 +1,16 @@
 /**
  * Core chart control logic.
  */
-import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
+import {
+  evaluate as _evaluate,
+  evaluateAsync as _evaluateAsync,
+  getBoundClient as _getBoundClient,
+  requireObserverSession,
+  safeString,
+  requireFinite,
+} from '../connection.js';
+import { list as _listTabs } from './tab.js';
+import { indicatorSignatures, mutationIdentityInventory, derivePaneIndicatorParityHash } from './pane.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
@@ -10,7 +19,163 @@ function _resolve(deps) {
   return {
     evaluate: deps?.evaluate || _evaluate,
     evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getBoundClient: deps?.getBoundClient || _getBoundClient,
     waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+  };
+}
+
+const CANONICAL_CHART_URL = (chartId) => `https://www.tradingview.com/chart/${chartId}/`;
+
+/**
+ * Save the currently bound, existing chart through TradingView's scoped save
+ * service. This never creates, renames, switches, focuses, or mutates studies.
+ */
+export async function saveExistingChartScoped({
+  profile_id,
+  tab_index,
+  chart_target_id,
+  chart_id,
+  layout_id,
+  expected_pane_count,
+  expected_indicator_parity_hash,
+  _deps,
+}) {
+  const { evaluate, evaluateAsync, getBoundClient } = _resolve(_deps);
+  const listTabs = _deps?.listTabs || _listTabs;
+  const inspectInventory = _deps?.inspectInventory || mutationIdentityInventory;
+  const inspectSignatures = _deps?.inspectSignatures || indicatorSignatures;
+  const session = requireObserverSession();
+  const expected = {
+    profileId: String(profile_id || '').trim(),
+    tabIndex: Number(tab_index),
+    targetId: String(chart_target_id || '').trim(),
+    chartId: String(chart_id || '').trim(),
+    layoutId: String(layout_id || '').trim(),
+    paneCount: Number(expected_pane_count),
+    parityHash: String(expected_indicator_parity_hash || '').trim(),
+  };
+  if (!expected.profileId || !expected.targetId || !expected.chartId || !expected.layoutId
+    || !Number.isInteger(expected.tabIndex) || expected.tabIndex < 0
+    || !Number.isInteger(expected.paneCount) || expected.paneCount < 1 || expected.paneCount > 16
+    || !/^[0-9a-f]{64}$/.test(expected.parityHash)) {
+    throw new Error('Scoped existing-chart save input is invalid.');
+  }
+  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
+  if (session.profileId !== expected.profileId || session.chartTargetId !== expected.targetId
+    || session.chartTargetUrl !== canonicalUrl) {
+    throw new Error('Scoped existing-chart save target or profile does not match observer session.');
+  }
+
+  const tabs = await listTabs();
+  const tabEntries = tabs && Array.isArray(tabs.tabs) ? tabs.tabs : null;
+  const matchingTabs = (tabEntries || []).filter((tab) => tab
+    && Number(tab.index) === expected.tabIndex
+    && tab.id === expected.targetId
+    && tab.chart_id === expected.chartId
+    && tab.url === canonicalUrl);
+  if (tabs?.success !== true || !tabEntries || matchingTabs.length !== 1
+    || tabEntries.filter((tab) => tab?.id === expected.targetId).length !== 1) {
+    throw new Error('Scoped existing-chart save target tab is missing or ambiguous.');
+  }
+
+  // Forces exact operation-scoped CDP attachment before any save API call.
+  await getBoundClient();
+  const pre = await evaluate(`
+    (function() {
+      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+      var chart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+        && window.TradingViewApi._activeChartWidgetWV.value();
+      var count = cwc && cwc.inlineChartsCount;
+      if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
+      var layoutId = cwc && cwc.metaInfo && cwc.metaInfo().uid;
+      if (layoutId && typeof layoutId.value === 'function') layoutId = layoutId.value();
+      return {
+        href: window.location.href,
+        pane_count: Number(count),
+        layout_id: layoutId == null ? null : String(layoutId),
+        chart_available: Boolean(chart),
+      };
+    })()
+  `);
+  if (!pre || pre.href !== canonicalUrl || pre.layout_id !== expected.layoutId
+    || pre.pane_count !== expected.paneCount || pre.chart_available !== true) {
+    throw new Error('Scoped existing-chart save authority changed before save.');
+  }
+
+  const inventory = await inspectInventory();
+  if (inventory?.success !== true || inventory.pane_count !== expected.paneCount
+    || !Array.isArray(inventory.panes) || inventory.panes.length !== expected.paneCount
+    || inventory.panes.some((pane, index) => pane.index !== index || !Array.isArray(pane.indicators)
+      || pane.indicators.some((indicator) => indicator.get_study_by_id_resolves !== true))) {
+    throw new Error('Scoped existing-chart save indicator identity is incomplete.');
+  }
+  const signatures = await inspectSignatures();
+  if (signatures?.success !== true || signatures.pane_count !== expected.paneCount
+    || !Array.isArray(signatures.panes) || signatures.panes.length !== expected.paneCount
+    || signatures.panes.some((pane, index) => pane.index !== index)) {
+    throw new Error('Scoped existing-chart save indicator parity is unavailable.');
+  }
+  const parityHash = derivePaneIndicatorParityHash({
+    paneCapacity: expected.paneCount,
+    canonicalPaneIndex: signatures.canonical_pane_index,
+    panes: signatures.panes,
+  });
+  if (parityHash !== expected.parityHash) {
+    throw new Error('Scoped existing-chart save indicator parity does not match reviewed authority.');
+  }
+
+  const saved = await evaluateAsync(`
+    (function() {
+      var service = window.TradingViewApi && window.TradingViewApi._saveChartService;
+      if (!service || typeof service.saveExistentChart !== 'function') {
+        return { success: false, error: 'Existing-chart save service is unavailable.' };
+      }
+      return new Promise(function(resolve) {
+        var settled = false;
+        function finish(value) {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        }
+        try {
+          service.saveExistentChart(function(value) {
+            finish({ success: true, uid: value && value.uid != null ? String(value.uid) : null });
+          }, function(error) {
+            finish({ success: false, error: 'Existing-chart save failed.' });
+          }, { autoSave: false });
+        } catch (error) {
+          finish({ success: false, error: 'Existing-chart save failed.' });
+        }
+      });
+    })()
+  `);
+  if (!saved || saved.success !== true || saved.uid !== expected.layoutId) {
+    throw new Error('Existing-chart save did not preserve reviewed layout identity.');
+  }
+
+  const post = await evaluate(`
+    (function() {
+      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+      var layoutId = cwc && cwc.metaInfo && cwc.metaInfo().uid;
+      if (layoutId && typeof layoutId.value === 'function') layoutId = layoutId.value();
+      return { href: window.location.href, layout_id: layoutId == null ? null : String(layoutId) };
+    })()
+  `);
+  if (!post || post.href !== canonicalUrl || post.layout_id !== expected.layoutId) {
+    throw new Error('Existing-chart save postcondition changed reviewed chart identity.');
+  }
+  return {
+    success: true,
+    save_version: 'chart-save-existing-scoped-v1',
+    profile_id: expected.profileId,
+    chart_target_id: expected.targetId,
+    chart_id: expected.chartId,
+    layout_id: expected.layoutId,
+    pane_count: expected.paneCount,
+    indicator_parity_hash: parityHash,
+    saved_layout_id: saved.uid,
+    saved_existing: true,
+    mutations_performed: true,
   };
 }
 

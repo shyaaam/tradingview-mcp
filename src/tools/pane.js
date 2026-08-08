@@ -14,6 +14,11 @@ export function registerPaneTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'pane_indicator_mutation_inventory', 'Read per-pane study identity and exact getAllStudies mutation visibility without focusing or mutating panes', async () => {
+    try { return jsonResult(await core.mutationIdentityInventory()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   registerObserverTool(server, 'pane_probe_layout_capability', 'Probe one exact TradingView pane layout capability and restore the prior layout', async ({ pane_count, timeout_ms, poll_interval_ms, stable_polls, validate_focus }) => {
     try {
       return jsonResult(await core.probeLayoutCapability({
