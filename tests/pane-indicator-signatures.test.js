@@ -145,3 +145,75 @@ test('mutation identity inventory rejects contradictory visibility evidence', as
     /incompatible/,
   );
 });
+
+test('mutation identity inventory reads the real getAllStudies surface and performs no mutation', async () => {
+  let expression = '';
+  await mutationIdentityInventory({
+    _deps: {
+      evaluate: async (value) => {
+        expression = value;
+        return {
+          pane_count: 1,
+          panes: [{
+            index: 0,
+            indicators: [{
+              indicator_id: 'RSI@tv-basicstudies',
+              entity_id: 'entity-rsi-0',
+              indicator_name: 'Relative Strength Index',
+              is_price_study: false,
+              settings: { length: 14 },
+              get_study_by_id_resolves: true,
+              present_in_get_all_studies: true,
+              mutation_visible: true,
+            }],
+          }],
+        };
+      },
+    },
+  });
+  assert.match(expression, /getAllStudies/);
+  assert.doesNotMatch(expression, /setLayout|setSymbol|setResolution|removeEntity|insertStudy|\.click\(|navigate/);
+});
+
+test('mutation identity inventory canonicalizes order and rejects duplicate identities', async () => {
+  const raw = {
+    pane_count: 1,
+    panes: [{
+      index: 0,
+      indicators: [
+        {
+          indicator_id: 'B', entity_id: 'entity-b', indicator_name: 'B', is_price_study: false,
+          settings: {}, get_study_by_id_resolves: true, present_in_get_all_studies: true, mutation_visible: true,
+        },
+        {
+          indicator_id: 'A', entity_id: 'entity-a', indicator_name: 'A', is_price_study: false,
+          settings: {}, get_study_by_id_resolves: true, present_in_get_all_studies: true, mutation_visible: true,
+        },
+      ],
+    }],
+  };
+  const result = await mutationIdentityInventory({ _deps: { evaluate: async () => raw } });
+  assert.deepEqual(result.panes[0]?.indicators.map((indicator) => indicator.indicator_id), ['A', 'B']);
+
+  await assert.rejects(
+    mutationIdentityInventory({
+      _deps: { evaluate: async () => ({
+        ...raw,
+        panes: [{ ...raw.panes[0], indicators: [raw.panes[0].indicators[0], { ...raw.panes[0].indicators[1], indicator_id: 'B' }] }],
+      }) },
+    }),
+    /duplicate indicator identity/,
+  );
+  await assert.rejects(
+    mutationIdentityInventory({
+      _deps: { evaluate: async () => ({
+        pane_count: 2,
+        panes: [
+          raw.panes[0],
+          { index: 1, indicators: [{ ...raw.panes[0].indicators[0], indicator_id: 'C', entity_id: 'entity-b' }] },
+        ],
+      }) },
+    }),
+    /duplicate entity identity/,
+  );
+});

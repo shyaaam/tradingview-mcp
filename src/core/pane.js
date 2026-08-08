@@ -178,9 +178,9 @@ export async function indicatorSignatures({ _deps } = {}) {
 
 /**
  * Read per-pane identity through the same model used by scoped mutations.
- * This never focuses or mutates a pane. TradingView's getAllStudies surface
- * excludes non-counted definitions; expose that decision explicitly so the
- * Runtime can reject repairs that target an unaddressable study.
+ * This never focuses or mutates a pane. Every source from the authoritative
+ * pane inventory is returned, including studies absent from getAllStudies.
+ * Addressability is evidence, not an omission filter.
  */
 export async function mutationIdentityInventory({ _deps } = {}) {
   const evaluateFn = _deps?.evaluate || evaluate;
@@ -199,12 +199,21 @@ export async function mutationIdentityInventory({ _deps } = {}) {
         var widget = all[paneIndex];
         var model = widget && typeof widget.model === 'function' ? widget.model() : null;
         var chartModel = model && typeof model.model === 'function' ? model.model() : null;
+        var sources = chartModel && typeof chartModel.dataSources === 'function' ? chartModel.dataSources() : null;
         var chartApiHolder = chartModel && typeof chartModel.chartApi === 'function' ? chartModel.chartApi() : null;
         var chartApi = chartApiHolder && typeof chartApiHolder.chartApi === 'function' ? chartApiHolder.chartApi() : null;
-        var sources = chartModel && typeof chartModel.dataSources === 'function' ? chartModel.dataSources() : null;
+        var allStudies = chartApi && typeof chartApi.getAllStudies === 'function'
+          ? chartApi.getAllStudies()
+          : (chartModel && typeof chartModel.getAllStudies === 'function' ? chartModel.getAllStudies() : null);
         if (!Array.isArray(sources) || !chartModel || typeof chartModel.getStudyById !== 'function'
-          || !chartApi || typeof chartApi._isNonCountedStudy !== 'function') {
+          || !Array.isArray(allStudies)) {
           return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+        }
+        var allStudyIds = Object.create(null);
+        for (var allStudyIndex = 0; allStudyIndex < allStudies.length; allStudyIndex++) {
+          var allStudy = allStudies[allStudyIndex];
+          var allStudyId = allStudy && typeof allStudy.id === 'string' ? allStudy.id.trim() : '';
+          if (allStudyId) allStudyIds[allStudyId] = true;
         }
         var indicators = [];
         for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
@@ -225,17 +234,23 @@ export async function mutationIdentityInventory({ _deps } = {}) {
             var resolvedStudy = chartModel.getStudyById(entityId);
             resolves = resolvedStudy !== null && resolvedStudy !== undefined;
           } catch (error) { resolves = false; }
-          var nonCounted = chartApi._isNonCountedStudy(meta.id);
-          if (typeof nonCounted !== 'boolean' || typeof source.inputs !== 'function') {
+          if (typeof source.inputs !== 'function') {
             return { error: 'TradingView pane mutation visibility or settings evidence is unavailable.' };
           }
-          var presentInGetAllStudies = !nonCounted;
+          var settings;
+          try {
+            settings = source.inputs();
+            JSON.stringify(settings);
+          } catch (error) {
+            return { error: 'TradingView pane indicator settings are unavailable.' };
+          }
+          var presentInGetAllStudies = allStudyIds[entityId] === true;
           indicators.push({
             indicator_id: meta.id,
             entity_id: entityId,
             indicator_name: String(meta.description || meta.shortDescription || meta.id),
             is_price_study: meta.is_price_study === true,
-            settings: source.inputs(),
+            settings: settings,
             get_study_by_id_resolves: resolves,
             present_in_get_all_studies: presentInGetAllStudies,
             mutation_visible: resolves && presentInGetAllStudies,
@@ -253,20 +268,31 @@ export async function mutationIdentityInventory({ _deps } = {}) {
   if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
     throw new Error('TradingView pane mutation identity inventory is incompatible.');
   }
+  const seenEntityIds = new Set();
+  const panes = raw.panes.map((pane, index) => {
+    if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
+      throw new Error('TradingView pane mutation identity inventory is incompatible.');
+    }
+    const indicators = pane.indicators.map((indicator) => normalizeMutationIndicator(indicator));
+    assertUniqueMutationIdentity(indicators, pane.index);
+    for (const indicator of indicators) {
+      if (seenEntityIds.has(indicator.entity_id)) {
+        throw new Error('TradingView pane mutation identity inventory contains duplicate entity identity.');
+      }
+      seenEntityIds.add(indicator.entity_id);
+    }
+    indicators.sort((left, right) => canonicalJson(stableMutationIndicator(left)).localeCompare(canonicalJson(stableMutationIndicator(right))));
+    return {
+      index,
+      indicators,
+    };
+  });
   return {
     success: true,
     schema_version: PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION,
     pane_count: paneCount,
     canonical_pane_index: 0,
-    panes: raw.panes.map((pane, index) => {
-      if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
-        throw new Error('TradingView pane mutation identity inventory is incompatible.');
-      }
-      return {
-        index,
-        indicators: pane.indicators.map((indicator) => normalizeMutationIndicator(indicator)),
-      };
-    }),
+    panes,
   };
 }
 
@@ -339,6 +365,34 @@ function normalizeMutationIndicator(indicator) {
     present_in_get_all_studies: indicator.present_in_get_all_studies,
     mutation_visible: indicator.mutation_visible,
   };
+}
+
+function stableMutationIndicator(indicator) {
+  return {
+    indicator_id: indicator.indicator_id,
+    entity_id: indicator.entity_id,
+    indicator_name: indicator.indicator_name,
+    is_price_study: indicator.is_price_study,
+    settings: indicator.settings,
+    get_study_by_id_resolves: indicator.get_study_by_id_resolves,
+    present_in_get_all_studies: indicator.present_in_get_all_studies,
+    mutation_visible: indicator.mutation_visible,
+  };
+}
+
+function assertUniqueMutationIdentity(indicators, paneIndex) {
+  const indicatorIds = new Set();
+  const entityIds = new Set();
+  for (const indicator of indicators) {
+    if (indicatorIds.has(indicator.indicator_id)) {
+      throw new Error(`TradingView pane mutation identity inventory contains duplicate indicator identity on pane ${paneIndex}.`);
+    }
+    if (entityIds.has(indicator.entity_id)) {
+      throw new Error(`TradingView pane mutation identity inventory contains duplicate entity identity on pane ${paneIndex}.`);
+    }
+    indicatorIds.add(indicator.indicator_id);
+    entityIds.add(indicator.entity_id);
+  }
 }
 
 function stableIndicator(indicator) {
