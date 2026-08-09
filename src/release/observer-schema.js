@@ -143,10 +143,41 @@ const lifecycleBrowserViewOutput = {
   target_info: z.object(lifecycleBrowserTargetInfoOutput),
 };
 
+const lifecycleNavigationTimingOutput = {
+  available: z.boolean(),
+  type: z.string().nullable(),
+  duration_ms: z.number().int().nonnegative().nullable(),
+  response_end_ms: z.number().int().nonnegative().nullable(),
+  dom_content_loaded_ms: z.number().int().nonnegative().nullable(),
+  load_event_end_ms: z.number().int().nonnegative().nullable(),
+  redirect_count: z.number().int().nonnegative().nullable(),
+};
+
+const lifecycleNavigationHistoryOutput = {
+  available: z.boolean(),
+  entry_count: z.number().int().nonnegative().nullable(),
+  current_index: z.number().int().nonnegative().nullable(),
+  current_entry_url_matches_expected: z.boolean().nullable(),
+  current_entry_scheme: z.string().nullable(),
+  current_entry_title: z.string().nullable(),
+  current_entry_transition_type: z.string().nullable(),
+  error: z.string().nullable(),
+};
+
 const lifecycleRuntimeViewOutput = {
   success: z.boolean(),
   current_url: z.string(),
   document_ready_state: z.enum(['loading', 'interactive', 'complete', 'unavailable']),
+  document_title: z.string(),
+  runtime_scheme: z.string(),
+  chrome_error_page: z.boolean(),
+  chrome_error_code: z.string().nullable(),
+  chrome_error_code_source: z.enum(['structured', 'selector', 'body_regex']).nullable(),
+  error_heading_summary: z.string().nullable(),
+  navigator_online: z.boolean().nullable(),
+  navigation_timing: z.object(lifecycleNavigationTimingOutput),
+  navigation_disposition: z.enum(['DOCUMENT_EXACT', 'DOCUMENT_ABOUT_BLANK', 'CHROME_NETWORK_ERROR', 'DOCUMENT_OTHER_URL', 'RUNTIME_UNAVAILABLE']),
+  navigation_history: z.object(lifecycleNavigationHistoryOutput),
   error: z.string().nullable(),
 };
 
