@@ -21,10 +21,10 @@ function response(value) {
   return { ok: true, status: 200, statusText: 'OK', json: async () => value };
 }
 
-function fakeFetch({ targetUrl = TARGET_URL, targetId = TARGET_ID } = {}) {
+function fakeFetch({ targetUrl = TARGET_URL, targetId = TARGET_ID, cdpUrl = `${MANAGER_URL}/profiles/${PROFILE_ID}/cdp` } = {}) {
   return async (url) => {
     if (url.endsWith('/profiles')) {
-      return response([{ id: PROFILE_ID, status: 'running', cdp_url: `${MANAGER_URL}/profiles/${PROFILE_ID}/cdp` }]);
+      return response([{ id: PROFILE_ID, status: 'running', cdp_url: cdpUrl }]);
     }
     if (url.endsWith('/json/list')) {
       return response([{ type: 'page', id: targetId, url: targetUrl, webSocketDebuggerUrl: 'ws://target-exact' }]);
@@ -156,6 +156,14 @@ test('target URL drift blocks without falling back to another target', async () 
   });
   assert.equal(result.status, 'TARGET_CHANGED');
   assert.equal(calls.runtimeEnable || 0, 0);
+});
+
+test('relative Manager CDP endpoint reaches raw runtime probe', async () => {
+  const result = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot(), {}, {
+    cdpUrl: `/api/profiles/${PROFILE_ID}/cdp/`,
+  }));
+  assert.equal(result.target_state, 'exact');
+  assert.equal(result.ready, true);
 });
 
 test('runtime URL drift after exact attachment blocks before READY', async () => {

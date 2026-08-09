@@ -125,6 +125,30 @@ function rawDeps({ identity = INPUT.expected_account_subject_sha256, signatures,
   };
 }
 
+function relativeRawTargetDeps() {
+  const evidence = paneEvidence();
+  const evaluate = async (expression) => {
+    if (expression.includes('account_subject_sha256')) {
+      return { chart_id: INPUT.expected_chart_id, layout_id: INPUT.expected_workspace_layout_id, account_subject_sha256: INPUT.expected_account_subject_sha256 };
+    }
+    if (expression.includes('pane indicator inventory')) return evidence.signatures;
+    if (expression.includes('mutation identity inventory')) return evidence.inventory;
+    if (expression.includes('getAllStudies')) return { success: true, symbol: 'NQ1!', resolution: '60', chartType: 1, studies: [] };
+    throw new Error('unexpected raw expression');
+  };
+  return {
+    waitReady: async () => readiness(),
+    fetch: async (url) => {
+      if (url.endsWith('/profiles')) return { ok: true, json: async () => [{ id: INPUT.profile_id, status: 'running', cdp_url: `/api/profiles/${INPUT.profile_id}/cdp/` }] };
+      if (url.endsWith('/json/list')) return { ok: true, json: async () => [{ id: INPUT.target_id, type: 'page', url: INPUT.target_url, webSocketDebuggerUrl: 'ws://target-exact' }] };
+      throw new Error(`unexpected URL: ${url}`);
+    },
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    connect: async () => ({ Runtime: { enable: async () => {}, evaluate: async () => ({ result: { value: undefined } }) }, close: async () => {} }),
+    rawEvaluate: evaluate,
+  };
+}
+
 test('readiness block prevents raw content extraction and clicking', async () => {
   let rawCalls = 0;
   const result = await chartRuntimeContentSnapshot(INPUT, {
@@ -168,6 +192,19 @@ test('READY snapshot reuses deterministic pane schemas and parity derivation', a
   assert.equal(result.pre_readiness.status, 'READY');
   assert.equal(result.post_readiness.status, 'READY');
   assert.doesNotThrow(() => z.object(chartRuntimeContentSnapshotOutput).parse(result));
+});
+
+test('content snapshot uses corrected relative Manager CDP binding', async () => {
+  const dependencies = relativeRawTargetDeps();
+  dependencies.connect = async () => ({
+    Runtime: {
+      enable: async () => {},
+      evaluate: async ({ expression }) => ({ result: { value: await dependencies.rawEvaluate(expression) } }),
+    },
+    close: async () => {},
+  });
+  const result = await chartRuntimeContentSnapshot(INPUT, dependencies);
+  assert.equal(result.status, 'READY');
 });
 
 test('independent account, workspace, saved UID, and pane-count drift blocks', async () => {

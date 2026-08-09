@@ -1,6 +1,7 @@
 import CDP from 'chrome-remote-interface';
 
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
+import { resolveManagerCdpUrl } from './manager-cdp.js';
 
 const DEFAULT_MANAGER_BASE_URLS = [
   'http://127.0.0.1:8080/api',
@@ -391,7 +392,7 @@ function profileIdFromEntry(entry) {
 
 function cdpUrlFromProfile(base, profileId, profile) {
   const value = profile?.cdp_url || profile?.cdp_endpoint || profile?.cdpUrl;
-  return value ? String(value).replace(/\/$/u, '') : `${base}/profiles/${encodeURIComponent(profileId)}/cdp`;
+  return resolveManagerCdpUrl(base, profileId, value);
 }
 
 function boundedNumber(value, fallback, min, max) {
