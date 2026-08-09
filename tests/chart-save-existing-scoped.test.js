@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import {
   deriveLayoutIdFromMetaInfo,
@@ -11,6 +12,7 @@ import {
 } from '../src/core/chart.js';
 import { derivePaneIndicatorParityHash } from '../src/core/pane.js';
 import { clearObserverSession, setObserverSession } from '../src/core/observer-session.js';
+import { deriveLegacyLayoutIdFromSources, LEGACY_LAYOUT_IDENTITY_HELPER } from '../src/core/layout-identity.js';
 
 const targetUrl = 'https://www.tradingview.com/chart/chart-x/';
 const signatures = {
@@ -30,6 +32,49 @@ test('layout ID extraction supports function/object/observable metaInfo forms', 
   assert.equal(deriveLayoutIdFromMetaInfo({ uid: { value: 'layout-value' } }), 'layout-value');
   assert.equal(deriveLayoutIdFromMetaInfo({ uid: 'wrong' }), 'wrong');
   assert.equal(deriveLayoutIdFromMetaInfo(null), null);
+});
+
+test('legacy workspace layout ignores layout type and uses historical collection/active identity', () => {
+  assert.deepEqual(deriveLegacyLayoutIdFromSources({
+    collection: { _layoutType: 8, _layoutId: 4 },
+    active: { layoutId: 4 },
+  }), { layout_id: '4' });
+});
+
+test('legacy workspace layout accepts one agreed collection and active identity', () => {
+  assert.deepEqual(deriveLegacyLayoutIdFromSources({
+    collection: { layoutId: '8' },
+    active: { _layoutId: 8 },
+  }), { layout_id: '8' });
+});
+
+test('legacy workspace layout rejects collection and active disagreement', () => {
+  assert.match(deriveLegacyLayoutIdFromSources({
+    collection: { _layoutId: 8 },
+    active: { layoutId: 4 },
+  }).error, /missing or ambiguous/);
+});
+
+test('legacy workspace layout unwraps function and observable values consistently', () => {
+  assert.deepEqual(deriveLegacyLayoutIdFromSources({
+    collection: { _layoutId: () => ({ value: () => 8 }) },
+    active: { _layoutId: { value: 8 } },
+  }), { layout_id: '8' });
+});
+
+test('browser layout helper matches shared legacy derivation semantics', () => {
+  const browserDerive = (api) => vm.runInNewContext(`(function() {
+    ${LEGACY_LAYOUT_IDENTITY_HELPER}
+    return deriveLegacyLayoutId(api);
+  })()`, { api });
+  const api = {
+    _chartWidgetCollection: { _layoutType: 8, _layoutId: { value: () => 4 } },
+    _activeChartWidgetWV: { value: () => ({ _layoutId: 4 }) },
+  };
+  assert.equal(JSON.stringify(browserDerive(api)), JSON.stringify(deriveLegacyLayoutIdFromSources({
+    collection: api._chartWidgetCollection,
+    active: { _layoutId: { value: () => 4 } },
+  })));
 });
 
 test('scoped existing-chart save requires exact target and uses existing save only', async () => {
@@ -173,6 +218,7 @@ test('v2 capability probe reports both identities and never invokes save', async
     assert.equal(result.chart_id, 'chart-x');
     assert.equal(result.mutations_performed, false);
     assert.equal(result.save_capability_available, true);
+    assert.doesNotMatch(expression, /_layoutType/);
     assert.doesNotMatch(expression, /saveExistentChart\s*\(|loadChartFromServer|Page\.navigate|setLayout|setSymbol|setResolution/);
   } finally {
     clearObserverSession();
@@ -245,6 +291,32 @@ test('v2 scoped save rejects independent workspace-layout drift before save', as
           listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
           getBoundClient: async () => ({}),
           evaluate: async () => ({ href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '4', saved_layout_uid: 'chart-x', pane_count: 2, chart_available: true }),
+          evaluateAsync: async () => { throw new Error('save must not run'); },
+        },
+      }),
+      /Dual saved-layout identity does not match reviewed authority/,
+    );
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 scoped save rejects independent saved UID drift before save', async () => {
+  const parityHash = derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes });
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api', profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp', chartTargetId: 'target-a', chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScopedV2({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', expected_chart_id: 'chart-x',
+        expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+        expected_indicator_parity_hash: parityHash,
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'other-chart', pane_count: 2, chart_available: true }),
           evaluateAsync: async () => { throw new Error('save must not run'); },
         },
       }),

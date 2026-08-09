@@ -12,6 +12,7 @@ import {
 import { list as _listTabs } from './tab.js';
 import { indicatorSignatures, mutationIdentityInventory, derivePaneIndicatorParityHash } from './pane.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -125,6 +126,7 @@ const LAYOUT_EVIDENCE_EXPRESSION = `
 
 const DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION = `
   (function() {
+    ${LEGACY_LAYOUT_IDENTITY_HELPER}
     function read(value) {
       try {
         if (typeof value === 'function') value = value();
@@ -145,11 +147,12 @@ const DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION = `
     var metaInfo = rawMetaInfo;
     if (typeof metaInfo === 'function') metaInfo = metaInfo();
     var savedLayoutUid = read(metaInfo && metaInfo.uid);
+    var layoutIdentity = deriveLegacyLayoutId(api);
     return {
       href: href,
       canonical_url: canonicalUrl,
       chart_id: chartId,
-      workspace_layout_id: read(collection && collection._layoutType),
+      workspace_layout_id: layoutIdentity.layout_id || null,
       saved_layout_uid: savedLayoutUid,
       pane_count: Number(read(collection && collection.inlineChartsCount)),
       chart_available: Boolean(chart),
