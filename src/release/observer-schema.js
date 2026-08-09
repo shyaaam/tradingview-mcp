@@ -53,6 +53,65 @@ const savedLayoutIdentityOutput = {
   mutations_performed: z.literal(false),
 };
 
+const chartRuntimeReadinessInput = {
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1),
+  target_url: z.string().url(),
+};
+
+const chartRuntimeReadinessOutput = {
+  success: z.literal(true),
+  probe_version: z.literal('chart-runtime-readiness-probe-v1'),
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1),
+  target_url: z.string().url(),
+  profile_state: z.enum(['ready', 'missing', 'not-running', 'ambiguous', 'unavailable']),
+  target_state: z.enum(['exact', 'missing', 'changed', 'ambiguous', 'unavailable']),
+  document_ready_state: z.enum(['loading', 'interactive', 'complete', 'unavailable']),
+  current_url: z.string(),
+  current_path: z.string(),
+  tradingview_api_present: z.boolean(),
+  tradingview_api_type: z.string(),
+  chart_widget_collection_present: z.boolean(),
+  chart_widget_collection_type: z.string(),
+  active_widget_wrapper_present: z.boolean(),
+  active_widget_wrapper_type: z.string(),
+  active_widget_value_callable: z.boolean(),
+  active_widget_non_null: z.boolean(),
+  workspace_layout_status: z.enum(['ready', 'missing', 'ambiguous', 'unavailable']),
+  workspace_layout_id: z.string().nullable(),
+  saved_layout_meta_info_status: z.enum(['ready', 'missing', 'ambiguous', 'unavailable']),
+  saved_layout_meta_info_type: z.string(),
+  saved_layout_uid: z.string().nullable(),
+  saved_layout_uid_ready: z.boolean(),
+  account_subject_candidate_count: z.number().int().nonnegative(),
+  account_subject_state: z.enum(['ready', 'missing', 'ambiguous', 'unavailable']),
+  disconnected_session_state: z.enum(['present', 'absent', 'ambiguous', 'unavailable']),
+  disconnected_popup_count: z.number().int().nonnegative(),
+  exact_connect_count: z.number().int().nonnegative(),
+  login_state: z.enum(['present', 'absent', 'ambiguous', 'unavailable']),
+  login_marker_count: z.number().int().nonnegative(),
+  mutations_performed: z.literal(false),
+  probe_error: z.string().nullable(),
+  ready: z.boolean(),
+};
+
+const chartRuntimeWaitReadyInput = {
+  ...chartRuntimeReadinessInput,
+  timeout_ms: z.coerce.number().int().min(1).max(30_000).optional().default(5_000),
+  poll_interval_ms: z.coerce.number().int().min(1).max(5_000).optional().default(250),
+};
+
+const chartRuntimeWaitReadyOutput = {
+  success: z.literal(true),
+  wait_version: z.literal('chart-runtime-wait-ready-v1'),
+  status: z.enum(['READY', 'DISCONNECTED_SESSION_PRESENT', 'LOGIN_REQUIRED', 'IDENTITY_AMBIGUOUS', 'TARGET_CHANGED', 'TIMEOUT_NOT_READY']),
+  attempts: z.number().int().positive(),
+  elapsed_ms: z.number().int().nonnegative(),
+  probe: z.object(chartRuntimeReadinessOutput),
+  mutations_performed: z.literal(false),
+};
+
 const observerCaptureCandleInput = {
   symbol: z.string().min(1),
   timeframe: z.string().min(1),
@@ -194,6 +253,16 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().url(),
       mutations_performed: z.literal(false),
     },
+  },
+  chart_runtime_readiness_probe_v1: {
+    classification: 'read_only',
+    inputSchema: chartRuntimeReadinessInput,
+    outputSchema: chartRuntimeReadinessOutput,
+  },
+  chart_runtime_wait_ready_v1: {
+    classification: 'read_only',
+    inputSchema: chartRuntimeWaitReadyInput,
+    outputSchema: chartRuntimeWaitReadyOutput,
   },
   tv_observer_hydrate_chart_target: {
     classification: 'bootstrap_mutation',
@@ -583,7 +652,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1') {
       requireObserverSession();
     }
     return handler(args, extra);

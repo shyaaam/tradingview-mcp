@@ -20,6 +20,7 @@ import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
 import { registerChartTargetHydrationTool } from './tools/chart-target-hydration.js';
+import { registerChartRuntimeReadinessTools } from './tools/chart-runtime-readiness.js';
 import { buildObserverContract, SERVER_NAME, SERVER_VERSION } from './release/identity.js';
 import { installStdioLifecycle } from './release/lifecycle.js';
 import { disconnectStrict } from './connection.js';
@@ -99,6 +100,7 @@ registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 registerChartTargetHydrationTool(server);
+registerChartRuntimeReadinessTools(server);
 
 const contract = buildObserverContract();
 const startupEvent = {
