@@ -25,6 +25,7 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
+import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
 import { registerObserverScreenshotTool } from '../src/tools/observer-screenshot.js';
 
 const require = createRequire(import.meta.url);
@@ -69,6 +70,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_attach_existing_read_only',
     'chart_runtime_readiness_probe_v1',
     'chart_runtime_wait_ready_v1',
+    'chart_runtime_content_snapshot_v1',
     'tv_observer_hydrate_chart_target',
     'tv_observer_identity',
     'chart_saved_layout_identity',
@@ -113,6 +115,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
+  registerChartRuntimeContentSnapshotTools(fakeServer);
   registerObserverScreenshotTool(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
@@ -241,6 +244,85 @@ test('observer result fixtures satisfy registered output schemas', () => {
         probe_error: null,
         ready: true,
       },
+      mutations_performed: false,
+    },
+    chart_runtime_content_snapshot_v1: {
+      success: true,
+      snapshot_version: 'chart-runtime-content-snapshot-v1',
+      status: 'READY',
+      block_reason: null,
+      profile_id: 'profile-a',
+      target_id: 'chart-1',
+      target_url: 'https://www.tradingview.com/chart/x/',
+      chart_id: 'x',
+      workspace_layout_id: '8',
+      saved_layout_uid: 'x',
+      account_subject_sha256: 'a'.repeat(64),
+      pane_count: 1,
+      chart_symbol: 'AAPL',
+      chart_resolution: '60',
+      chart_type: 1,
+      chart_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [] },
+      pane_indicator_signatures: {
+        success: true,
+        schema_version: 'pane-indicator-signatures-v1',
+        pane_count: 1,
+        canonical_pane_index: 0,
+        panes: [{ index: 0, signature: 'a'.repeat(64), indicators: [] }],
+      },
+      pane_mutation_inventory: {
+        success: true,
+        schema_version: 'pane-indicator-mutation-inventory-v1',
+        pane_count: 1,
+        canonical_pane_index: 0,
+        panes: [{ index: 0, indicators: [] }],
+      },
+      indicator_parity_hash: 'b'.repeat(64),
+      pre_readiness: {
+        success: true,
+        wait_version: 'chart-runtime-wait-ready-v1',
+        status: 'READY',
+        attempts: 1,
+        elapsed_ms: 1,
+        probe: {
+          success: true,
+          probe_version: 'chart-runtime-readiness-probe-v1',
+          profile_id: 'profile-a',
+          target_id: 'chart-1',
+          target_url: 'https://www.tradingview.com/chart/x/',
+          profile_state: 'ready',
+          target_state: 'exact',
+          document_ready_state: 'complete',
+          current_url: 'https://www.tradingview.com/chart/x/',
+          current_path: '/chart/x/',
+          tradingview_api_present: true,
+          tradingview_api_type: 'object',
+          chart_widget_collection_present: true,
+          chart_widget_collection_type: 'object',
+          active_widget_wrapper_present: true,
+          active_widget_wrapper_type: 'object',
+          active_widget_value_callable: true,
+          active_widget_non_null: true,
+          workspace_layout_status: 'ready',
+          workspace_layout_id: '8',
+          saved_layout_meta_info_status: 'ready',
+          saved_layout_meta_info_type: 'object',
+          saved_layout_uid: 'x',
+          saved_layout_uid_ready: true,
+          account_subject_candidate_count: 1,
+          account_subject_state: 'ready',
+          disconnected_session_state: 'absent',
+          disconnected_popup_count: 0,
+          exact_connect_count: 0,
+          login_state: 'absent',
+          login_marker_count: 0,
+          mutations_performed: false,
+          probe_error: null,
+          ready: true,
+        },
+        mutations_performed: false,
+      },
+      post_readiness: null,
       mutations_performed: false,
     },
     tv_observer_identity: {

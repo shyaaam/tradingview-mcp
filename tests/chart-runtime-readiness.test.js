@@ -8,6 +8,7 @@ import {
   classifyReadinessOutcome,
   probeChartRuntimeReadiness,
   waitForChartRuntimeReady,
+  withExactRawTarget,
 } from '../src/core/chart-runtime-readiness.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
@@ -169,6 +170,27 @@ test('missing exact target does not select another target with matching URL', as
   const result = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot(), {}, { targetId: 'other-target' }));
   assert.equal(result.target_state, 'missing');
   assert.equal(result.ready, false);
+});
+
+test('raw content binding uses one exact target and closes without session recovery', async () => {
+  const calls = {};
+  const result = await withExactRawTarget(input(), async ({ target, evaluate }) => ({
+    target_id: target.id,
+    snapshot: await evaluate(CHART_RUNTIME_READINESS_EXPRESSION),
+  }), probeDeps(readySnapshot(), calls));
+  assert.equal(result.target_id, TARGET_ID);
+  assert.equal(result.snapshot.mutations_performed, false);
+  assert.equal(calls.runtimeEnable, 1);
+  assert.equal(calls.closed, 1);
+});
+
+test('raw content binding rejects exact URL drift before opening CDP', async () => {
+  const calls = {};
+  await assert.rejects(
+    () => withExactRawTarget(input(), async () => { throw new Error('must not run'); }, probeDeps(readySnapshot(), calls, { targetUrl: 'https://www.tradingview.com/chart/other/' })),
+    /Exact target or URL changed/,
+  );
+  assert.equal(calls.runtimeEnable || 0, 0);
 });
 
 test('polling is bounded and READY waits for every authority surface', async () => {

@@ -199,6 +199,33 @@ export async function probeChartRuntimeReadiness(input = {}, dependencies = {}) 
   }
 }
 
+/**
+ * Execute one operation on one exact existing target without observer-session
+ * recovery. Caller owns read-only policy for evaluated expressions.
+ */
+export async function withExactRawTarget(input = {}, operation, dependencies = {}) {
+  if (typeof operation !== 'function') throw new Error('Raw exact-target operation is required.');
+  const binding = await resolveExactTargetBinding(input, dependencies);
+  const connect = dependencies.connect || ((webSocketDebuggerUrl) => CDP({ target: webSocketDebuggerUrl, local: true }));
+  const client = await connect(binding.target.webSocketDebuggerUrl);
+  try {
+    if (client?.Runtime?.enable) await client.Runtime.enable();
+    const rawEvaluate = async (expression, options = {}) => {
+      const evaluation = await client.Runtime.evaluate({
+        expression,
+        returnByValue: true,
+        awaitPromise: options.awaitPromise ?? false,
+        ...options,
+      });
+      if (evaluation?.exceptionDetails) throw new Error('Raw exact-target evaluation failed.');
+      return evaluation?.result?.value;
+    };
+    return await operation({ ...binding, client, evaluate: rawEvaluate });
+  } finally {
+    try { await client.close?.(); } catch { /* preserve raw operation result */ }
+  }
+}
+
 export async function waitForChartRuntimeReady(input = {}, dependencies = {}) {
   const timeoutMs = boundedNumber(input.timeout_ms, 5_000, 1, INPUT_LIMITS.timeoutMs);
   const pollIntervalMs = boundedNumber(input.poll_interval_ms, 250, 1, INPUT_LIMITS.pollIntervalMs);
@@ -318,6 +345,30 @@ async function resolveManagerBaseUrl(dependencies) {
     } catch { /* try next loopback Manager endpoint */ }
   }
   return null;
+}
+
+async function resolveExactTargetBinding(input, dependencies) {
+  const profileId = requireText(input.profile_id, 'profile_id');
+  const targetId = requireText(input.target_id, 'target_id');
+  const targetUrl = requireText(input.target_url, 'target_url');
+  const base = await resolveManagerBaseUrl(dependencies);
+  if (!base) throw new Error('CloakBrowser Manager is unavailable.');
+  const profiles = parseList(await fetchJson(new URL('profiles', `${base}/`).toString(), dependencies));
+  const matches = profiles.filter((entry) => profileIdFromEntry(entry) === profileId);
+  if (matches.length !== 1) throw new Error('Exact Manager profile binding is missing or ambiguous.');
+  const profile = matches[0];
+  if (!PROFILE_READY_STATES.has(String(profile.status || profile.state || '').toLowerCase())) {
+    throw new Error('Exact Manager profile is not running.');
+  }
+  const cdpUrl = cdpUrlFromProfile(base, profileId, profile);
+  if (!cdpUrl) throw new Error('Exact Manager profile CDP endpoint is unavailable.');
+  const targets = parseTargets(await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies));
+  const target = targets.find((entry) => String(entry?.id || '') === targetId);
+  if (!target || target.type !== 'page' || String(target.url || '') !== targetUrl) {
+    throw new Error('Exact target or URL changed or is unavailable.');
+  }
+  if (!target.webSocketDebuggerUrl) throw new Error('Exact target WebSocket endpoint is unavailable.');
+  return { profileId, targetId, targetUrl, managerBaseUrl: base, cdpUrl, target };
 }
 
 async function fetchJson(url, { fetch: fetchImpl = fetch } = {}) {

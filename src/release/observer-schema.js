@@ -112,6 +112,88 @@ const chartRuntimeWaitReadyOutput = {
   mutations_performed: z.literal(false),
 };
 
+export const paneIndicatorSignaturesOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-signatures-v1'),
+  pane_count: z.number().int().min(1).max(16),
+  canonical_pane_index: z.literal(0),
+  panes: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    signature: z.string().regex(/^[0-9a-f]{64}$/),
+    indicators: z.array(z.object({
+      indicator_id: z.string().min(1),
+      entity_id: z.string().min(1),
+      indicator_name: z.string().min(1),
+      is_price_study: z.boolean(),
+      settings: jsonObject,
+    })),
+  })),
+};
+
+export const paneIndicatorMutationInventoryOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-mutation-inventory-v1'),
+  pane_count: z.number().int().min(1).max(16),
+  canonical_pane_index: z.literal(0),
+  panes: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    indicators: z.array(z.object({
+      indicator_id: z.string().min(1),
+      entity_id: z.string().min(1),
+      indicator_name: z.string().min(1),
+      is_price_study: z.boolean(),
+      settings: jsonObject,
+      get_study_by_id_resolves: z.boolean(),
+      present_in_get_all_studies: z.boolean(),
+      mutation_visible: z.boolean(),
+    })),
+  })),
+};
+
+export const chartStateOutput = {
+  success: z.literal(true),
+  symbol: z.string(),
+  resolution: z.string(),
+  chartType: z.number(),
+  studies: z.array(z.object({ id: z.string(), name: z.string() })),
+};
+
+export const chartRuntimeContentSnapshotOutput = {
+  success: z.literal(true),
+  snapshot_version: z.literal('chart-runtime-content-snapshot-v1'),
+  status: z.enum(['READY', 'BLOCKED']),
+  block_reason: z.string().nullable(),
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1),
+  target_url: z.string().url(),
+  chart_id: z.string().nullable(),
+  workspace_layout_id: z.string().nullable(),
+  saved_layout_uid: z.string().nullable(),
+  account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  pane_count: z.number().int().min(1).max(16).nullable(),
+  chart_symbol: z.string().nullable(),
+  chart_resolution: z.string().nullable(),
+  chart_type: z.number().nullable(),
+  chart_state: z.object(chartStateOutput).nullable(),
+  pane_indicator_signatures: z.object(paneIndicatorSignaturesOutput).nullable(),
+  pane_mutation_inventory: z.object(paneIndicatorMutationInventoryOutput).nullable(),
+  indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  pre_readiness: z.object(chartRuntimeWaitReadyOutput),
+  post_readiness: z.object(chartRuntimeWaitReadyOutput).nullable(),
+  mutations_performed: z.literal(false),
+};
+
+export const chartRuntimeContentSnapshotInput = {
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1),
+  target_url: z.string().url(),
+  expected_chart_id: z.string().min(1),
+  expected_workspace_layout_id: z.string().min(1),
+  expected_saved_layout_uid: z.string().min(1),
+  expected_pane_count: z.number().int().min(1).max(16),
+  expected_account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+};
+
 const observerCaptureCandleInput = {
   symbol: z.string().min(1),
   timeframe: z.string().min(1),
@@ -263,6 +345,11 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'read_only',
     inputSchema: chartRuntimeWaitReadyInput,
     outputSchema: chartRuntimeWaitReadyOutput,
+  },
+  chart_runtime_content_snapshot_v1: {
+    classification: 'read_only',
+    inputSchema: chartRuntimeContentSnapshotInput,
+    outputSchema: chartRuntimeContentSnapshotOutput,
   },
   tv_observer_hydrate_chart_target: {
     classification: 'bootstrap_mutation',
@@ -424,47 +511,13 @@ export const observerToolDefinitions = Object.freeze({
   pane_indicator_signatures: {
     classification: 'read_only',
     inputSchema: emptyInput,
-    outputSchema: {
-      success: z.literal(true),
-      schema_version: z.literal('pane-indicator-signatures-v1'),
-      pane_count: z.number().int().min(1).max(16),
-      canonical_pane_index: z.literal(0),
-      panes: z.array(z.object({
-        index: z.number().int().nonnegative(),
-        signature: z.string().regex(/^[0-9a-f]{64}$/),
-        indicators: z.array(z.object({
-          indicator_id: z.string().min(1),
-          entity_id: z.string().min(1),
-          indicator_name: z.string().min(1),
-          is_price_study: z.boolean(),
-          settings: jsonObject,
-        })),
-      })),
-    },
+    outputSchema: paneIndicatorSignaturesOutput,
     rejectUnexpectedInput: true,
   },
   pane_indicator_mutation_inventory: {
     classification: 'read_only',
     inputSchema: emptyInput,
-    outputSchema: {
-      success: z.literal(true),
-      schema_version: z.literal('pane-indicator-mutation-inventory-v1'),
-      pane_count: z.number().int().min(1).max(16),
-      canonical_pane_index: z.literal(0),
-      panes: z.array(z.object({
-        index: z.number().int().nonnegative(),
-        indicators: z.array(z.object({
-          indicator_id: z.string().min(1),
-          entity_id: z.string().min(1),
-          indicator_name: z.string().min(1),
-          is_price_study: z.boolean(),
-          settings: jsonObject,
-          get_study_by_id_resolves: z.boolean(),
-          present_in_get_all_studies: z.boolean(),
-          mutation_visible: z.boolean(),
-        })),
-      })),
-    },
+    outputSchema: paneIndicatorMutationInventoryOutput,
     rejectUnexpectedInput: true,
   },
   pane_probe_layout_capability: {
@@ -500,13 +553,7 @@ export const observerToolDefinitions = Object.freeze({
   chart_get_state: {
     classification: 'read_only',
     inputSchema: emptyInput,
-    outputSchema: {
-      success: z.literal(true),
-      symbol: z.string(),
-      resolution: z.string(),
-      chartType: z.number(),
-      studies: z.array(z.object({ id: z.string(), name: z.string() })),
-    },
+    outputSchema: chartStateOutput,
   },
   chart_save_existing_capability_probe: {
     classification: 'read_only',
@@ -652,7 +699,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_content_snapshot_v1') {
       requireObserverSession();
     }
     return handler(args, extra);

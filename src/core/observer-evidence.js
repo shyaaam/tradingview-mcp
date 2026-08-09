@@ -8,46 +8,48 @@ export const OBSERVER_TELEMETRY_OHLCV_VERSION = 'observer-telemetry-ohlcv-v1';
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const HASH = /^[0-9a-f]{64}$/;
 
+export const OBSERVER_IDENTITY_EVIDENCE_EXPRESSION = `
+  (async function() {
+    ${LEGACY_LAYOUT_IDENTITY_HELPER}
+    function read(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+      } catch (e) { return ''; }
+    }
+    var api = window.TradingViewApi;
+    var active = api && api._activeChartWidgetWV && typeof api._activeChartWidgetWV.value === 'function' ? api._activeChartWidgetWV.value() : null;
+    var collection = api && api._chartWidgetCollection;
+    var chartIds = [];
+    var pathMatch = String(window.location && window.location.pathname || '').match(/\\/chart\\/([^/?#]+)/i);
+    if (pathMatch) chartIds.push(pathMatch[1]);
+    if (active) chartIds.push(read(active.chartId || active._chartId || active.id));
+    chartIds = chartIds.filter(function(value, index) { return value && chartIds.indexOf(value) === index; });
+    var layoutIdentity = deriveLegacyLayoutId(api);
+    var subjects = [];
+    var candidates = [
+      api && api._user && (api._user.id || api._user.user_id || api._user.username),
+      window.TradingView && window.TradingView.user && (window.TradingView.user.id || window.TradingView.user.user_id || window.TradingView.user.username),
+      collection && collection.metaInfo && collection.metaInfo.username,
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      var subject = read(candidates[i]);
+      if (subject && subjects.indexOf(subject) === -1) subjects.push(subject);
+    }
+    if (chartIds.length !== 1 || layoutIdentity.error || subjects.length !== 1) return { error: 'Bound authenticated chart identity is missing or ambiguous.' };
+    if (!window.crypto || !window.crypto.subtle || typeof window.crypto.subtle.digest !== 'function') return { error: 'Bound authenticated chart identity hashing is unavailable.' };
+    var bytes = new TextEncoder().encode(subjects[0]);
+    var digest = await window.crypto.subtle.digest('SHA-256', bytes);
+    var hash = Array.prototype.map.call(new Uint8Array(digest), function(byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+    return { chart_id: chartIds[0], layout_id: layoutIdentity.layout_id, account_subject_sha256: hash };
+  })()
+`;
+
 export async function identity({ _deps } = {}) {
   const session = requireObserverSession();
   const evaluate = _deps?.evaluateBound || _deps?.evaluate || evaluateBound;
-  const identity = await evaluate(`
-    (async function() {
-      ${LEGACY_LAYOUT_IDENTITY_HELPER}
-      function read(value) {
-        try {
-          if (typeof value === 'function') value = value();
-          if (value && typeof value.value === 'function') value = value.value();
-          return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
-        } catch (e) { return ''; }
-      }
-      var api = window.TradingViewApi;
-      var active = api && api._activeChartWidgetWV && typeof api._activeChartWidgetWV.value === 'function' ? api._activeChartWidgetWV.value() : null;
-      var collection = api && api._chartWidgetCollection;
-      var chartIds = [];
-      var pathMatch = String(window.location && window.location.pathname || '').match(/\\/chart\\/([^/?#]+)/i);
-      if (pathMatch) chartIds.push(pathMatch[1]);
-      if (active) chartIds.push(read(active.chartId || active._chartId || active.id));
-      chartIds = chartIds.filter(function(value, index) { return value && chartIds.indexOf(value) === index; });
-      var layoutIdentity = deriveLegacyLayoutId(api);
-      var subjects = [];
-      var candidates = [
-        api && api._user && (api._user.id || api._user.user_id || api._user.username),
-        window.TradingView && window.TradingView.user && (window.TradingView.user.id || window.TradingView.user.user_id || window.TradingView.user.username),
-        collection && collection.metaInfo && collection.metaInfo.username,
-      ];
-      for (var i = 0; i < candidates.length; i++) {
-        var subject = read(candidates[i]);
-        if (subject && subjects.indexOf(subject) === -1) subjects.push(subject);
-      }
-      if (chartIds.length !== 1 || layoutIdentity.error || subjects.length !== 1) return { error: 'Bound authenticated chart identity is missing or ambiguous.' };
-      if (!window.crypto || !window.crypto.subtle || typeof window.crypto.subtle.digest !== 'function') return { error: 'Bound authenticated chart identity hashing is unavailable.' };
-      var bytes = new TextEncoder().encode(subjects[0]);
-      var digest = await window.crypto.subtle.digest('SHA-256', bytes);
-      var hash = Array.prototype.map.call(new Uint8Array(digest), function(byte) { return byte.toString(16).padStart(2, '0'); }).join('');
-      return { chart_id: chartIds[0], layout_id: layoutIdentity.layout_id, account_subject_sha256: hash };
-    })()
-  `, { awaitPromise: true });
+  const identity = await evaluate(OBSERVER_IDENTITY_EVIDENCE_EXPRESSION, { awaitPromise: true });
   if (!identity || identity.error || !HASH.test(identity.account_subject_sha256 || '')) throw new Error(identity?.error || 'Bound authenticated chart identity is unavailable.');
   if (!identity.chart_id || !identity.layout_id) throw new Error('Bound authenticated chart identity is incomplete.');
   return { success: true, profile_id: session.profileId, chart_target_id: session.chartTargetId, chart_id: String(identity.chart_id), layout_id: String(identity.layout_id), account_subject_sha256: identity.account_subject_sha256 };
