@@ -33,6 +33,21 @@ export function registerChartTools(server) {
     catch (err) { return errorResult(err); }
   });
 
+  registerObserverTool(server, 'chart_saved_layout_identity', 'Read separate workspace-layout and saved-layout identities for the exact attached chart; never invokes save or navigation', async (input) => {
+    try { return jsonResult(await core.inspectSavedLayoutIdentity(input)); }
+    catch (err) { return errorResult(err); }
+  });
+
+  registerObserverTool(server, 'chart_save_existing_capability_probe_v2', 'Read-only dual-identity probe for versioned existing-chart save; never invokes save', async (input) => {
+    try { return jsonResult(await core.probeExistingChartSaveCapabilityV2(input)); }
+    catch (err) { return errorResult(err); }
+  });
+
+  registerObserverTool(server, 'chart_save_existing_scoped_v2', 'Save the exact existing chart using independently bound workspace-layout and saved-layout identities', async (input) => {
+    try { return jsonResult(await core.saveExistingChartScopedV2(input)); }
+    catch (err) { return errorResult(err); }
+  });
+
   registerObserverTool(server, 'chart_set_symbol', 'Change the chart symbol', async ({ symbol }) => {
     try { return jsonResult(await core.setSymbol({ symbol })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

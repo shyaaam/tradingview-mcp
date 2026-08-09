@@ -30,6 +30,29 @@ const observerIdentityOutput = {
   account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
 };
 
+const savedLayoutIdentityInput = {
+  profile_id: z.string().min(1),
+  tab_index: z.number().int().min(0),
+  chart_target_id: z.string().min(1),
+  expected_chart_id: z.string().min(1),
+  expected_workspace_layout_id: z.string().min(1),
+  expected_saved_layout_uid: z.string().min(1),
+  expected_pane_count: z.number().int().min(1).max(16),
+};
+
+const savedLayoutIdentityOutput = {
+  success: z.literal(true),
+  identity_version: z.literal('chart-saved-layout-identity-v1'),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  workspace_layout_id: z.string().min(1),
+  saved_layout_uid: z.string().min(1),
+  chart_id: z.string().min(1),
+  canonical_url: z.string().url(),
+  pane_count: z.number().int().min(1).max(16),
+  mutations_performed: z.literal(false),
+};
+
 const observerCaptureCandleInput = {
   symbol: z.string().min(1),
   timeframe: z.string().min(1),
@@ -201,6 +224,11 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: emptyInput,
     outputSchema: observerIdentityOutput,
     rejectUnexpectedInput: true,
+  },
+  chart_saved_layout_identity: {
+    classification: 'read_only',
+    inputSchema: savedLayoutIdentityInput,
+    outputSchema: savedLayoutIdentityOutput,
   },
   tv_observer_capture_candle: {
     classification: 'read_only',
@@ -443,6 +471,31 @@ export const observerToolDefinitions = Object.freeze({
       persisted_state_note: z.string().min(1),
     },
   },
+  chart_save_existing_capability_probe_v2: {
+    classification: 'read_only',
+    inputSchema: savedLayoutIdentityInput,
+    outputSchema: {
+      success: z.literal(true),
+      probe_version: z.literal('chart-save-existing-capability-probe-v2'),
+      profile_id: z.string().min(1),
+      chart_target_id: z.string().min(1),
+      workspace_layout_id: z.string().min(1),
+      saved_layout_uid: z.string().min(1),
+      chart_id: z.string().min(1),
+      canonical_url: z.string().url(),
+      pane_count: z.number().int().min(1).max(16),
+      meta_info_type: z.string(),
+      meta_info_shape: z.string(),
+      uid_shape: z.string(),
+      chart_available: z.boolean(),
+      save_service_available: z.boolean(),
+      save_existent_chart_type: z.string(),
+      save_capability_available: z.boolean(),
+      mutations_performed: z.literal(false),
+      persisted_state_authority: z.literal('unavailable'),
+      persisted_state_note: z.string().min(1),
+    },
+  },
   chart_save_existing_scoped: {
     classification: 'chart_mutation',
     inputSchema: {
@@ -464,6 +517,37 @@ export const observerToolDefinitions = Object.freeze({
       pane_count: z.number().int().min(1).max(16),
       indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/),
       saved_layout_id: z.string().min(1),
+      saved_existing: z.literal(true),
+      mutations_performed: z.literal(true),
+      save_invoked: z.literal(true),
+      effect_state: z.literal('confirmed'),
+      effect_phase: z.literal('post-save-verification'),
+      save_callback_confirmed: z.literal(true),
+    },
+  },
+  chart_save_existing_scoped_v2: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      tab_index: z.number().int().nonnegative(),
+      chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_workspace_layout_id: z.string().min(1),
+      expected_saved_layout_uid: z.string().min(1),
+      expected_pane_count: z.number().int().min(1).max(16),
+      expected_indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      save_version: z.literal('chart-save-existing-scoped-v2'),
+      profile_id: z.string().min(1),
+      chart_target_id: z.string().min(1),
+      chart_id: z.string().min(1),
+      canonical_url: z.string().url(),
+      workspace_layout_id: z.string().min(1),
+      saved_layout_uid: z.string().min(1),
+      pane_count: z.number().int().min(1).max(16),
+      indicator_parity_hash: z.string().regex(/^[0-9a-f]{64}$/),
       saved_existing: z.literal(true),
       mutations_performed: z.literal(true),
       save_invoked: z.literal(true),

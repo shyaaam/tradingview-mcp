@@ -13,6 +13,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_attach_existing_read_only',
   'tv_observer_hydrate_chart_target',
   'tv_observer_identity',
+  'chart_saved_layout_identity',
   'tv_observer_capture_candle',
   'tv_observer_capture_screenshot',
   'tv_observer_capture_telemetry_ohlcv',
@@ -25,7 +26,9 @@ const CAPABILITY_NAMES = [
   'pane_probe_layout_capability',
   'chart_get_state',
   'chart_save_existing_capability_probe',
+  'chart_save_existing_capability_probe_v2',
   'chart_save_existing_scoped',
+  'chart_save_existing_scoped_v2',
   'chart_set_symbol',
   'chart_set_timeframe',
 ];

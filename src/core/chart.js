@@ -123,6 +123,45 @@ const LAYOUT_EVIDENCE_EXPRESSION = `
   })()
 `;
 
+const DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION = `
+  (function() {
+    function read(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value === null || value === undefined ? null : String(value);
+      } catch (e) { return null; }
+    }
+    var api = window.TradingViewApi;
+    var collection = api && api._chartWidgetCollection;
+    var chart = api && api._activeChartWidgetWV && typeof api._activeChartWidgetWV.value === 'function'
+      ? api._activeChartWidgetWV.value() : null;
+    var href = String(window.location && window.location.href || '');
+    var pathMatch = String(window.location && window.location.pathname || '').match(/\\/chart\\/([^/?#]+)/i);
+    var chartId = pathMatch ? String(pathMatch[1]) : null;
+    var canonicalUrl = chartId ? 'https://www.tradingview.com/chart/' + chartId + '/' : null;
+    var rawMetaInfo = collection && collection.metaInfo;
+    var metaInfo = rawMetaInfo;
+    if (typeof metaInfo === 'function') metaInfo = metaInfo();
+    var savedLayoutUid = read(metaInfo && metaInfo.uid);
+    return {
+      href: href,
+      canonical_url: canonicalUrl,
+      chart_id: chartId,
+      workspace_layout_id: read(collection && collection._layoutType),
+      saved_layout_uid: savedLayoutUid,
+      pane_count: Number(read(collection && collection.inlineChartsCount)),
+      chart_available: Boolean(chart),
+      meta_info_type: rawMetaInfo === null ? 'null' : typeof rawMetaInfo,
+      meta_info_shape: metaInfo === null ? 'null' : metaInfo === undefined ? 'missing' : typeof metaInfo,
+      uid_shape: savedLayoutUid === null ? 'missing' : typeof savedLayoutUid,
+      save_service_available: Boolean(api && api._saveChartService),
+      save_existent_chart_type: api && api._saveChartService ? typeof api._saveChartService.saveExistentChart : 'missing',
+    };
+  })()
+`;
+
 function normalizeSaveInput(input) {
   const expected = {
     profileId: String(input.profile_id || '').trim(),
@@ -140,6 +179,107 @@ function normalizeSaveInput(input) {
     throw new Error('Scoped existing-chart save input is invalid.');
   }
   return expected;
+}
+
+function normalizeDualLayoutInput(input, { requireParity = false } = {}) {
+  const expected = {
+    profileId: String(input.profile_id || '').trim(),
+    tabIndex: Number(input.tab_index),
+    targetId: String(input.chart_target_id || '').trim(),
+    chartId: String(input.expected_chart_id || input.chart_id || '').trim(),
+    workspaceLayoutId: String(input.expected_workspace_layout_id || '').trim(),
+    savedLayoutUid: String(input.expected_saved_layout_uid || '').trim(),
+    paneCount: Number(input.expected_pane_count),
+    parityHash: String(input.expected_indicator_parity_hash || '').trim(),
+  };
+  if (!expected.profileId || !expected.targetId || !expected.chartId
+    || !expected.workspaceLayoutId || !expected.savedLayoutUid
+    || !Number.isInteger(expected.tabIndex) || expected.tabIndex < 0
+    || !Number.isInteger(expected.paneCount) || expected.paneCount < 1 || expected.paneCount > 16
+    || (requireParity && !/^[0-9a-f]{64}$/.test(expected.parityHash))) {
+    throw new Error('Dual saved-layout identity input is invalid.');
+  }
+  return expected;
+}
+
+function assertDualLayoutIdentityEvidence(evidence, expected, { requireSaveService = false } = {}) {
+  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
+  if (!evidence || evidence.href !== canonicalUrl || evidence.canonical_url !== canonicalUrl
+    || evidence.chart_id !== expected.chartId
+    || evidence.workspace_layout_id !== expected.workspaceLayoutId
+    || evidence.saved_layout_uid !== expected.savedLayoutUid
+    || evidence.pane_count !== expected.paneCount
+    || evidence.chart_available !== true
+    || (requireSaveService && (evidence.save_service_available !== true || evidence.save_existent_chart_type !== 'function'))) {
+    throw new Error('Dual saved-layout identity does not match reviewed authority.');
+  }
+  return canonicalUrl;
+}
+
+async function inspectSaveParity({ expected, inspectInventory, inspectSignatures }) {
+  const inventory = await inspectInventory();
+  if (inventory?.success !== true || inventory.pane_count !== expected.paneCount
+    || !Array.isArray(inventory.panes) || inventory.panes.length !== expected.paneCount
+    || inventory.panes.some((pane, index) => pane.index !== index || !Array.isArray(pane.indicators)
+      || pane.indicators.some((indicator) => indicator.get_study_by_id_resolves !== true))) {
+    throw new Error('Scoped existing-chart save indicator identity is incomplete.');
+  }
+  const signatures = await inspectSignatures();
+  if (signatures?.success !== true || signatures.pane_count !== expected.paneCount
+    || !Array.isArray(signatures.panes) || signatures.panes.length !== expected.paneCount
+    || signatures.panes.some((pane, index) => pane.index !== index)) {
+    throw new Error('Scoped existing-chart save indicator parity is unavailable.');
+  }
+  const parityHash = derivePaneIndicatorParityHash({
+    paneCapacity: expected.paneCount,
+    canonicalPaneIndex: signatures.canonical_pane_index,
+    panes: signatures.panes,
+  });
+  if (expected.parityHash && parityHash !== expected.parityHash) {
+    throw new Error('Scoped existing-chart save indicator parity does not match reviewed authority.');
+  }
+  return parityHash;
+}
+
+async function invokeExistingChartSave(evaluateAsync, expectedSavedLayoutUid) {
+  const saved = await evaluateAsync(`
+    (function() {
+      var service = window.TradingViewApi && window.TradingViewApi._saveChartService;
+      if (!service || typeof service.saveExistentChart !== 'function') {
+        return { success: false, error: 'Existing-chart save service is unavailable.' };
+      }
+      return new Promise(function(resolve) {
+        var settled = false;
+        function finish(value) {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        }
+        try {
+          service.saveExistentChart(function(value) {
+            finish({ success: true, uid: value && value.uid != null ? String(value.uid) : null });
+          }, function(error) {
+            finish({ success: false, error: 'Existing-chart save failed.' });
+          }, { autoSave: false });
+        } catch (error) {
+          finish({ success: false, error: 'Existing-chart save failed.' });
+        }
+      });
+    })()
+  `);
+  if (!saved || saved.success !== true) {
+    throw new ScopedSaveEffectError(saved?.error || 'Existing-chart save failed.', {
+      phase: 'save-invocation', effectState: 'ambiguous', saveInvoked: true,
+    });
+  }
+  const savedLayoutUid = saved.uid == null ? null : String(saved.uid);
+  if (savedLayoutUid !== expectedSavedLayoutUid) {
+    throw new ScopedSaveEffectError('Existing-chart save callback returned an unexpected saved-layout identity.', {
+      phase: 'save-callback', effectState: 'ambiguous', saveInvoked: true,
+      saveCallbackConfirmed: true,
+    });
+  }
+  return savedLayoutUid;
 }
 
 async function assertExactSaveTarget(expected, session, listTabs) {
@@ -376,6 +516,184 @@ export async function probeExistingChartSaveCapability({
     persisted_state_authority: 'unavailable',
     persisted_state_note: 'TradingView getSavedCharts metadata does not expose persisted pane indicator state; no authoritative persisted parity read is available through this MCP release.',
   };
+}
+
+/**
+ * Read both layout identities without invoking any save or navigation API.
+ * `workspace_layout_id` is the legacy layout topology; `saved_layout_uid` is
+ * the server-saved chart UID exposed by TradingView metaInfo.
+ */
+export async function inspectSavedLayoutIdentity({
+  profile_id,
+  tab_index,
+  chart_target_id,
+  expected_chart_id,
+  expected_workspace_layout_id,
+  expected_saved_layout_uid,
+  expected_pane_count,
+  _deps,
+}) {
+  const { evaluate, getBoundClient } = _resolve(_deps);
+  const listTabs = _deps?.listTabs || _listTabs;
+  const session = requireObserverSession();
+  const expected = normalizeDualLayoutInput({
+    profile_id,
+    tab_index,
+    chart_target_id,
+    expected_chart_id,
+    expected_workspace_layout_id,
+    expected_saved_layout_uid,
+    expected_pane_count,
+  });
+  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  await getBoundClient();
+  const evidence = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
+  assertDualLayoutIdentityEvidence(evidence, expected);
+  return {
+    success: true,
+    identity_version: 'chart-saved-layout-identity-v1',
+    profile_id: expected.profileId,
+    chart_target_id: expected.targetId,
+    workspace_layout_id: expected.workspaceLayoutId,
+    saved_layout_uid: expected.savedLayoutUid,
+    chart_id: expected.chartId,
+    canonical_url: canonicalUrl,
+    pane_count: expected.paneCount,
+    mutations_performed: false,
+  };
+}
+
+/**
+ * Read-only v2 save capability probe. This is separate from the historical v1
+ * probe so `layout_id` keeps its original saved-UID meaning.
+ */
+export async function probeExistingChartSaveCapabilityV2({
+  profile_id,
+  tab_index,
+  chart_target_id,
+  expected_chart_id,
+  expected_workspace_layout_id,
+  expected_saved_layout_uid,
+  expected_pane_count,
+  _deps,
+}) {
+  const { evaluate, getBoundClient } = _resolve(_deps);
+  const listTabs = _deps?.listTabs || _listTabs;
+  const session = requireObserverSession();
+  const expected = normalizeDualLayoutInput({
+    profile_id,
+    tab_index,
+    chart_target_id,
+    expected_chart_id,
+    expected_workspace_layout_id,
+    expected_saved_layout_uid,
+    expected_pane_count,
+  });
+  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  await getBoundClient();
+  const evidence = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
+  assertDualLayoutIdentityEvidence(evidence, expected);
+  return {
+    success: true,
+    probe_version: 'chart-save-existing-capability-probe-v2',
+    profile_id: expected.profileId,
+    chart_target_id: expected.targetId,
+    workspace_layout_id: expected.workspaceLayoutId,
+    saved_layout_uid: expected.savedLayoutUid,
+    chart_id: expected.chartId,
+    canonical_url: canonicalUrl,
+    pane_count: expected.paneCount,
+    meta_info_type: evidence.meta_info_type,
+    meta_info_shape: evidence.meta_info_shape,
+    uid_shape: evidence.uid_shape,
+    chart_available: evidence.chart_available,
+    save_service_available: evidence.save_service_available,
+    save_existent_chart_type: evidence.save_existent_chart_type,
+    save_capability_available: evidence.save_service_available && evidence.save_existent_chart_type === 'function',
+    mutations_performed: false,
+    persisted_state_authority: 'unavailable',
+    persisted_state_note: 'TradingView getSavedCharts metadata does not expose persisted pane indicator state; no authoritative persisted parity read is available through this MCP release.',
+  };
+}
+
+/**
+ * Versioned dual-identity existing-chart save. Historical v1 remains
+ * unchanged and continues to interpret `layout_id` as the saved UID.
+ */
+export async function saveExistingChartScopedV2({
+  profile_id,
+  tab_index,
+  chart_target_id,
+  expected_chart_id,
+  expected_workspace_layout_id,
+  expected_saved_layout_uid,
+  expected_pane_count,
+  expected_indicator_parity_hash,
+  _deps,
+}) {
+  const { evaluate, evaluateAsync, getBoundClient } = _resolve(_deps);
+  const listTabs = _deps?.listTabs || _listTabs;
+  const inspectInventory = _deps?.inspectInventory || mutationIdentityInventory;
+  const inspectSignatures = _deps?.inspectSignatures || indicatorSignatures;
+  const session = requireObserverSession();
+  const expected = normalizeDualLayoutInput({
+    profile_id,
+    tab_index,
+    chart_target_id,
+    expected_chart_id,
+    expected_workspace_layout_id,
+    expected_saved_layout_uid,
+    expected_pane_count,
+    expected_indicator_parity_hash,
+  }, { requireParity: true });
+  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
+  let saveInvoked = false;
+  try {
+    await assertExactSaveTarget(expected, session, listTabs);
+    await getBoundClient();
+    const pre = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
+    assertDualLayoutIdentityEvidence(pre, expected, { requireSaveService: true });
+    const parityHash = await inspectSaveParity({ expected, inspectInventory, inspectSignatures });
+
+    saveInvoked = true;
+    const savedLayoutUid = await invokeExistingChartSave(evaluateAsync, expected.savedLayoutUid);
+
+    let post;
+    try {
+      post = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
+    } catch (error) {
+      throw new ScopedSaveEffectError(error instanceof Error ? error.message : String(error), {
+        phase: 'post-save-verification', effectState: 'confirmed', saveInvoked: true,
+        saveCallbackConfirmed: true, cause: error,
+      });
+    }
+    assertDualLayoutIdentityEvidence(post, expected);
+    return {
+      success: true,
+      save_version: 'chart-save-existing-scoped-v2',
+      profile_id: expected.profileId,
+      chart_target_id: expected.targetId,
+      chart_id: expected.chartId,
+      canonical_url: canonicalUrl,
+      workspace_layout_id: expected.workspaceLayoutId,
+      saved_layout_uid: savedLayoutUid,
+      pane_count: expected.paneCount,
+      indicator_parity_hash: parityHash,
+      saved_existing: true,
+      mutations_performed: true,
+      save_invoked: true,
+      effect_state: 'confirmed',
+      effect_phase: 'post-save-verification',
+      save_callback_confirmed: true,
+    };
+  } catch (error) {
+    throw withSaveFailure(
+      error,
+      saveInvoked,
+      saveInvoked ? 'save-invocation' : 'pre-effect',
+      saveInvoked ? 'ambiguous' : 'not-started',
+    );
+  }
 }
 
 export async function getState({ _deps } = {}) {

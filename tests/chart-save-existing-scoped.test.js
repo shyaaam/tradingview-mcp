@@ -3,8 +3,11 @@ import test from 'node:test';
 
 import {
   deriveLayoutIdFromMetaInfo,
+  inspectSavedLayoutIdentity,
   probeExistingChartSaveCapability,
+  probeExistingChartSaveCapabilityV2,
   saveExistingChartScoped,
+  saveExistingChartScopedV2,
 } from '../src/core/chart.js';
 import { derivePaneIndicatorParityHash } from '../src/core/pane.js';
 import { clearObserverSession, setObserverSession } from '../src/core/observer-session.js';
@@ -97,6 +100,156 @@ test('scoped existing-chart save requires exact target and uses existing save on
     });
     assert.match(saveExpression, /saveExistentChart/);
     assert.doesNotMatch(saveExpression, /saveNewChart|saveChartAs|renameChart|setLayout/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('dual identity read-only surface keeps workspace layout separate from saved UID', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    let expression = '';
+    const result = await inspectSavedLayoutIdentity({
+      profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a',
+      expected_chart_id: 'chart-x', expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+      _deps: {
+        listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+        getBoundClient: async () => ({}),
+        evaluate: async (value) => {
+          expression = value;
+          return {
+            href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'chart-x',
+            pane_count: 2, chart_available: true,
+          };
+        },
+      },
+    });
+    assert.deepEqual(result, {
+      success: true,
+      identity_version: 'chart-saved-layout-identity-v1',
+      profile_id: 'profile-a', chart_target_id: 'target-a', workspace_layout_id: '8', saved_layout_uid: 'chart-x',
+      chart_id: 'chart-x', canonical_url: targetUrl, pane_count: 2, mutations_performed: false,
+    });
+    assert.doesNotMatch(expression, /saveExistentChart\s*\(|loadChartFromServer|Page\.navigate|setLayout|setSymbol|setResolution/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 capability probe reports both identities and never invokes save', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    let expression = '';
+    const result = await probeExistingChartSaveCapabilityV2({
+      profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a',
+      expected_chart_id: 'chart-x', expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+      _deps: {
+        listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+        getBoundClient: async () => ({}),
+        evaluate: async (value) => {
+          expression = value;
+          return {
+            href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'chart-x',
+            pane_count: 2, chart_available: true, meta_info_type: 'object', meta_info_shape: 'object', uid_shape: 'string',
+            save_service_available: true, save_existent_chart_type: 'function',
+          };
+        },
+      },
+    });
+    assert.equal(result.workspace_layout_id, '8');
+    assert.equal(result.saved_layout_uid, 'chart-x');
+    assert.equal(result.chart_id, 'chart-x');
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.save_capability_available, true);
+    assert.doesNotMatch(expression, /saveExistentChart\s*\(|loadChartFromServer|Page\.navigate|setLayout|setSymbol|setResolution/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 scoped save binds workspace layout and saved UID independently', async () => {
+  const parityHash = derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes });
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    let evaluateCalls = 0;
+    let saveExpression = '';
+    const result = await saveExistingChartScopedV2({
+      profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', expected_chart_id: 'chart-x',
+      expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+      expected_indicator_parity_hash: parityHash,
+      _deps: {
+        listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+        getBoundClient: async () => ({}),
+        evaluate: async () => {
+          evaluateCalls += 1;
+          return {
+            href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'chart-x',
+            pane_count: 2, chart_available: true, save_service_available: true, save_existent_chart_type: 'function',
+          };
+        },
+        evaluateAsync: async (expression) => {
+          saveExpression = expression;
+          return { success: true, uid: 'chart-x' };
+        },
+        inspectInventory: async () => ({ success: true, pane_count: 2, panes: [
+          { index: 0, indicators: [{ get_study_by_id_resolves: true }] },
+          { index: 1, indicators: [{ get_study_by_id_resolves: true }] },
+        ] }),
+        inspectSignatures: async () => signatures,
+      },
+    });
+    assert.equal(evaluateCalls, 2);
+    assert.equal(result.save_version, 'chart-save-existing-scoped-v2');
+    assert.equal(result.workspace_layout_id, '8');
+    assert.equal(result.saved_layout_uid, 'chart-x');
+    assert.equal(result.chart_id, 'chart-x');
+    assert.equal(result.effect_state, 'confirmed');
+    assert.match(saveExpression, /saveExistentChart/);
+    assert.doesNotMatch(saveExpression, /saveNewChart|saveChartAs|renameChart|setLayout/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 scoped save rejects independent workspace-layout drift before save', async () => {
+  const parityHash = derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes });
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api', profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp', chartTargetId: 'target-a', chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScopedV2({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', expected_chart_id: 'chart-x',
+        expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+        expected_indicator_parity_hash: parityHash,
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '4', saved_layout_uid: 'chart-x', pane_count: 2, chart_available: true }),
+          evaluateAsync: async () => { throw new Error('save must not run'); },
+        },
+      }),
+      /Dual saved-layout identity does not match reviewed authority/,
+    );
   } finally {
     clearObserverSession();
   }
