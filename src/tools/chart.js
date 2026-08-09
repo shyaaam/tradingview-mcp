@@ -3,6 +3,20 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
+function errorResult(error) {
+  const result = { success: false, error: error.message };
+  if (error && typeof error === 'object' && error.name === 'ScopedSaveEffectError') {
+    result.save_invoked = error.saveInvoked;
+    result.effect_state = error.effectState;
+    result.effect_phase = error.phase;
+    result.save_callback_confirmed = error.saveCallbackConfirmed;
+  }
+  if (error && typeof error === 'object' && error.name === 'SaveCapabilityProbeError') {
+    result.probe_evidence = error.probeEvidence;
+  }
+  return jsonResult(result, true);
+}
+
 export function registerChartTools(server) {
   registerObserverTool(server, 'chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', async () => {
     try { return jsonResult(await core.getState()); }
@@ -11,7 +25,12 @@ export function registerChartTools(server) {
 
   registerObserverTool(server, 'chart_save_existing_scoped', 'Save the exact existing chart/layout after strict target, authority, and parity checks', async (input) => {
     try { return jsonResult(await core.saveExistingChartScoped(input)); }
-    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+    catch (err) { return errorResult(err); }
+  });
+
+  registerObserverTool(server, 'chart_save_existing_capability_probe', 'Read-only probe of exact existing-chart save capability and layout identity; never invokes save', async (input) => {
+    try { return jsonResult(await core.probeExistingChartSaveCapability(input)); }
+    catch (err) { return errorResult(err); }
   });
 
   registerObserverTool(server, 'chart_set_symbol', 'Change the chart symbol', async ({ symbol }) => {

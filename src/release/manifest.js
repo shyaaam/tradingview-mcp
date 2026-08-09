@@ -24,6 +24,7 @@ const CAPABILITY_NAMES = [
   'pane_indicator_mutation_inventory',
   'pane_probe_layout_capability',
   'chart_get_state',
+  'chart_save_existing_capability_probe',
   'chart_save_existing_scoped',
   'chart_set_symbol',
   'chart_set_timeframe',

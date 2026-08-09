@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { saveExistingChartScoped } from '../src/core/chart.js';
+import {
+  deriveLayoutIdFromMetaInfo,
+  probeExistingChartSaveCapability,
+  saveExistingChartScoped,
+} from '../src/core/chart.js';
 import { derivePaneIndicatorParityHash } from '../src/core/pane.js';
 import { clearObserverSession, setObserverSession } from '../src/core/observer-session.js';
 
@@ -15,6 +19,15 @@ const signatures = {
     { index: 1, signature: 'a'.repeat(64), indicators: [] },
   ],
 };
+
+test('layout ID extraction supports function/object/observable metaInfo forms', () => {
+  assert.equal(deriveLayoutIdFromMetaInfo(() => ({ uid: 'layout-function' })), 'layout-function');
+  assert.equal(deriveLayoutIdFromMetaInfo({ uid: 'layout-object' }), 'layout-object');
+  assert.equal(deriveLayoutIdFromMetaInfo({ uid: { value: () => 'layout-observable' } }), 'layout-observable');
+  assert.equal(deriveLayoutIdFromMetaInfo({ uid: { value: 'layout-value' } }), 'layout-value');
+  assert.equal(deriveLayoutIdFromMetaInfo({ uid: 'wrong' }), 'wrong');
+  assert.equal(deriveLayoutIdFromMetaInfo(null), null);
+});
 
 test('scoped existing-chart save requires exact target and uses existing save only', async () => {
   const parityHash = derivePaneIndicatorParityHash({
@@ -47,10 +60,10 @@ test('scoped existing-chart save requires exact target and uses existing save on
           tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }],
         }),
         getBoundClient: async () => ({ attached: true }),
-        evaluate: async () => {
+          evaluate: async () => {
           evaluateCalls += 1;
           return evaluateCalls === 1
-            ? { href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true }
+            ? { href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true, save_service_available: true, save_existent_chart_type: 'function' }
             : { href: targetUrl, layout_id: 'layout-x' };
         },
         evaluateAsync: async (expression) => {
@@ -71,8 +84,196 @@ test('scoped existing-chart save requires exact target and uses existing save on
     assert.equal(result.saved_existing, true);
     assert.equal(result.mutations_performed, true);
     assert.equal(result.saved_layout_id, 'layout-x');
+    assert.deepEqual({
+      save_invoked: result.save_invoked,
+      effect_state: result.effect_state,
+      effect_phase: result.effect_phase,
+      save_callback_confirmed: result.save_callback_confirmed,
+    }, {
+      save_invoked: true,
+      effect_state: 'confirmed',
+      effect_phase: 'post-save-verification',
+      save_callback_confirmed: true,
+    });
     assert.match(saveExpression, /saveExistentChart/);
     assert.doesNotMatch(saveExpression, /saveNewChart|saveChartAs|renameChart|setLayout/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('scoped save classifies pre-effect failures without invoking save', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScoped({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', chart_id: 'chart-x', layout_id: 'layout-x',
+        expected_pane_count: 2, expected_indicator_parity_hash: 'a'.repeat(64),
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, pane_count: 2, layout_id: 'wrong', chart_available: true }),
+          evaluateAsync: async () => { throw new Error('save must not run'); },
+        },
+      }),
+      (error) => {
+        assert.equal(error.name, 'ScopedSaveEffectError');
+        assert.equal(error.saveInvoked, false);
+        assert.equal(error.effectState, 'not-started');
+        assert.equal(error.phase, 'pre-effect');
+        return true;
+      },
+    );
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('scoped save classifies post-invocation failures as ambiguous', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScoped({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', chart_id: 'chart-x', layout_id: 'layout-x',
+        expected_pane_count: 2, expected_indicator_parity_hash: derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes }),
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true, save_service_available: true, save_existent_chart_type: 'function' }),
+          evaluateAsync: async () => { throw new Error('remote outcome unknown'); },
+          inspectInventory: async () => ({ success: true, pane_count: 2, panes: [{ index: 0, indicators: [{ get_study_by_id_resolves: true }] }, { index: 1, indicators: [{ get_study_by_id_resolves: true }] }] }),
+          inspectSignatures: async () => signatures,
+        },
+      }),
+      (error) => {
+        assert.equal(error.name, 'ScopedSaveEffectError');
+        assert.equal(error.saveInvoked, true);
+        assert.equal(error.effectState, 'ambiguous');
+        assert.equal(error.phase, 'save-invocation');
+        return true;
+      },
+    );
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('scoped save classifies post-save verification failure as confirmed', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    let evaluateCalls = 0;
+    await assert.rejects(
+      saveExistingChartScoped({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', chart_id: 'chart-x', layout_id: 'layout-x',
+        expected_pane_count: 2, expected_indicator_parity_hash: derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes }),
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => {
+            evaluateCalls += 1;
+            if (evaluateCalls === 1) return { href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true, save_service_available: true, save_existent_chart_type: 'function' };
+            throw new Error('post target read failed');
+          },
+          evaluateAsync: async () => ({ success: true, uid: 'layout-x' }),
+          inspectInventory: async () => ({ success: true, pane_count: 2, panes: [{ index: 0, indicators: [{ get_study_by_id_resolves: true }] }, { index: 1, indicators: [{ get_study_by_id_resolves: true }] }] }),
+          inspectSignatures: async () => signatures,
+        },
+      }),
+      (error) => {
+        assert.equal(error.name, 'ScopedSaveEffectError');
+        assert.equal(error.saveInvoked, true);
+        assert.equal(error.effectState, 'confirmed');
+        assert.equal(error.phase, 'post-save-verification');
+        assert.equal(error.saveCallbackConfirmed, true);
+        return true;
+      },
+    );
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('missing save service is classified before effect invocation', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScoped({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', chart_id: 'chart-x', layout_id: 'layout-x',
+        expected_pane_count: 2, expected_indicator_parity_hash: 'a'.repeat(64),
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true, save_service_available: false, save_existent_chart_type: 'missing' }),
+          evaluateAsync: async () => { throw new Error('save must not run'); },
+        },
+      }),
+      (error) => {
+        assert.equal(error.name, 'ScopedSaveEffectError');
+        assert.equal(error.saveInvoked, false);
+        assert.equal(error.effectState, 'not-started');
+        assert.equal(error.phase, 'pre-effect');
+        return true;
+      },
+    );
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('read-only save capability probe never invokes save and reports persisted parity authority unavailable', async () => {
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api',
+    profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: targetUrl,
+  });
+  try {
+    let expression = '';
+    const result = await probeExistingChartSaveCapability({
+      profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', chart_id: 'chart-x', layout_id: 'layout-x', expected_pane_count: 2,
+      _deps: {
+        listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+        getBoundClient: async () => ({}),
+        evaluate: async (value) => {
+          expression = value;
+          return {
+            href: targetUrl, pane_count: 2, layout_id: 'layout-x', chart_available: true,
+            meta_info_type: 'object', meta_info_shape: 'object', uid_shape: 'string',
+            save_service_available: true, save_existent_chart_type: 'function',
+          };
+        },
+      },
+    });
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.persisted_state_authority, 'unavailable');
+    assert.match(expression, /saveExistentChart/);
+    assert.doesNotMatch(expression, /saveExistentChart\s*\(/);
+    assert.doesNotMatch(expression, /loadChartFromServer|Page\.navigate|setLayout|setSymbol|setResolution/);
   } finally {
     clearObserverSession();
   }

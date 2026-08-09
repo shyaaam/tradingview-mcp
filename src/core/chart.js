@@ -26,6 +26,153 @@ function _resolve(deps) {
 
 const CANONICAL_CHART_URL = (chartId) => `https://www.tradingview.com/chart/${chartId}/`;
 
+export class ScopedSaveEffectError extends Error {
+  constructor(message, { phase, effectState, saveInvoked, saveCallbackConfirmed = false, cause } = {}) {
+    super(message, cause === undefined ? {} : { cause });
+    this.name = 'ScopedSaveEffectError';
+    this.phase = phase;
+    this.effectState = effectState;
+    this.saveInvoked = saveInvoked;
+    this.saveCallbackConfirmed = saveCallbackConfirmed;
+  }
+}
+
+export class SaveCapabilityProbeError extends Error {
+  constructor(message, evidence) {
+    super(message);
+    this.name = 'SaveCapabilityProbeError';
+    this.probeEvidence = Object.freeze({ ...evidence });
+  }
+}
+
+function unwrapTradingViewValue(value) {
+  let current = value;
+  const seen = new Set();
+  for (let index = 0; index < 8; index += 1) {
+    if (current === null || current === undefined || (typeof current !== 'object' && typeof current !== 'function')) return current;
+    if (seen.has(current)) return null;
+    seen.add(current);
+    if (typeof current === 'function') {
+      current = current();
+      continue;
+    }
+    if (typeof current.value === 'function') {
+      current = current.value();
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(current, 'value')) {
+      current = current.value;
+      continue;
+    }
+    return current;
+  }
+  return null;
+}
+
+export function deriveLayoutIdFromMetaInfo(metaInfo) {
+  const resolved = unwrapTradingViewValue(metaInfo);
+  if (!resolved || typeof resolved !== 'object') return null;
+  const uid = unwrapTradingViewValue(resolved.uid);
+  return uid === null || uid === undefined || uid === '' ? null : String(uid);
+}
+
+export function describeMetaInfo(metaInfo) {
+  const rawType = metaInfo === null ? 'null' : typeof metaInfo;
+  const resolved = unwrapTradingViewValue(metaInfo);
+  const resolvedShape = resolved === null
+    ? 'null'
+    : resolved === undefined
+      ? 'missing'
+      : typeof resolved === 'object'
+        ? 'object'
+        : typeof resolved;
+  const uid = resolved && typeof resolved === 'object' ? resolved.uid : undefined;
+  return {
+    metaInfoType: rawType,
+    metaInfoShape: resolvedShape,
+    uidShape: uid === null ? 'null' : uid === undefined ? 'missing' : typeof uid,
+  };
+}
+
+const LAYOUT_EVIDENCE_EXPRESSION = `
+  (function() {
+    var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+    var chart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+      && window.TradingViewApi._activeChartWidgetWV.value();
+    var count = cwc && cwc.inlineChartsCount;
+    if (count && typeof count.value === 'function') count = count.value();
+    else if (count && Object.prototype.hasOwnProperty.call(count, 'value')) count = count.value;
+    var rawMetaInfo = cwc && cwc.metaInfo;
+    var metaInfo = rawMetaInfo;
+    if (typeof metaInfo === 'function') metaInfo = metaInfo();
+    var uid = metaInfo && metaInfo.uid;
+    if (uid && typeof uid.value === 'function') uid = uid.value();
+    else if (uid && Object.prototype.hasOwnProperty.call(uid, 'value')) uid = uid.value;
+    var service = window.TradingViewApi && window.TradingViewApi._saveChartService;
+    return {
+      href: window.location.href,
+      pane_count: Number(count),
+      layout_id: uid == null ? null : String(uid),
+      chart_available: Boolean(chart),
+      meta_info_type: rawMetaInfo === null ? 'null' : typeof rawMetaInfo,
+      meta_info_shape: metaInfo === null ? 'null' : metaInfo === undefined ? 'missing' : typeof metaInfo,
+      uid_shape: uid === null ? 'null' : uid === undefined ? 'missing' : typeof uid,
+      save_service_available: Boolean(service),
+      save_existent_chart_type: service ? typeof service.saveExistentChart : 'missing',
+    };
+  })()
+`;
+
+function normalizeSaveInput(input) {
+  const expected = {
+    profileId: String(input.profile_id || '').trim(),
+    tabIndex: Number(input.tab_index),
+    targetId: String(input.chart_target_id || '').trim(),
+    chartId: String(input.chart_id || '').trim(),
+    layoutId: String(input.layout_id || '').trim(),
+    paneCount: Number(input.expected_pane_count),
+    parityHash: String(input.expected_indicator_parity_hash || '').trim(),
+  };
+  if (!expected.profileId || !expected.targetId || !expected.chartId || !expected.layoutId
+    || !Number.isInteger(expected.tabIndex) || expected.tabIndex < 0
+    || !Number.isInteger(expected.paneCount) || expected.paneCount < 1 || expected.paneCount > 16
+    || !/^[0-9a-f]{64}$/.test(expected.parityHash)) {
+    throw new Error('Scoped existing-chart save input is invalid.');
+  }
+  return expected;
+}
+
+async function assertExactSaveTarget(expected, session, listTabs) {
+  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
+  if (session.profileId !== expected.profileId || session.chartTargetId !== expected.targetId
+    || session.chartTargetUrl !== canonicalUrl) {
+    throw new Error('Scoped existing-chart save target or profile does not match observer session.');
+  }
+  const tabs = await listTabs();
+  const tabEntries = tabs && Array.isArray(tabs.tabs) ? tabs.tabs : null;
+  const matchingTabs = (tabEntries || []).filter((tab) => tab
+    && Number(tab.index) === expected.tabIndex
+    && tab.id === expected.targetId
+    && tab.chart_id === expected.chartId
+    && tab.url === canonicalUrl);
+  if (tabs?.success !== true || !tabEntries || matchingTabs.length !== 1
+    || tabEntries.filter((tab) => tab?.id === expected.targetId).length !== 1) {
+    throw new Error('Scoped existing-chart save target tab is missing or ambiguous.');
+  }
+  return canonicalUrl;
+}
+
+function withSaveFailure(error, saveInvoked, phase, effectState, saveCallbackConfirmed = false) {
+  if (error instanceof ScopedSaveEffectError) return error;
+  return new ScopedSaveEffectError(error instanceof Error ? error.message : String(error), {
+    phase,
+    effectState,
+    saveInvoked,
+    saveCallbackConfirmed,
+    cause: error,
+  });
+}
+
 /**
  * Save the currently bound, existing chart through TradingView's scoped save
  * service. This never creates, renames, switches, focuses, or mutates studies.
@@ -45,86 +192,44 @@ export async function saveExistingChartScoped({
   const inspectInventory = _deps?.inspectInventory || mutationIdentityInventory;
   const inspectSignatures = _deps?.inspectSignatures || indicatorSignatures;
   const session = requireObserverSession();
-  const expected = {
-    profileId: String(profile_id || '').trim(),
-    tabIndex: Number(tab_index),
-    targetId: String(chart_target_id || '').trim(),
-    chartId: String(chart_id || '').trim(),
-    layoutId: String(layout_id || '').trim(),
-    paneCount: Number(expected_pane_count),
-    parityHash: String(expected_indicator_parity_hash || '').trim(),
-  };
-  if (!expected.profileId || !expected.targetId || !expected.chartId || !expected.layoutId
-    || !Number.isInteger(expected.tabIndex) || expected.tabIndex < 0
-    || !Number.isInteger(expected.paneCount) || expected.paneCount < 1 || expected.paneCount > 16
-    || !/^[0-9a-f]{64}$/.test(expected.parityHash)) {
-    throw new Error('Scoped existing-chart save input is invalid.');
-  }
+  const expected = normalizeSaveInput({ profile_id, tab_index, chart_target_id, chart_id, layout_id, expected_pane_count, expected_indicator_parity_hash });
   const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
-  if (session.profileId !== expected.profileId || session.chartTargetId !== expected.targetId
-    || session.chartTargetUrl !== canonicalUrl) {
-    throw new Error('Scoped existing-chart save target or profile does not match observer session.');
-  }
+  let saveInvoked = false;
+  try {
+    await assertExactSaveTarget(expected, session, listTabs);
+    // Forces exact operation-scoped CDP attachment before any save API call.
+    await getBoundClient();
+    const pre = await evaluate(LAYOUT_EVIDENCE_EXPRESSION);
+    if (!pre || pre.href !== canonicalUrl || pre.layout_id !== expected.layoutId
+      || pre.pane_count !== expected.paneCount || pre.chart_available !== true
+      || pre.save_service_available !== true || pre.save_existent_chart_type !== 'function') {
+      throw new Error('Scoped existing-chart save authority changed before save.');
+    }
 
-  const tabs = await listTabs();
-  const tabEntries = tabs && Array.isArray(tabs.tabs) ? tabs.tabs : null;
-  const matchingTabs = (tabEntries || []).filter((tab) => tab
-    && Number(tab.index) === expected.tabIndex
-    && tab.id === expected.targetId
-    && tab.chart_id === expected.chartId
-    && tab.url === canonicalUrl);
-  if (tabs?.success !== true || !tabEntries || matchingTabs.length !== 1
-    || tabEntries.filter((tab) => tab?.id === expected.targetId).length !== 1) {
-    throw new Error('Scoped existing-chart save target tab is missing or ambiguous.');
-  }
+    const inventory = await inspectInventory();
+    if (inventory?.success !== true || inventory.pane_count !== expected.paneCount
+      || !Array.isArray(inventory.panes) || inventory.panes.length !== expected.paneCount
+      || inventory.panes.some((pane, index) => pane.index !== index || !Array.isArray(pane.indicators)
+        || pane.indicators.some((indicator) => indicator.get_study_by_id_resolves !== true))) {
+      throw new Error('Scoped existing-chart save indicator identity is incomplete.');
+    }
+    const signatures = await inspectSignatures();
+    if (signatures?.success !== true || signatures.pane_count !== expected.paneCount
+      || !Array.isArray(signatures.panes) || signatures.panes.length !== expected.paneCount
+      || signatures.panes.some((pane, index) => pane.index !== index)) {
+      throw new Error('Scoped existing-chart save indicator parity is unavailable.');
+    }
+    const parityHash = derivePaneIndicatorParityHash({
+      paneCapacity: expected.paneCount,
+      canonicalPaneIndex: signatures.canonical_pane_index,
+      panes: signatures.panes,
+    });
+    if (parityHash !== expected.parityHash) {
+      throw new Error('Scoped existing-chart save indicator parity does not match reviewed authority.');
+    }
 
-  // Forces exact operation-scoped CDP attachment before any save API call.
-  await getBoundClient();
-  const pre = await evaluate(`
-    (function() {
-      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
-      var chart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
-        && window.TradingViewApi._activeChartWidgetWV.value();
-      var count = cwc && cwc.inlineChartsCount;
-      if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
-      var layoutId = cwc && cwc.metaInfo && cwc.metaInfo().uid;
-      if (layoutId && typeof layoutId.value === 'function') layoutId = layoutId.value();
-      return {
-        href: window.location.href,
-        pane_count: Number(count),
-        layout_id: layoutId == null ? null : String(layoutId),
-        chart_available: Boolean(chart),
-      };
-    })()
-  `);
-  if (!pre || pre.href !== canonicalUrl || pre.layout_id !== expected.layoutId
-    || pre.pane_count !== expected.paneCount || pre.chart_available !== true) {
-    throw new Error('Scoped existing-chart save authority changed before save.');
-  }
-
-  const inventory = await inspectInventory();
-  if (inventory?.success !== true || inventory.pane_count !== expected.paneCount
-    || !Array.isArray(inventory.panes) || inventory.panes.length !== expected.paneCount
-    || inventory.panes.some((pane, index) => pane.index !== index || !Array.isArray(pane.indicators)
-      || pane.indicators.some((indicator) => indicator.get_study_by_id_resolves !== true))) {
-    throw new Error('Scoped existing-chart save indicator identity is incomplete.');
-  }
-  const signatures = await inspectSignatures();
-  if (signatures?.success !== true || signatures.pane_count !== expected.paneCount
-    || !Array.isArray(signatures.panes) || signatures.panes.length !== expected.paneCount
-    || signatures.panes.some((pane, index) => pane.index !== index)) {
-    throw new Error('Scoped existing-chart save indicator parity is unavailable.');
-  }
-  const parityHash = derivePaneIndicatorParityHash({
-    paneCapacity: expected.paneCount,
-    canonicalPaneIndex: signatures.canonical_pane_index,
-    panes: signatures.panes,
-  });
-  if (parityHash !== expected.parityHash) {
-    throw new Error('Scoped existing-chart save indicator parity does not match reviewed authority.');
-  }
-
-  const saved = await evaluateAsync(`
+    saveInvoked = true;
+    const saved = await evaluateAsync(`
     (function() {
       var service = window.TradingViewApi && window.TradingViewApi._saveChartService;
       if (!service || typeof service.saveExistentChart !== 'function') {
@@ -149,33 +254,127 @@ export async function saveExistingChartScoped({
       });
     })()
   `);
-  if (!saved || saved.success !== true || saved.uid !== expected.layoutId) {
-    throw new Error('Existing-chart save did not preserve reviewed layout identity.');
-  }
+    if (!saved || saved.success !== true) {
+      throw new ScopedSaveEffectError(saved?.error || 'Existing-chart save failed.', {
+        phase: 'save-invocation', effectState: 'ambiguous', saveInvoked: true,
+      });
+    }
+    const savedLayoutId = saved.uid == null ? null : String(saved.uid);
+    if (savedLayoutId !== expected.layoutId) {
+      throw new ScopedSaveEffectError('Existing-chart save callback returned an unexpected layout identity.', {
+        phase: 'save-callback', effectState: 'ambiguous', saveInvoked: true,
+        saveCallbackConfirmed: true,
+      });
+    }
 
-  const post = await evaluate(`
-    (function() {
-      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
-      var layoutId = cwc && cwc.metaInfo && cwc.metaInfo().uid;
-      if (layoutId && typeof layoutId.value === 'function') layoutId = layoutId.value();
-      return { href: window.location.href, layout_id: layoutId == null ? null : String(layoutId) };
-    })()
-  `);
-  if (!post || post.href !== canonicalUrl || post.layout_id !== expected.layoutId) {
-    throw new Error('Existing-chart save postcondition changed reviewed chart identity.');
+    let post;
+    try {
+      post = await evaluate(LAYOUT_EVIDENCE_EXPRESSION);
+    } catch (error) {
+      throw new ScopedSaveEffectError(error instanceof Error ? error.message : String(error), {
+        phase: 'post-save-verification', effectState: 'confirmed', saveInvoked: true,
+        saveCallbackConfirmed: true, cause: error,
+      });
+    }
+    if (!post || post.href !== canonicalUrl || post.layout_id !== expected.layoutId) {
+      throw new ScopedSaveEffectError('Existing-chart save postcondition changed reviewed chart identity.', {
+        phase: 'post-save-verification', effectState: 'confirmed', saveInvoked: true,
+        saveCallbackConfirmed: true,
+      });
+    }
+    return {
+      success: true,
+      save_version: 'chart-save-existing-scoped-v1',
+      profile_id: expected.profileId,
+      chart_target_id: expected.targetId,
+      chart_id: expected.chartId,
+      layout_id: expected.layoutId,
+      pane_count: expected.paneCount,
+      indicator_parity_hash: parityHash,
+      saved_layout_id: savedLayoutId,
+      saved_existing: true,
+      mutations_performed: true,
+      save_invoked: true,
+      effect_state: 'confirmed',
+      effect_phase: 'post-save-verification',
+      save_callback_confirmed: true,
+    };
+  } catch (error) {
+    throw withSaveFailure(
+      error,
+      saveInvoked,
+      saveInvoked ? 'save-invocation' : 'pre-effect',
+      saveInvoked ? 'ambiguous' : 'not-started',
+    );
+  }
+}
+
+export async function probeExistingChartSaveCapability({
+  profile_id,
+  tab_index,
+  chart_target_id,
+  chart_id,
+  layout_id,
+  expected_pane_count,
+  _deps,
+}) {
+  const { evaluate, getBoundClient } = _resolve(_deps);
+  const listTabs = _deps?.listTabs || _listTabs;
+  const session = requireObserverSession();
+  const expected = normalizeSaveInput({
+    profile_id,
+    tab_index,
+    chart_target_id,
+    chart_id,
+    layout_id,
+    expected_pane_count,
+    expected_indicator_parity_hash: '0'.repeat(64),
+  });
+  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  await getBoundClient();
+  const evidence = await evaluate(LAYOUT_EVIDENCE_EXPRESSION);
+  if (!evidence || evidence.href !== canonicalUrl || evidence.layout_id !== expected.layoutId
+    || evidence.pane_count !== expected.paneCount || evidence.chart_available !== true) {
+    throw new SaveCapabilityProbeError('Read-only existing-chart save capability target/layout evidence is not exact.', {
+      profile_id: expected.profileId,
+      chart_target_id: expected.targetId,
+      chart_id: expected.chartId,
+      canonical_url: canonicalUrl,
+      expected_layout_id: expected.layoutId,
+      expected_pane_count: expected.paneCount,
+      ...(evidence && {
+        observed_href: evidence.href,
+        observed_layout_id: evidence.layout_id,
+        observed_pane_count: evidence.pane_count,
+        chart_available: evidence.chart_available,
+        meta_info_type: evidence.meta_info_type,
+        meta_info_shape: evidence.meta_info_shape,
+        uid_shape: evidence.uid_shape,
+        save_service_available: evidence.save_service_available,
+        save_existent_chart_type: evidence.save_existent_chart_type,
+      }),
+    });
   }
   return {
     success: true,
-    save_version: 'chart-save-existing-scoped-v1',
+    probe_version: 'chart-save-existing-capability-probe-v1',
     profile_id: expected.profileId,
     chart_target_id: expected.targetId,
     chart_id: expected.chartId,
+    canonical_url: canonicalUrl,
     layout_id: expected.layoutId,
     pane_count: expected.paneCount,
-    indicator_parity_hash: parityHash,
-    saved_layout_id: saved.uid,
-    saved_existing: true,
-    mutations_performed: true,
+    meta_info_type: evidence.meta_info_type,
+    meta_info_shape: evidence.meta_info_shape,
+    uid_shape: evidence.uid_shape,
+    derived_layout_id: evidence.layout_id,
+    chart_available: evidence.chart_available,
+    save_service_available: evidence.save_service_available,
+    save_existent_chart_type: evidence.save_existent_chart_type,
+    save_capability_available: evidence.save_service_available && evidence.save_existent_chart_type === 'function',
+    mutations_performed: false,
+    persisted_state_authority: 'unavailable',
+    persisted_state_note: 'TradingView getSavedCharts metadata does not expose persisted pane indicator state; no authoritative persisted parity read is available through this MCP release.',
   };
 }
 
