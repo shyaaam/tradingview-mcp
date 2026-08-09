@@ -112,6 +112,92 @@ const chartRuntimeWaitReadyOutput = {
   mutations_performed: z.literal(false),
 };
 
+const lifecycleTargetOutput = {
+  id: z.string().min(1),
+  type: z.string().nullable(),
+  url: z.string(),
+  title: z.string().nullable(),
+};
+
+const lifecycleTargetViewOutput = {
+  success: z.boolean(),
+  targets: z.array(z.object(lifecycleTargetOutput)),
+  exact_target_ids: z.array(z.string().min(1)),
+  target_present: z.boolean(),
+  exact_target_present: z.boolean(),
+  error: z.string().nullable(),
+};
+
+const lifecycleBrowserTargetInfoOutput = {
+  success: z.boolean(),
+  target_id: z.string().min(1),
+  type: z.string().nullable(),
+  url: z.string().nullable(),
+  title: z.string().nullable(),
+  attached: z.boolean().nullable(),
+  error: z.string().nullable(),
+};
+
+const lifecycleBrowserViewOutput = {
+  ...lifecycleTargetViewOutput,
+  target_info: z.object(lifecycleBrowserTargetInfoOutput),
+};
+
+const lifecycleRuntimeViewOutput = {
+  success: z.boolean(),
+  current_url: z.string(),
+  document_ready_state: z.enum(['loading', 'interactive', 'complete', 'unavailable']),
+  error: z.string().nullable(),
+};
+
+const chartRuntimeTargetLifecycleTraceInput = {
+  ...chartRuntimeReadinessInput,
+  duration_ms: z.coerce.number().int().min(35_000).max(40_000).optional().default(35_000),
+  poll_interval_ms: z.coerce.number().int().min(100).max(5_000).optional().default(500),
+};
+
+const chartRuntimeTargetLifecycleTraceOutput = {
+  success: z.literal(true),
+  trace_version: z.literal('chart-runtime-target-lifecycle-trace-v1'),
+  status: z.literal('COMPLETED'),
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1),
+  target_url: z.string().url(),
+  duration_ms: z.number().int().nonnegative(),
+  requested_duration_ms: z.number().int().min(35_000).max(40_000),
+  poll_interval_ms: z.number().int().positive(),
+  trace_classification: z.enum([
+    'STABLE_EXACT_TARGET',
+    'SAME_TARGET_BECAME_BLANK',
+    'TARGET_REPLACED',
+    'MANAGER_BROWSER_DISAGREEMENT',
+    'MULTIPLE_EXACT_TARGETS',
+    'RUNTIME_URL_MISMATCH',
+    'MANAGER_VIEW_UNAVAILABLE',
+    'BROWSER_TARGET_VIEW_UNAVAILABLE',
+    'RUNTIME_VIEW_UNAVAILABLE',
+  ]),
+  samples: z.array(z.object({
+    elapsed_ms: z.number().int().nonnegative(),
+    manager_view: z.object(lifecycleTargetViewOutput),
+    browser_view: z.object(lifecycleBrowserViewOutput),
+    runtime_view: z.object(lifecycleRuntimeViewOutput),
+    classification: z.enum([
+      'STABLE_EXACT_TARGET',
+      'SAME_TARGET_BECAME_BLANK',
+      'TARGET_REPLACED',
+      'MANAGER_BROWSER_DISAGREEMENT',
+      'MULTIPLE_EXACT_TARGETS',
+      'RUNTIME_URL_MISMATCH',
+      'MANAGER_VIEW_UNAVAILABLE',
+      'BROWSER_TARGET_VIEW_UNAVAILABLE',
+      'RUNTIME_VIEW_UNAVAILABLE',
+    ]),
+  })),
+  auto_adoption_performed: z.literal(false),
+  mutations_performed: z.literal(false),
+};
+
 export const paneIndicatorSignaturesOutput = {
   success: z.literal(true),
   schema_version: z.literal('pane-indicator-signatures-v1'),
@@ -345,6 +431,11 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'read_only',
     inputSchema: chartRuntimeWaitReadyInput,
     outputSchema: chartRuntimeWaitReadyOutput,
+  },
+  chart_runtime_target_lifecycle_trace_v1: {
+    classification: 'read_only',
+    inputSchema: chartRuntimeTargetLifecycleTraceInput,
+    outputSchema: chartRuntimeTargetLifecycleTraceOutput,
   },
   chart_runtime_content_snapshot_v1: {
     classification: 'read_only',
@@ -699,7 +790,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_content_snapshot_v1') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1') {
       requireObserverSession();
     }
     return handler(args, extra);

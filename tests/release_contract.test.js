@@ -25,6 +25,7 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
+import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
 import { registerObserverScreenshotTool } from '../src/tools/observer-screenshot.js';
 
@@ -70,6 +71,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_attach_existing_read_only',
     'chart_runtime_readiness_probe_v1',
     'chart_runtime_wait_ready_v1',
+    'chart_runtime_target_lifecycle_trace_v1',
     'chart_runtime_content_snapshot_v1',
     'tv_observer_hydrate_chart_target',
     'tv_observer_identity',
@@ -115,6 +117,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
+  registerChartRuntimeTargetLifecycleTools(fakeServer);
   registerChartRuntimeContentSnapshotTools(fakeServer);
   registerObserverScreenshotTool(fakeServer);
 
@@ -244,6 +247,55 @@ test('observer result fixtures satisfy registered output schemas', () => {
         probe_error: null,
         ready: true,
       },
+      mutations_performed: false,
+    },
+    chart_runtime_target_lifecycle_trace_v1: {
+      success: true,
+      trace_version: 'chart-runtime-target-lifecycle-trace-v1',
+      status: 'COMPLETED',
+      profile_id: 'profile-a',
+      target_id: 'chart-1',
+      target_url: 'https://www.tradingview.com/chart/x/',
+      duration_ms: 35_000,
+      requested_duration_ms: 35_000,
+      poll_interval_ms: 500,
+      trace_classification: 'STABLE_EXACT_TARGET',
+      samples: [{
+        elapsed_ms: 0,
+        manager_view: {
+          success: true,
+          targets: [{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/x/', title: 'Chart' }],
+          exact_target_ids: ['chart-1'],
+          target_present: true,
+          exact_target_present: true,
+          error: null,
+        },
+        browser_view: {
+          success: true,
+          targets: [{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/x/', title: 'Chart' }],
+          exact_target_ids: ['chart-1'],
+          target_present: true,
+          exact_target_present: true,
+          error: null,
+          target_info: {
+            success: true,
+            target_id: 'chart-1',
+            type: 'page',
+            url: 'https://www.tradingview.com/chart/x/',
+            title: 'Chart',
+            attached: true,
+            error: null,
+          },
+        },
+        runtime_view: {
+          success: true,
+          current_url: 'https://www.tradingview.com/chart/x/',
+          document_ready_state: 'complete',
+          error: null,
+        },
+        classification: 'STABLE_EXACT_TARGET',
+      }],
+      auto_adoption_performed: false,
       mutations_performed: false,
     },
     chart_runtime_content_snapshot_v1: {

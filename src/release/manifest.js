@@ -13,6 +13,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_attach_existing_read_only',
   'chart_runtime_readiness_probe_v1',
   'chart_runtime_wait_ready_v1',
+  'chart_runtime_target_lifecycle_trace_v1',
   'chart_runtime_content_snapshot_v1',
   'tv_observer_hydrate_chart_target',
   'tv_observer_identity',
