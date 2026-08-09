@@ -213,7 +213,7 @@ function assertDualLayoutIdentityEvidence(evidence, expected, { requireSaveServi
     || (requireSaveService && (evidence.save_service_available !== true || evidence.save_existent_chart_type !== 'function'))) {
     throw new Error('Dual saved-layout identity does not match reviewed authority.');
   }
-  return canonicalUrl;
+  return evidence;
 }
 
 async function inspectSaveParity({ expected, inspectInventory, inspectSignatures }) {
@@ -470,7 +470,8 @@ export async function probeExistingChartSaveCapability({
     expected_pane_count,
     expected_indicator_parity_hash: '0'.repeat(64),
   });
-  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
+  await assertExactSaveTarget(expected, session, listTabs);
   await getBoundClient();
   const evidence = await evaluate(LAYOUT_EVIDENCE_EXPRESSION);
   if (!evidence || evidence.href !== canonicalUrl || evidence.layout_id !== expected.layoutId
@@ -545,7 +546,7 @@ export async function inspectSavedLayoutIdentity({
     expected_saved_layout_uid,
     expected_pane_count,
   });
-  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  await assertExactSaveTarget(expected, session, listTabs);
   await getBoundClient();
   const evidence = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
   assertDualLayoutIdentityEvidence(evidence, expected);
@@ -554,11 +555,11 @@ export async function inspectSavedLayoutIdentity({
     identity_version: 'chart-saved-layout-identity-v1',
     profile_id: expected.profileId,
     chart_target_id: expected.targetId,
-    workspace_layout_id: expected.workspaceLayoutId,
-    saved_layout_uid: expected.savedLayoutUid,
-    chart_id: expected.chartId,
-    canonical_url: canonicalUrl,
-    pane_count: expected.paneCount,
+    workspace_layout_id: evidence.workspace_layout_id,
+    saved_layout_uid: evidence.saved_layout_uid,
+    chart_id: evidence.chart_id,
+    canonical_url: evidence.canonical_url,
+    pane_count: evidence.pane_count,
     mutations_performed: false,
   };
 }
@@ -589,7 +590,7 @@ export async function probeExistingChartSaveCapabilityV2({
     expected_saved_layout_uid,
     expected_pane_count,
   });
-  const canonicalUrl = await assertExactSaveTarget(expected, session, listTabs);
+  await assertExactSaveTarget(expected, session, listTabs);
   await getBoundClient();
   const evidence = await evaluate(DUAL_LAYOUT_IDENTITY_EVIDENCE_EXPRESSION);
   assertDualLayoutIdentityEvidence(evidence, expected);
@@ -598,11 +599,11 @@ export async function probeExistingChartSaveCapabilityV2({
     probe_version: 'chart-save-existing-capability-probe-v2',
     profile_id: expected.profileId,
     chart_target_id: expected.targetId,
-    workspace_layout_id: expected.workspaceLayoutId,
-    saved_layout_uid: expected.savedLayoutUid,
-    chart_id: expected.chartId,
-    canonical_url: canonicalUrl,
-    pane_count: expected.paneCount,
+    workspace_layout_id: evidence.workspace_layout_id,
+    saved_layout_uid: evidence.saved_layout_uid,
+    chart_id: evidence.chart_id,
+    canonical_url: evidence.canonical_url,
+    pane_count: evidence.pane_count,
     meta_info_type: evidence.meta_info_type,
     meta_info_shape: evidence.meta_info_shape,
     uid_shape: evidence.uid_shape,
@@ -646,7 +647,6 @@ export async function saveExistingChartScopedV2({
     expected_pane_count,
     expected_indicator_parity_hash,
   }, { requireParity: true });
-  const canonicalUrl = CANONICAL_CHART_URL(expected.chartId);
   let saveInvoked = false;
   try {
     await assertExactSaveTarget(expected, session, listTabs);
@@ -673,11 +673,11 @@ export async function saveExistingChartScopedV2({
       save_version: 'chart-save-existing-scoped-v2',
       profile_id: expected.profileId,
       chart_target_id: expected.targetId,
-      chart_id: expected.chartId,
-      canonical_url: canonicalUrl,
-      workspace_layout_id: expected.workspaceLayoutId,
+      chart_id: post.chart_id,
+      canonical_url: post.canonical_url,
+      workspace_layout_id: post.workspace_layout_id,
       saved_layout_uid: savedLayoutUid,
-      pane_count: expected.paneCount,
+      pane_count: post.pane_count,
       indicator_parity_hash: parityHash,
       saved_existing: true,
       mutations_performed: true,
