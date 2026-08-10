@@ -3,11 +3,11 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
+import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
 
 function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false } = {}) {
   const state = {
-    studies: studies.map(study => ({ id: study.id, name: study.name, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
+    studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
     switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], canonicalPriceStudy,
   };
   return {
@@ -21,10 +21,10 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
             index,
             signature: 'a'.repeat(64),
             indicators: state.studies.map((study) => ({
-              indicator_id: study.id,
+              indicator_id: study.indicatorId,
               entity_id: study.id,
               indicator_name: study.name,
-              is_price_study: false,
+              is_price_study: study.isPriceStudy,
               settings: {},
             })),
           })),
@@ -38,6 +38,15 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
           if (matching.length > 1) return { error: `scoped indicator mutation found duplicate matching studies: ${name}` };
           const found = matching[0];
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
+        }
+        if (expression.includes('chart.createStudy(')) {
+          const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1] || '';
+          const id = `study-${state.studies.length + 1}`;
+          const indicatorId = name === 'Relative Strength Index' ? 'STD;RSI' : `id:${name}`;
+          const inputs = [{ id: 'length', value: 14 }];
+          state.studies.push({ id, indicatorId, name, isPriceStudy: false, inputs });
+          state.created.push({ id, indicatorId, name, inputs });
+          return { id, name, inputs };
         }
         if (expression.includes('insertStudyWithParams')) {
           if (state.canonicalPriceStudy && !expression.includes('forceOverlay: canonicalMeta.is_price_study === true')) {
@@ -116,6 +125,54 @@ describe('scoped indicator plan primitives', () => {
     assert.deepEqual(state.switchedTabs, [4]);
     assert.deepEqual(state.focusedPanes, [2]);
     assert.equal(state.created.length, 1);
+  });
+
+  it('applies an approved blueprint indicator on a blank chart without a surviving canonical source', async () => {
+    const { deps, state } = makeDeps();
+    const result = await applyScopedBlueprintIndicator({
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      indicator_id: 'STD;RSI',
+      indicator_name: 'Relative Strength Index',
+      expected_is_price_study: false,
+      expected_chart_target_id: 'target-1',
+      expected_chart_id: 'chart-1',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+      expected_post_pane_signature: 'a'.repeat(64),
+      expected_settings: { length: 14 },
+      _deps: deps,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.blueprint_apply_version, 'indicator-apply-blueprint-scoped-v1');
+    assert.equal(result.indicator_id, 'STD;RSI');
+    assert.equal(result.post_mutation_signature, 'a'.repeat(64));
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('chart.createStudy(')));
+    assert.ok(!state.evaluateCalls.some((expression) => expression.includes('canonicalMatches') && expression.includes('chart.createStudy(')));
+    assert.equal(state.created.length, 1);
+  });
+
+  it('fails closed when blueprint createStudy resolves a different stable indicator ID', async () => {
+    const { deps } = makeDeps();
+    await assert.rejects(() => applyScopedBlueprintIndicator({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 0,
+      indicator_id: 'expected-other-id', indicator_name: 'Relative Strength Index', expected_is_price_study: false,
+      expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), expected_post_pane_signature: 'a'.repeat(64), expected_settings: { length: 14 },
+      _deps: deps,
+    }), /stable ID does not match approved blueprint/);
+  });
+
+  it('fails closed when blueprint post-pane signature differs from the approved recovery step', async () => {
+    const { deps } = makeDeps();
+    await assert.rejects(() => applyScopedBlueprintIndicator({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 0,
+      indicator_id: 'STD;RSI', indicator_name: 'Relative Strength Index', expected_is_price_study: false,
+      expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), expected_post_pane_signature: 'b'.repeat(64), expected_settings: { length: 14 },
+      _deps: deps,
+    }), /post-mutation pane signature does not match approved recovery step/);
   });
 
   it('updates indicator settings and returns previous/new scoped evidence', async () => {
