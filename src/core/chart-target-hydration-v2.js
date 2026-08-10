@@ -92,7 +92,7 @@ export async function hydrateChartTargetV2(input = {}, dependencies = {}) {
   const targetId = text(created?.targetId || created?.id);
   if (!targetId) return blocked(expected, { state: 'blocked-target-missing', targetCreated: true });
   const target = await waitForCreatedTarget(cdpUrl, targetId, deps);
-  if (!target || target.url !== 'about:blank') {
+  if (!target || !isPendingTargetMetadata(target.url)) {
     return blocked(expected, {
       state: target ? 'blocked-runtime-url-mismatch' : 'blocked-target-missing',
       targetId,
@@ -205,7 +205,7 @@ async function waitForRenderer(cdpUrl, targetId, expected, network, deps) {
     }
     const target = targets.find((entry) => entry.id === targetId);
     if (!target) return { ...latest, state: 'blocked-target-missing', targetMetadataUrl: null };
-    if (target.url !== 'about:blank' && target.url !== expected.chartUrl) {
+    if (targetMetadataDisposition(target.url, expected.chartUrl) === 'mismatch') {
       return { ...latest, state: 'blocked-runtime-url-mismatch', targetMetadataUrl: target.url };
     }
     let verification;
@@ -240,13 +240,13 @@ async function waitForRenderer(cdpUrl, targetId, expected, network, deps) {
       frameTree: verification.frameTree,
     };
     if (latest.state === 'renderer-verified' && target.url === expected.chartUrl) return latest;
-    if (latest.state === 'renderer-verified' && target.url !== 'about:blank') {
-      return { ...latest, state: 'blocked-runtime-url-mismatch' };
-    }
     if (latest.state === 'blocked-login-required' || latest.state === 'blocked-chrome-error-document' || latest.state === 'blocked-runtime-url-mismatch') return latest;
     await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, DEFAULT_VERIFICATION_TIMEOUT_MS - ((deps.now || Date.now)() - started))));
   }
   if (sawEvaluationFailure && !sawUsableRuntime) return { ...latest, state: 'blocked-runtime-evaluation-unavailable' };
+  if (latest.state === 'renderer-verified' && latest.targetMetadataUrl !== expected.chartUrl) {
+    return { ...latest, state: 'blocked-timeout' };
+  }
   return latest;
 }
 
@@ -404,6 +404,16 @@ async function waitForCreatedTarget(cdpUrl, targetId, deps, attempts = 40) {
     await (deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(250);
   }
   return null;
+}
+
+function isPendingTargetMetadata(url) {
+  return url === '' || url === 'about:blank';
+}
+
+function targetMetadataDisposition(url, expectedUrl) {
+  if (url === expectedUrl) return 'exact';
+  if (isPendingTargetMetadata(url)) return 'pending';
+  return 'mismatch';
 }
 
 async function loadExactProfile(base, profileId, deps) {

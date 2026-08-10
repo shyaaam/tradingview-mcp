@@ -37,6 +37,10 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     runtimeSnapshot,
     navigate,
     runtimeSequence: null,
+    metadataSequence: Array.isArray(navigate.targetMetadataSequence) ? [...navigate.targetMetadataSequence] : null,
+    metadataIndex: 0,
+    targetListSequence: Array.isArray(navigate.targetListSequence) ? [...navigate.targetListSequence] : null,
+    targetListIndex: 0,
   };
   const calls = {
     createTarget: 0,
@@ -103,7 +107,7 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
           requestId: 'image-1', type: 'Image', frameId: 'frame-1', loaderId: 'loader-1',
           errorText: 'net::ERR_BLOCKED_BY_CLIENT', canceled: false,
         });
-        state.targets[0].url = url;
+        if (!state.metadataSequence && !state.targetListSequence) state.targets[0].url = url;
         return { frameId: 'frame-1', loaderId: 'loader-1', isDownload: false, errorText: state.navigate.errorText };
       },
       getFrameTree: async () => ({
@@ -130,7 +134,18 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     fetch: async (url) => {
       if (url.endsWith('/profiles')) return response([{ id: PROFILE_ID, status: 'running', cdp_url: '/api/profiles/profile-v2/cdp/' }]);
       if (url.endsWith('/json/version')) return response({ webSocketDebuggerUrl: 'ws://browser' });
-      if (url.endsWith('/json/list')) return response(state.targets);
+      if (url.endsWith('/json/list')) {
+        if (state.targetListSequence) {
+          const last = state.targetListSequence.length - 1;
+          state.targets = state.targetListSequence[Math.min(state.targetListIndex, last)].map((entry) => ({ ...entry }));
+          state.targetListIndex += 1;
+        } else if (state.metadataSequence && state.targets[0]) {
+          const last = state.metadataSequence.length - 1;
+          state.targets[0].url = state.metadataSequence[Math.min(state.metadataIndex, last)];
+          state.metadataIndex += 1;
+        }
+        return response(state.targets);
+      }
       throw new Error(`unexpected URL: ${url}`);
     },
     connectBrowser: async () => browser,
@@ -231,6 +246,101 @@ test('new target polls transient unavailable, blank, loading, then verifies exac
   assert.equal(result.renderer_verified, true);
   assert.equal(harness.calls.navigate, 1);
   assert.equal(harness.calls.createTarget, 1);
+});
+
+test('empty target metadata remains pending until exact metadata converges', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetMetadataSequence: ['about:blank', '', TARGET_URL],
+      runtimeSequence: [new Error('runtime context pending'), runtime({ document_ready_state: 'interactive' })],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.target_metadata_url, TARGET_URL);
+  assert.equal(harness.calls.createTarget, 1);
+  assert.equal(harness.calls.navigate, 1);
+});
+
+test('empty metadata and temporary runtime errors do not create URL mismatch', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetMetadataSequence: ['about:blank', '', '', TARGET_URL],
+      runtimeSequence: [new Error('runtime context pending'), new Error('runtime context pending'), runtime({ document_ready_state: 'complete' })],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.notEqual(result.state, 'blocked-runtime-url-mismatch');
+  assert.equal(harness.calls.navigate, 1);
+});
+
+test('persistent runtime errors with empty metadata report evaluation-unavailable', async () => {
+  const error = new Error('runtime context unavailable');
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetMetadataSequence: ['about:blank', ''],
+      evaluationSequence: [error],
+      evaluationFallback: error,
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-runtime-evaluation-unavailable');
+  assert.notEqual(result.state, 'blocked-runtime-url-mismatch');
+});
+
+test('usable exact runtime with metadata that never converges reports timeout', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetMetadataSequence: ['about:blank', ''],
+      runtime: runtime({ document_ready_state: 'interactive' }),
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-timeout');
+  assert.notEqual(result.state, 'blocked-runtime-url-mismatch');
+});
+
+test('non-empty unexpected metadata remains a redacted URL mismatch', async () => {
+  const unexpectedUrl = 'https://unexpected.example/path?secret=test';
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetMetadataSequence: ['about:blank', '', unexpectedUrl],
+      runtimeSequence: [new Error('runtime context pending')],
+      evaluationFallback: new Error('runtime context pending'),
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-runtime-url-mismatch');
+  assert.equal(result.target_metadata_url, '[redacted-non-authorized-url]');
+  assert.doesNotMatch(JSON.stringify(result), /unexpected\.example|secret/iu);
+});
+
+test('empty original metadata never adopts a different exact target', async () => {
+  const originalTarget = { id: 'target-new', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://target-new' };
+  const replacementTarget = exactTarget('target-other');
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      targetListSequence: [
+        [originalTarget],
+        [{ ...originalTarget, url: '' }],
+        [{ ...originalTarget, url: '' }, replacementTarget],
+      ],
+      runtime: runtime({ document_ready_state: 'interactive' }),
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-timeout');
+  assert.equal(result.target_id, 'target-new');
+  assert.equal(harness.calls.createTarget, 1);
+  assert.equal(harness.calls.navigate, 1);
+  assert.ok(harness.calls.verificationWebSockets.every((url) => url === 'ws://target-new'));
 });
 
 test('initial runtime unavailable and blank remain pending before Chrome error terminal state', async () => {
