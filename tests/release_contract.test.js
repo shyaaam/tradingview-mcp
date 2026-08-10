@@ -29,6 +29,7 @@ import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-r
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
 import { registerObserverScreenshotTool } from '../src/tools/observer-screenshot.js';
+import { registerIndicatorTools } from '../src/tools/indicators.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json');
@@ -88,6 +89,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'pane_indicator_signatures',
     'pane_indicator_mutation_inventory',
     'pane_probe_layout_capability',
+    'indicator_apply_blueprint_scoped',
     'chart_get_state',
     'chart_save_existing_capability_probe',
     'chart_save_existing_capability_probe_v2',
@@ -123,6 +125,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartRuntimeTargetLifecycleTools(fakeServer);
   registerChartRuntimeContentSnapshotTools(fakeServer);
   registerObserverScreenshotTool(fakeServer);
+  registerIndicatorTools(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(registered.has(capability.name), true, `missing MCP tool: ${capability.name}`);
@@ -577,6 +580,22 @@ test('observer result fixtures satisfy registered output schemas', () => {
       restored: { layout: 's', chart_count: 1, active_index: 0, panes: [{ index: 0, symbol: 'AAPL', resolution: '60' }] },
       observations: [],
     },
+    indicator_apply_blueprint_scoped: {
+      success: true,
+      blueprint_apply_version: 'indicator-apply-blueprint-scoped-v1',
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      indicator_id: 'STD;RSI',
+      indicator_name: 'Relative Strength Index',
+      is_price_study: false,
+      entity_id: 'study-rsi-1',
+      pre_mutation_signature: 'a'.repeat(64),
+      post_mutation_signature: 'b'.repeat(64),
+      post_mutation_indicator_count: 1,
+      mutations_performed: true,
+      focus: { success: true, focused_index: 0 },
+    },
     chart_get_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [{ id: 'study-1', name: 'Volume' }] },
     chart_save_existing_capability_probe: {
       success: true,
@@ -801,7 +820,8 @@ function stripRuntimeDefaults(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== 'additionalProperties')
+      .filter(([key, entry]) => key !== 'additionalProperties'
+        || (entry !== null && typeof entry === 'object'))
       .map(([key, entry]) => [key, stripRuntimeDefaults(entry)]),
   );
 }

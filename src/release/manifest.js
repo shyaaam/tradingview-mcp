@@ -96,7 +96,8 @@ function removeRuntimeDefaults(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== 'additionalProperties')
+      .filter(([key, entry]) => key !== 'additionalProperties'
+        || (entry !== null && typeof entry === 'object'))
       .map(([key, entry]) => [key, removeRuntimeDefaults(entry)]),
   );
 }

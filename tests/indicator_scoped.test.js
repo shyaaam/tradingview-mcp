@@ -43,7 +43,16 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
           const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1] || '';
           const id = `study-${state.studies.length + 1}`;
           const indicatorId = name === 'Relative Strength Index' ? 'STD;RSI' : `id:${name}`;
-          const inputs = [{ id: 'length', value: 14 }];
+          const settingsMatch = expression.match(/var rawSettings = ([\s\S]*?);\s+var inputs/);
+          const rawSettings = settingsMatch ? JSON.parse(settingsMatch[1]) : {};
+          const inputs = Object.entries(rawSettings).map(([key, value]) => ({
+            id: key,
+            value: value && typeof value === 'object' && !Array.isArray(value)
+              && Object.prototype.hasOwnProperty.call(value, 'v')
+              && Object.keys(value).every((field) => field === 'f' || field === 't' || field === 'v')
+              ? value.v
+              : value,
+          }));
           state.studies.push({ id, indicatorId, name, isPriceStudy: false, inputs });
           state.created.push({ id, indicatorId, name, inputs });
           return { id, name, inputs };
@@ -141,7 +150,7 @@ describe('scoped indicator plan primitives', () => {
       expected_layout_id: '8',
       expected_pane_signature: 'a'.repeat(64),
       expected_post_pane_signature: 'a'.repeat(64),
-      expected_settings: { length: 14 },
+      expected_settings: { length: { f: true, t: 'integer', v: 14 } },
       _deps: deps,
     });
     assert.equal(result.success, true);
@@ -151,6 +160,7 @@ describe('scoped indicator plan primitives', () => {
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('chart.createStudy(')));
     assert.ok(!state.evaluateCalls.some((expression) => expression.includes('canonicalMatches') && expression.includes('chart.createStudy(')));
     assert.equal(state.created.length, 1);
+    assert.deepEqual(state.created[0].inputs, [{ id: 'length', value: 14 }]);
   });
 
   it('fails closed when blueprint createStudy resolves a different stable indicator ID', async () => {
