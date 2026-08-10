@@ -1,8 +1,30 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/indicators.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerIndicatorTools(server) {
+  registerObserverTool(server, 'indicator_apply_blueprint_scoped', 'Apply one exact approved desired-state indicator to a blank or partially reconstructed chart pane with exact pre/post signature fences', async ({ profile_id, tab_index, pane_index, indicator_id, indicator_name, expected_is_price_study, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature, expected_post_pane_signature, expected_settings }) => {
+    try {
+      return jsonResult(await core.applyScopedBlueprintIndicator({
+        profile_id,
+        tab_index,
+        pane_index,
+        indicator_id,
+        indicator_name,
+        expected_is_price_study,
+        expected_chart_target_id,
+        expected_chart_id,
+        expected_layout_id,
+        expected_pane_signature,
+        expected_post_pane_signature,
+        expected_settings,
+      }));
+    } catch (err) {
+      return jsonResult({ success: false, error: err.message }, true);
+    }
+  });
+
   server.tool('indicator_set_inputs', 'Change indicator/study input values (e.g., length, source, period)', {
     entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
     inputs: z.string().describe('JSON string of input overrides, e.g. \'{"length": 50, "source": "close"}\'. Keys are input IDs, values are the new values.'),
