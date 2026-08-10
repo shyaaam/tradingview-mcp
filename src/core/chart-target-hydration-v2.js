@@ -120,12 +120,14 @@ async function navigateAndVerify({ client, cdpUrl, expected, targetId, deps }) {
   }
   network.pageNavigate = pageNavigate;
 
-  const verification = await waitForRenderer(cdpUrl, targetId, expected, network, client, deps);
+  const verification = await waitForRenderer(cdpUrl, targetId, expected, network, deps);
   const networkEvidence = summarizeNetwork(network);
   const common = {
     targetId,
     targetMetadataUrl: verification.targetMetadataUrl,
     runtime: verification.runtime,
+    runtimeEvaluation: verification.runtimeEvaluation,
+    frameTree: verification.frameTree,
     pageNavigate,
     network: networkEvidence,
     navigationPerformed: true,
@@ -136,6 +138,7 @@ async function navigateAndVerify({ client, cdpUrl, expected, targetId, deps }) {
   if (verification.state === 'blocked-login-required') return blocked(expected, { ...common, state: verification.state });
   if (verification.state === 'blocked-chrome-error-document') return blocked(expected, { ...common, state: verification.state });
   if (verification.state === 'blocked-runtime-url-mismatch') return blocked(expected, { ...common, state: verification.state });
+  if (verification.state === 'blocked-runtime-evaluation-unavailable') return blocked(expected, { ...common, state: verification.state });
   if (verification.state === 'blocked-target-missing') return blocked(expected, { ...common, state: verification.state });
   if (verification.state === 'renderer-verified') {
     if (verification.targetMetadataUrl !== expected.chartUrl) {
@@ -156,48 +159,73 @@ async function navigateAndVerify({ client, cdpUrl, expected, targetId, deps }) {
 }
 
 async function inspectExistingRenderer(target, expected, deps) {
-  if (!target.webSocketDebuggerUrl) return { state: 'blocked-runtime-url-mismatch', runtime: emptyRuntime() };
-  const connect = deps.connect || ((webSocketDebuggerUrl) => CDP({ target: webSocketDebuggerUrl, local: true }));
-  const client = await connect(target.webSocketDebuggerUrl);
-  try {
-    if (client?.Runtime?.enable) await client.Runtime.enable();
-    const evaluation = await client.Runtime.evaluate({ expression: CHART_RUNTIME_HYDRATION_V2_EXPRESSION, returnByValue: true });
-    const runtime = normalizeRuntime(evaluation?.result?.value);
-    if (runtime.chrome_error_page) return { state: 'blocked-chrome-error-document', runtime };
-    if (runtime.login_state === 'present' || runtime.challenge_state === 'present') return { state: 'blocked-login-required', runtime };
-    if (runtime.runtime_url !== expected.chartUrl) return { state: 'blocked-runtime-url-mismatch', runtime };
-    if (!['interactive', 'complete'].includes(runtime.document_ready_state)) return { state: 'blocked-timeout', runtime };
-    return { state: 'existing-renderer-verified', runtime };
-  } catch {
-    return { state: 'blocked-runtime-url-mismatch', runtime: emptyRuntime() };
-  } finally {
-    try { await client?.close?.(); } catch { /* preserve renderer evidence */ }
+  const verification = await evaluateCurrentRuntime(deps, target, expected, emptyNetwork());
+  if (verification.runtimeEvaluation.status !== 'ok') {
+    return { state: 'blocked-runtime-evaluation-unavailable', ...verification };
   }
+  const { runtime } = verification;
+  if (runtime.chrome_error_page) return { state: 'blocked-chrome-error-document', ...verification };
+  if (runtime.login_state === 'present' || runtime.challenge_state === 'present') return { state: 'blocked-login-required', ...verification };
+  if (runtime.runtime_url !== expected.chartUrl) return { state: 'blocked-runtime-url-mismatch', ...verification };
+  if (!['interactive', 'complete'].includes(runtime.document_ready_state)) return { state: 'blocked-timeout', ...verification };
+  return { state: 'existing-renderer-verified', ...verification };
 }
 
-async function waitForRenderer(cdpUrl, targetId, expected, network, client, deps) {
+async function waitForRenderer(cdpUrl, targetId, expected, network, deps) {
   const started = (deps.now || Date.now)();
   const sleep = deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  let latest = { state: 'blocked-timeout', targetMetadataUrl: null, runtime: emptyRuntime() };
+  let latest = {
+    state: 'blocked-timeout',
+    targetMetadataUrl: null,
+    runtime: emptyRuntime(),
+    runtimeEvaluation: emptyRuntimeEvaluation(),
+    frameTree: emptyFrameTree(),
+  };
+  let sawEvaluationFailure = false;
+  let sawUsableRuntime = false;
   while ((deps.now || Date.now)() - started <= DEFAULT_VERIFICATION_TIMEOUT_MS) {
     let targets;
     try {
       targets = await listTargets(cdpUrl, deps);
     } catch {
-      return { state: 'blocked-target-missing', targetMetadataUrl: null, runtime: latest.runtime };
+      return { ...latest, state: 'blocked-target-missing', targetMetadataUrl: null };
     }
     const target = targets.find((entry) => entry.id === targetId);
-    if (!target) return { state: 'blocked-target-missing', targetMetadataUrl: null, runtime: latest.runtime };
+    if (!target) return { ...latest, state: 'blocked-target-missing', targetMetadataUrl: null };
     if (target.url !== 'about:blank' && target.url !== expected.chartUrl) {
-      return { state: 'blocked-runtime-url-mismatch', targetMetadataUrl: target.url, runtime: latest.runtime };
+      return { ...latest, state: 'blocked-runtime-url-mismatch', targetMetadataUrl: target.url };
     }
-    let runtime = latest.runtime;
+    let verification;
     try {
-      runtime = await evaluateCurrentRuntime(deps, target, client);
-    } catch { /* renderer can remain unavailable during bounded wait */ }
+      verification = await evaluateCurrentRuntime(deps, target, expected, network);
+    } catch (error) {
+      verification = {
+        runtime: latest.runtime,
+        runtimeEvaluation: runtimeEvaluationFailure('protocol-error', error),
+        frameTree: latest.frameTree,
+      };
+    }
+    const evaluationSucceeded = verification.runtimeEvaluation.status === 'ok';
+    if (evaluationSucceeded) sawUsableRuntime = true;
+    else sawEvaluationFailure = true;
+    const runtime = evaluationSucceeded ? verification.runtime : latest.runtime;
     resolveMainDocument(network);
-    if (network.failure) return { state: 'blocked-main-document-network-failure', targetMetadataUrl: target.url, runtime };
-    latest = { state: classifyRenderer(runtime, expected.chartUrl), targetMetadataUrl: target.url, runtime };
+    if (network.failure) {
+      return {
+        state: 'blocked-main-document-network-failure',
+        targetMetadataUrl: target.url,
+        runtime,
+        runtimeEvaluation: verification.runtimeEvaluation,
+        frameTree: verification.frameTree,
+      };
+    }
+    latest = {
+      state: evaluationSucceeded ? classifyRenderer(runtime, expected.chartUrl) : 'pending',
+      targetMetadataUrl: target.url,
+      runtime,
+      runtimeEvaluation: verification.runtimeEvaluation,
+      frameTree: verification.frameTree,
+    };
     if (latest.state === 'renderer-verified' && target.url === expected.chartUrl) return latest;
     if (latest.state === 'renderer-verified' && target.url !== 'about:blank') {
       return { ...latest, state: 'blocked-runtime-url-mismatch' };
@@ -205,24 +233,89 @@ async function waitForRenderer(cdpUrl, targetId, expected, network, client, deps
     if (latest.state === 'blocked-login-required' || latest.state === 'blocked-chrome-error-document' || latest.state === 'blocked-runtime-url-mismatch') return latest;
     await sleep(Math.min(POLL_INTERVAL_MS, Math.max(1, DEFAULT_VERIFICATION_TIMEOUT_MS - ((deps.now || Date.now)() - started))));
   }
+  if (sawEvaluationFailure && !sawUsableRuntime) return { ...latest, state: 'blocked-runtime-evaluation-unavailable' };
   return latest;
 }
 
-async function evaluateCurrentRuntime(deps, target, attachedClient) {
-  if (typeof deps.evaluateRuntime === 'function') return normalizeRuntime(await deps.evaluateRuntime(target));
-  if (attachedClient?.Runtime?.evaluate) {
-    const evaluation = await attachedClient.Runtime.evaluate({ expression: CHART_RUNTIME_HYDRATION_V2_EXPRESSION, returnByValue: true });
-    return normalizeRuntime(evaluation?.result?.value);
+async function evaluateCurrentRuntime(deps, target, expected, network) {
+  if (!target.webSocketDebuggerUrl) {
+    return {
+      runtime: emptyRuntime(),
+      runtimeEvaluation: runtimeEvaluationFailure('protocol-error', 'current target debugger endpoint is unavailable'),
+      frameTree: emptyFrameTree(),
+    };
   }
-  if (!target.webSocketDebuggerUrl) return emptyRuntime();
   const connect = deps.verifyConnect || deps.connect || ((webSocketDebuggerUrl) => CDP({ target: webSocketDebuggerUrl, local: true }));
-  const client = await connect(target.webSocketDebuggerUrl);
+  let client;
   try {
-    if (client?.Runtime?.enable) await client.Runtime.enable();
+    client = await connect(target.webSocketDebuggerUrl);
+    if (typeof client?.Runtime?.enable !== 'function') {
+      return {
+        runtime: emptyRuntime(),
+        runtimeEvaluation: runtimeEvaluationFailure('protocol-error', 'Runtime.enable unavailable'),
+        frameTree: emptyFrameTree(),
+      };
+    }
+    await client.Runtime.enable();
+    if (typeof client?.Runtime?.evaluate !== 'function') {
+      return {
+        runtime: emptyRuntime(),
+        runtimeEvaluation: runtimeEvaluationFailure('protocol-error', 'Runtime.evaluate unavailable'),
+        frameTree: emptyFrameTree(),
+      };
+    }
     const evaluation = await client.Runtime.evaluate({ expression: CHART_RUNTIME_HYDRATION_V2_EXPRESSION, returnByValue: true });
-    return normalizeRuntime(evaluation?.result?.value);
+    if (evaluation?.exceptionDetails) {
+      return {
+        runtime: emptyRuntime(),
+        runtimeEvaluation: runtimeEvaluationException(evaluation.exceptionDetails),
+        frameTree: emptyFrameTree(),
+      };
+    }
+    if (!evaluation?.result || !evaluation.result.value || typeof evaluation.result.value !== 'object') {
+      return {
+        runtime: emptyRuntime(),
+        runtimeEvaluation: runtimeEvaluationFailure('protocol-error', 'Runtime.evaluate returned no runtime snapshot'),
+        frameTree: emptyFrameTree(),
+      };
+    }
+    const runtime = normalizeRuntime(evaluation.result.value);
+    const frameTree = await inspectMainFrame(client, expected, network);
+    return { runtime, runtimeEvaluation: runtimeEvaluationOk(), frameTree };
+  } catch (error) {
+    return {
+      runtime: emptyRuntime(),
+      runtimeEvaluation: runtimeEvaluationFailure('protocol-error', error),
+      frameTree: emptyFrameTree(),
+    };
   } finally {
     try { await client?.close?.(); } catch { /* preserve verification evidence */ }
+  }
+}
+
+async function inspectMainFrame(client, expected, network) {
+  if (typeof client?.Page?.getFrameTree !== 'function') return emptyFrameTree();
+  try {
+    const result = await client.Page.getFrameTree();
+    const frame = result?.frameTree?.frame;
+    const url = text(frame?.url).slice(0, 512);
+    const expectedOrigin = new URL(expected.chartUrl).origin;
+    let originMatches = false;
+    try { originMatches = new URL(url).origin === expectedOrigin; } catch { /* sanitized unavailable URL */ }
+    let scheme = null;
+    try { scheme = new URL(url).protocol.replace(/:$/u, ''); } catch { /* sanitized unavailable scheme */ }
+    return {
+      status: frame ? 'available' : 'unavailable',
+      main_frame_id: text(frame?.id) || null,
+      loader_id: text(frame?.loaderId) || null,
+      url,
+      url_matches_expected: url === expected.chartUrl,
+      mime_type: network.response?.mime_type || null,
+      scheme,
+      origin_matches_expected: originMatches,
+    };
+  } catch {
+    return emptyFrameTree();
   }
 }
 
@@ -252,6 +345,8 @@ function successResult(expected, details) {
     renderer_verified: true,
     page_navigate: details.pageNavigate || emptyNavigate(),
     main_document_network: details.network || emptyNetwork(),
+    runtime_evaluation: details.renderer?.runtimeEvaluation || details.runtimeEvaluation || emptyRuntimeEvaluation(),
+    frame_tree: details.renderer?.frameTree || details.frameTree || emptyFrameTree(),
     chrome_error_page: false,
     state: details.state,
     mutations_performed: details.navigationPerformed || details.targetCreated,
@@ -277,6 +372,8 @@ function blocked(expected, details) {
     renderer_verified: false,
     page_navigate: details.pageNavigate || emptyNavigate(),
     main_document_network: details.network || emptyNetwork(),
+    runtime_evaluation: details.renderer?.runtimeEvaluation || details.runtimeEvaluation || emptyRuntimeEvaluation(),
+    frame_tree: details.renderer?.frameTree || details.frameTree || emptyFrameTree(),
     chrome_error_page: runtime.chrome_error_page,
     state: details.state,
     mutations_performed: details.navigationPerformed === true || details.targetCreated === true,
@@ -348,6 +445,85 @@ function normalizeRuntime(value) {
     login_state: runtime.login_state === 'present' ? 'present' : 'absent',
     challenge_state: runtime.challenge_state === 'present' ? 'present' : 'absent',
   };
+}
+
+function runtimeEvaluationOk() {
+  return {
+    status: 'ok',
+    error_text: null,
+    exception_class: null,
+    exception_description: null,
+    attempt_count: 1,
+    connection_source: 'fresh-current-target',
+  };
+}
+
+function runtimeEvaluationFailure(status, error) {
+  return {
+    status,
+    error_text: sanitizeRuntimeError(error),
+    exception_class: null,
+    exception_description: null,
+    attempt_count: 1,
+    connection_source: 'fresh-current-target',
+  };
+}
+
+function runtimeEvaluationException(details) {
+  return {
+    status: 'exception',
+    error_text: sanitizeRuntimeError(details?.text),
+    exception_class: sanitizeExceptionToken(details?.exception?.className),
+    exception_description: sanitizeExceptionToken(details?.exception?.description),
+    attempt_count: 1,
+    connection_source: 'fresh-current-target',
+  };
+}
+
+function emptyRuntimeEvaluation() {
+  return {
+    status: 'protocol-error',
+    error_text: null,
+    exception_class: null,
+    exception_description: null,
+    attempt_count: 0,
+    connection_source: 'fresh-current-target',
+  };
+}
+
+function emptyFrameTree() {
+  return {
+    status: 'unavailable',
+    main_frame_id: null,
+    loader_id: null,
+    url: '',
+    url_matches_expected: false,
+    mime_type: null,
+    scheme: null,
+    origin_matches_expected: false,
+  };
+}
+
+function sanitizeRuntimeError(error) {
+  const raw = text(error?.message || error);
+  return raw
+    .replace(/(?:https?|wss?):\/\/\S+/giu, '[redacted-url]')
+    .replace(/\s+at\s+.+$/iu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 256) || null;
+}
+
+function sanitizeExceptionToken(value) {
+  const raw = text(value);
+  if (!raw) return null;
+  return raw
+    .replace(/(?:https?|wss?):\/\/\S+/giu, '[redacted-url]')
+    .replace(/[\w-]*(?:password|secret|token|cookie|authorization|dsn)[\w-]*/giu, '[redacted]')
+    .replace(/\s+at\s+.+$/iu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 256) || null;
 }
 
 function emptyRuntime() { return normalizeRuntime({}); }

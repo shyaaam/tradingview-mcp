@@ -338,6 +338,26 @@ const chartTargetHydrationV2NetworkOutput = {
   response: z.object(chartTargetHydrationV2ResponseOutput).nullable(),
 };
 
+const chartTargetHydrationV2RuntimeEvaluationOutput = {
+  status: z.enum(['ok', 'protocol-error', 'exception']),
+  error_text: z.string().nullable(),
+  exception_class: z.string().nullable(),
+  exception_description: z.string().nullable(),
+  attempt_count: z.number().int().nonnegative(),
+  connection_source: z.literal('fresh-current-target'),
+};
+
+const chartTargetHydrationV2FrameTreeOutput = {
+  status: z.enum(['available', 'unavailable']),
+  main_frame_id: z.string().nullable(),
+  loader_id: z.string().nullable(),
+  url: z.string(),
+  url_matches_expected: z.boolean(),
+  mime_type: z.string().nullable(),
+  scheme: z.string().nullable(),
+  origin_matches_expected: z.boolean(),
+};
+
 const chartTargetHydrationV2Output = {
   success: z.literal(true),
   hydration_version: z.literal('chart-target-hydration-v2'),
@@ -355,6 +375,8 @@ const chartTargetHydrationV2Output = {
   renderer_verified: z.boolean(),
   page_navigate: z.object(chartTargetHydrationV2PageNavigateOutput),
   main_document_network: z.object(chartTargetHydrationV2NetworkOutput),
+  runtime_evaluation: z.object(chartTargetHydrationV2RuntimeEvaluationOutput),
+  frame_tree: z.object(chartTargetHydrationV2FrameTreeOutput),
   chrome_error_page: z.boolean(),
   state: z.enum([
     'renderer-verified',
@@ -364,6 +386,7 @@ const chartTargetHydrationV2Output = {
     'blocked-chrome-error-document',
     'blocked-login-required',
     'blocked-runtime-url-mismatch',
+    'blocked-runtime-evaluation-unavailable',
     'blocked-target-missing',
     'blocked-target-ambiguous',
     'blocked-timeout',

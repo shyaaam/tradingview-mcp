@@ -193,6 +193,15 @@ test('observer result fixtures satisfy registered output schemas', () => {
         canceled: null, blocked_reason: null, cors_error_status: null,
         response: { status: 200, mime_type: 'text/html', protocol: 'h2' },
       },
+      runtime_evaluation: {
+        status: 'ok', error_text: null, exception_class: null, exception_description: null,
+        attempt_count: 1, connection_source: 'fresh-current-target',
+      },
+      frame_tree: {
+        status: 'available', main_frame_id: 'frame-1', loader_id: 'loader-1',
+        url: 'https://www.tradingview.com/chart/x/', url_matches_expected: true,
+        mime_type: 'text/html', scheme: 'https', origin_matches_expected: true,
+      },
       chrome_error_page: false,
       state: 'renderer-verified',
       mutations_performed: true,

@@ -43,6 +43,10 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     navigate: 0,
     pageEnable: 0,
     networkEnable: 0,
+    runtimeEnable: 0,
+    evaluate: 0,
+    evaluationOrder: [],
+    verificationWebSockets: [],
     close: 0,
   };
   let clock = 0;
@@ -61,9 +65,18 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
   };
   const client = {
     Runtime: {
-      enable: async () => {},
+      enable: async () => { calls.runtimeEnable += 1; calls.evaluationOrder.push('runtime-enable'); },
       evaluate: async ({ expression }) => {
+        calls.evaluate += 1;
+        calls.evaluationOrder.push('runtime-evaluate');
         calls.expression = expression;
+        if (Array.isArray(state.navigate.evaluationSequence)) {
+          const next = state.navigate.evaluationSequence.length > 0
+            ? state.navigate.evaluationSequence.shift()
+            : state.navigate.evaluationFallback;
+          if (next instanceof Error) throw next;
+          if (next !== undefined) return next;
+        }
         const value = state.runtimeSequence?.length > 0
           ? state.runtimeSequence.shift()
           : state.runtimeSnapshot;
@@ -93,6 +106,16 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
         state.targets[0].url = url;
         return { frameId: 'frame-1', loaderId: 'loader-1', isDownload: false, errorText: state.navigate.errorText };
       },
+      getFrameTree: async () => ({
+        frameTree: state.navigate.frameTree || {
+          frame: {
+            id: 'frame-1',
+            loaderId: 'loader-1',
+            url: state.targets[0]?.url || TARGET_URL,
+            childFrames: [{ id: 'iframe-1', url: 'https://unrelated.example/private' }],
+          },
+        },
+      }),
     },
     Network: {
       enable: async () => { calls.networkEnable += 1; },
@@ -111,7 +134,10 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
       throw new Error(`unexpected URL: ${url}`);
     },
     connectBrowser: async () => browser,
-    connect: async () => client,
+    connect: async (webSocketDebuggerUrl) => {
+      calls.verificationWebSockets.push(webSocketDebuggerUrl);
+      return client;
+    },
     sleep: async (ms) => {
       clock += ms;
       for (const event of state.navigate.sleepEvents?.[sleepCount] || []) listeners[event.name]?.(event.value);
@@ -369,6 +395,155 @@ test('login redirect and timeout remain blocked', async () => {
   const timeout = makeHarness({ targets: [], navigate: { runtime: runtime({ document_ready_state: 'loading' }) } });
   const timeoutResult = await hydrateChartTargetV2(input(), timeout.deps);
   assert.equal(timeoutResult.state, 'blocked-timeout');
+});
+
+test('persistent Runtime.evaluate protocol failure is explicit, not generic timeout', async () => {
+  const failure = new Error('Runtime.evaluate transport failed at secret page https://private.example/token');
+  const harness = makeHarness({
+    targets: [],
+    navigate: { evaluationSequence: [failure], evaluationFallback: failure },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-runtime-evaluation-unavailable');
+  assert.equal(result.runtime_evaluation.status, 'protocol-error');
+  assert.match(result.runtime_evaluation.error_text, /Runtime\.evaluate transport failed/iu);
+  assert.doesNotMatch(JSON.stringify(result), /private\.example|token|at\s+.+/iu);
+  assert.ok(harness.calls.evaluationOrder.indexOf('runtime-enable') < harness.calls.evaluationOrder.indexOf('runtime-evaluate'));
+  assert.ok(harness.calls.close > 0);
+});
+
+test('Runtime.evaluate exceptionDetails is explicit and sanitized', async () => {
+  const exception = {
+    exceptionDetails: {
+      text: 'Uncaught ReferenceError',
+      exception: {
+        className: 'ReferenceError',
+        description: 'ReferenceError: privateToken is not defined at https://private.example/app.js:1:2',
+      },
+    },
+  };
+  const harness = makeHarness({
+    targets: [],
+    navigate: { evaluationSequence: [exception], evaluationFallback: exception },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-runtime-evaluation-unavailable');
+  assert.equal(result.runtime_evaluation.status, 'exception');
+  assert.equal(result.runtime_evaluation.exception_class, 'ReferenceError');
+  assert.match(result.runtime_evaluation.exception_description, /ReferenceError/iu);
+  assert.doesNotMatch(JSON.stringify(result), /private\.example|privateToken|at\s+.+/iu);
+});
+
+test('strict verifier enables Runtime before evaluating and uses fresh current-target connection', async () => {
+  const harness = makeHarness({ targets: [] });
+  let navigationConnection = true;
+  const originalConnect = harness.deps.connect;
+  harness.deps.connect = async (webSocketDebuggerUrl) => {
+    const client = await originalConnect(webSocketDebuggerUrl);
+    if (navigationConnection) {
+      navigationConnection = false;
+      client.Runtime.evaluate = async () => { throw new Error('pre-navigation client must not verify renderer'); };
+    }
+    return client;
+  };
+  const freshClient = {
+    Runtime: {
+      enable: async () => {},
+      evaluate: async () => ({ result: { value: runtime({ document_ready_state: 'interactive' }) } }),
+    },
+    Page: {
+      getFrameTree: async () => ({ frameTree: { frame: { id: 'frame-1', loaderId: 'loader-1', url: TARGET_URL } } }),
+    },
+    close: async () => {},
+  };
+  const verifiedSockets = [];
+  harness.deps.verifyConnect = async (webSocketDebuggerUrl) => {
+    verifiedSockets.push(webSocketDebuggerUrl);
+    return freshClient;
+  };
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.deepEqual(verifiedSockets, ['ws://target-new']);
+  assert.equal(result.runtime_evaluation.connection_source, 'fresh-current-target');
+});
+
+test('same target with refreshed debugger websocket is re-read without target adoption', async () => {
+  const harness = makeHarness({ targets: [] });
+  const originalFetch = harness.deps.fetch;
+  let listCount = 0;
+  harness.deps.fetch = async (url) => {
+    const result = await originalFetch(url);
+    if (!url.endsWith('/json/list')) return result;
+    listCount += 1;
+    const targets = await result.json();
+    if (listCount >= 3 && targets[0]) targets[0].webSocketDebuggerUrl = 'ws://refreshed-current-target';
+    return { ...result, json: async () => targets };
+  };
+  const verifiedSockets = [];
+  harness.deps.verifyConnect = async (webSocketDebuggerUrl) => {
+    verifiedSockets.push(webSocketDebuggerUrl);
+    return {
+      Runtime: {
+        enable: async () => {},
+        evaluate: async () => ({ result: { value: runtime({ document_ready_state: 'interactive' }) } }),
+      },
+      Page: {
+        getFrameTree: async () => ({ frameTree: { frame: { id: 'frame-1', loaderId: 'loader-1', url: TARGET_URL } } }),
+      },
+      close: async () => {},
+    };
+  };
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.target_id, 'target-new');
+  assert.deepEqual(verifiedSockets, ['ws://refreshed-current-target']);
+});
+
+test('missing target after navigation blocks without adopting or creating another target', async () => {
+  const harness = makeHarness({ targets: [] });
+  const originalFetch = harness.deps.fetch;
+  let listCount = 0;
+  harness.deps.fetch = async (url) => {
+    const result = await originalFetch(url);
+    if (!url.endsWith('/json/list')) return result;
+    listCount += 1;
+    if (listCount >= 3) return { ...result, json: async () => [] };
+    return result;
+  };
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-target-missing');
+  assert.equal(result.target_created, true);
+  assert.equal(harness.calls.createTarget, 1);
+  assert.equal(harness.calls.navigate, 1);
+});
+
+test('frame-tree evidence contains only sanitized main-frame provenance', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      frameTree: {
+        frame: {
+          id: 'frame-main',
+          loaderId: 'loader-main',
+          url: TARGET_URL,
+          childFrames: [{ id: 'child', url: 'https://unrelated.example/private' }],
+        },
+      },
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.deepEqual(result.frame_tree, {
+    status: 'available',
+    main_frame_id: 'frame-main',
+    loader_id: 'loader-main',
+    url: TARGET_URL,
+    url_matches_expected: true,
+    mime_type: null,
+    scheme: 'https',
+    origin_matches_expected: true,
+  });
+  assert.doesNotMatch(JSON.stringify(result), /unrelated\.example|child/iu);
 });
 
 test('v2 full module has no hidden recovery, binding, fallback, or second navigation path', async () => {
