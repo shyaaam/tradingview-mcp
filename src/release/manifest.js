@@ -29,6 +29,7 @@ const CAPABILITY_NAMES = [
   'pane_indicator_signatures',
   'pane_indicator_mutation_inventory',
   'pane_probe_layout_capability',
+  'indicator_apply_blueprint_scoped',
   'chart_get_state',
   'chart_save_existing_capability_probe',
   'chart_save_existing_capability_probe_v2',
