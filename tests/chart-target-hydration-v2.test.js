@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { z } from 'zod';
 
@@ -35,6 +36,7 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     targets: [...targets],
     runtimeSnapshot,
     navigate,
+    runtimeSequence: null,
   };
   const calls = {
     createTarget: 0,
@@ -61,15 +63,23 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
       enable: async () => {},
       evaluate: async ({ expression }) => {
         calls.expression = expression;
-        return { result: { value: state.runtimeSnapshot } };
+        const value = state.runtimeSequence?.length > 0
+          ? state.runtimeSequence.shift()
+          : state.runtimeSnapshot;
+        return { result: { value } };
       },
     },
     Page: {
       enable: async () => { calls.pageEnable += 1; },
       navigate: async ({ url }) => {
         calls.navigate += 1;
-        const request = listeners.requestWillBeSent;
-        request?.({ requestId: 'request-1', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' });
+        if (state.navigate.runtimeSequence) state.runtimeSequence = [...state.navigate.runtimeSequence];
+        else state.runtimeSnapshot = state.navigate.runtime || runtime();
+        const events = state.navigate.events || [
+          { name: 'requestWillBeSent', value: { requestId: 'request-1', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+          { name: 'responseReceived', value: { requestId: 'request-1', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } } },
+        ];
+        for (const event of events) listeners[event.name]?.(event.value);
         if (state.navigate.failure) listeners.loadingFailed?.({
           requestId: 'request-1', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1',
           errorText: 'net::ERR_PROXY_CONNECTION_FAILED', canceled: false,
@@ -80,17 +90,13 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
           errorText: 'net::ERR_BLOCKED_BY_CLIENT', canceled: false,
         });
         state.targets[0].url = url;
-        state.runtimeSnapshot = state.navigate.runtime || runtime();
         return { frameId: 'frame-1', loaderId: 'loader-1', isDownload: false, errorText: state.navigate.errorText };
       },
     },
     Network: {
       enable: async () => { calls.networkEnable += 1; },
       requestWillBeSent: (handler) => { listeners.requestWillBeSent = handler; },
-      responseReceived: (handler) => {
-        listeners.responseReceived = handler;
-        handler({ requestId: 'request-1', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } });
-      },
+      responseReceived: (handler) => { listeners.responseReceived = handler; },
       loadingFailed: (handler) => { listeners.loadingFailed = handler; },
     },
     close: async () => { calls.close += 1; },
@@ -146,6 +152,14 @@ test('existing exact metadata with Chrome error blocks without navigation', asyn
   assert.equal(harness.calls.navigate, 0);
 });
 
+test('existing exact metadata with about:blank blocks without navigation', async () => {
+  const harness = makeHarness({ targets: [exactTarget()], runtimeSnapshot: runtime({ runtime_url: 'about:blank' }) });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-runtime-url-mismatch');
+  assert.equal(result.navigation_performed, false);
+  assert.equal(harness.calls.navigate, 0);
+});
+
 test('duplicate exact targets block before CDP navigation', async () => {
   const harness = makeHarness({ targets: [exactTarget('one'), exactTarget('two')] });
   const result = await hydrateChartTargetV2(input(), harness.deps);
@@ -169,6 +183,41 @@ test('missing target creates one about:blank target and navigates exactly once',
   assert.equal(result.main_document_network.request_id, 'request-1');
 });
 
+test('new target polls transient unavailable, blank, loading, then verifies exact renderer', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtimeSequence: [
+        {},
+        runtime({ runtime_url: 'about:blank', document_ready_state: 'complete' }),
+        runtime({ document_ready_state: 'loading' }),
+        runtime({ document_ready_state: 'interactive' }),
+      ],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.renderer_verified, true);
+  assert.equal(harness.calls.navigate, 1);
+  assert.equal(harness.calls.createTarget, 1);
+});
+
+test('initial runtime unavailable and blank remain pending before Chrome error terminal state', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtimeSequence: [
+        {},
+        runtime({ runtime_url: 'about:blank' }),
+        runtime({ runtime_url: 'chrome-error://chromewebdata/', chrome_error_page: true }),
+      ],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-chrome-error-document');
+  assert.equal(harness.calls.navigate, 1);
+});
+
 test('Page.navigate error is a structured blocked result', async () => {
   const harness = makeHarness({ targets: [], navigate: { errorText: 'net::ERR_PROXY_CONNECTION_FAILED', runtime: runtime({ runtime_url: 'about:blank' }) } });
   const result = await hydrateChartTargetV2(input(), harness.deps);
@@ -185,6 +234,58 @@ test('correlated main-document loading failure blocks and is sanitized', async (
   assert.equal(result.main_document_network.request_id, 'request-1');
   assert.equal(result.main_document_network.response.status, 200);
   assert.doesNotMatch(JSON.stringify(result), /cookie|authorization|header|body/iu);
+});
+
+test('iframe Document failure does not block top-level renderer', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+        { name: 'responseReceived', value: { requestId: 'top', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } } },
+        { name: 'requestWillBeSent', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe' } },
+        { name: 'loadingFailed', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe', errorText: 'net::ERR_FAILED' } },
+      ],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.main_document_network.request_id, 'top');
+  assert.equal(result.main_document_network.error_text, null);
+});
+
+test('iframe failure arriving before top-level request never becomes authoritative', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe' } },
+        { name: 'loadingFailed', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe', errorText: 'net::ERR_FAILED' } },
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+        { name: 'responseReceived', value: { requestId: 'top', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } } },
+      ],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.main_document_network.request_id, 'top');
+});
+
+test('later subframe Document failure cannot overwrite selected top-level request', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+        { name: 'responseReceived', value: { requestId: 'top', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } } },
+        { name: 'requestWillBeSent', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe' } },
+        { name: 'loadingFailed', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe', errorText: 'net::ERR_FAILED' } },
+      ],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.main_document_network.request_id, 'top');
 });
 
 test('subresource loading failure does not fail renderer verification', async () => {
@@ -205,7 +306,14 @@ test('login redirect and timeout remain blocked', async () => {
   assert.equal(timeoutResult.state, 'blocked-timeout');
 });
 
-test('v2 source has no recovery, fallback, or second navigation path', async () => {
+test('v2 full module has no hidden recovery, binding, fallback, or second navigation path', async () => {
+  const source = await readFile(new URL('../src/core/chart-target-hydration-v2.js', import.meta.url), 'utf8');
   assert.doesNotMatch(CHART_RUNTIME_HYDRATION_V2_EXPRESSION, /getBoundClient|recoverDisconnectedSession|\.click\s*\(|reload|Target\.createTarget|Target\.closeTarget|save|focus|createStudy|removeEntity|setSymbol|setResolution/iu);
+  for (const forbidden of [/getBoundClient/iu, /recoverDisconnectedSession/iu, /bindObserverSession/iu, /\.click\s*\(/u, /\.reload\s*\(/u, /Target\.closeTarget/iu, /\b(?:save|saveExisting)\b/iu, /chart.*mutation/iu, /pane.*mutation/iu, /\.focus\s*\(/u]) {
+    assert.doesNotMatch(source, forbidden);
+  }
+  assert.equal((source.match(/client\.Page\.navigate\s*\(/gu) || []).length, 1);
+  assert.equal((source.match(/browserClient\.Target\.createTarget\s*\(/gu) || []).length, 1);
+  assert.match(source, /createBlankTarget[\s\S]*url: 'about:blank'/u);
   assert.equal(observerToolDefinitions.tv_observer_hydrate_chart_target_v2.classification, 'bootstrap_mutation');
 });

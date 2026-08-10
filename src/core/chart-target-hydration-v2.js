@@ -1,6 +1,5 @@
 import CDP from 'chrome-remote-interface';
 
-import { bindObserverSession } from '../connection.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { normalizeChartUrl } from './chart-target-hydration.js';
@@ -58,13 +57,6 @@ export async function hydrateChartTargetV2(input = {}, dependencies = {}) {
         renderer,
       });
     }
-    await bindObserverSession({
-      managerBaseUrl,
-      profileId: expected.profileId,
-      cdpUrl,
-      chartTargetId: target.id,
-      chartTargetUrl: expected.chartUrl,
-    });
     return successResult(expected, {
       state: 'existing-renderer-verified',
       targetId: target.id,
@@ -112,22 +104,12 @@ export async function hydrateChartTargetV2(input = {}, dependencies = {}) {
 }
 
 async function navigateAndVerify({ client, cdpUrl, expected, targetId, deps }) {
-  const network = { mainRequest: null, response: null, failure: null };
+  const network = { events: new Map(), mainRequest: null, mainRequestId: null, response: null, failure: null };
   if (client?.Page?.enable) await client.Page.enable();
   if (client?.Network?.enable) await client.Network.enable();
-  subscribe(client?.Network?.requestWillBeSent, (event) => {
-    if (isMainDocument(event)) network.mainRequest = sanitizeRequest(event);
-  });
-  subscribe(client?.Network?.responseReceived, (event) => {
-    if (isMainDocument(event) || network.mainRequest?.request_id === text(event?.requestId)) {
-      network.response = sanitizeResponse(event);
-    }
-  });
-  subscribe(client?.Network?.loadingFailed, (event) => {
-    if (isMainDocument(event) || network.mainRequest?.request_id === text(event?.requestId)) {
-      network.failure = sanitizeFailure(event);
-    }
-  });
+  subscribe(client?.Network?.requestWillBeSent, (event) => bufferNetworkEvent(network, 'request', event));
+  subscribe(client?.Network?.responseReceived, (event) => bufferNetworkEvent(network, 'response', event));
+  subscribe(client?.Network?.loadingFailed, (event) => bufferNetworkEvent(network, 'failure', event));
 
   let pageNavigate;
   try {
@@ -136,6 +118,7 @@ async function navigateAndVerify({ client, cdpUrl, expected, targetId, deps }) {
   } catch (error) {
     pageNavigate = sanitizeNavigateError(error);
   }
+  network.pageNavigate = pageNavigate;
 
   const verification = await waitForRenderer(cdpUrl, targetId, expected, network, client, deps);
   const networkEvidence = summarizeNetwork(network);
@@ -205,10 +188,15 @@ async function waitForRenderer(cdpUrl, targetId, expected, network, client, deps
     }
     const target = targets.find((entry) => entry.id === targetId);
     if (!target) return { state: 'blocked-target-missing', targetMetadataUrl: null, runtime: latest.runtime };
+    if (target.url !== 'about:blank' && target.url !== expected.chartUrl) {
+      return { state: 'blocked-runtime-url-mismatch', targetMetadataUrl: target.url, runtime: latest.runtime };
+    }
     let runtime = latest.runtime;
     try {
       runtime = await evaluateCurrentRuntime(deps, target, client);
     } catch { /* renderer can remain unavailable during bounded wait */ }
+    resolveMainDocument(network);
+    if (network.failure) return { state: 'blocked-main-document-network-failure', targetMetadataUrl: target.url, runtime };
     latest = { state: classifyRenderer(runtime, expected.chartUrl), targetMetadataUrl: target.url, runtime };
     if (latest.state === 'renderer-verified' && target.url === expected.chartUrl) return latest;
     if (latest.state === 'renderer-verified' && target.url !== 'about:blank') {
@@ -241,6 +229,7 @@ async function evaluateCurrentRuntime(deps, target, attachedClient) {
 function classifyRenderer(runtime, expectedUrl) {
   if (runtime.chrome_error_page) return 'blocked-chrome-error-document';
   if (runtime.login_state === 'present' || runtime.challenge_state === 'present') return 'blocked-login-required';
+  if (!runtime.runtime_url || runtime.runtime_url === 'about:blank') return 'pending';
   if (runtime.runtime_url !== expectedUrl) return 'blocked-runtime-url-mismatch';
   return ['interactive', 'complete'].includes(runtime.document_ready_state) ? 'renderer-verified' : 'blocked-timeout';
 }
@@ -380,7 +369,28 @@ function summarizeNetwork(network) {
 }
 function sanitizeNavigate(value) { return { frame_id: text(value?.frameId) || null, loader_id: text(value?.loaderId) || null, error_text: text(value?.errorText).slice(0, 256) || null, is_download: typeof value?.isDownload === 'boolean' ? value.isDownload : null }; }
 function sanitizeNavigateError(error) { return { ...emptyNavigate(), error_text: text(error?.message || error).slice(0, 256) || 'Page.navigate failed' }; }
-function isMainDocument(event) { return event?.type === 'Document' || event?.resourceType === 'Document'; }
+function bufferNetworkEvent(network, kind, event) {
+  const requestId = text(event?.requestId);
+  if (!requestId) return;
+  const entry = network.events.get(requestId) || {};
+  entry[kind] = event;
+  network.events.set(requestId, entry);
+}
+function resolveMainDocument(network) {
+  if (network.mainRequestId) return;
+  const navigate = network.pageNavigate;
+  if (!navigate?.frame_id) return;
+  for (const [requestId, entry] of network.events) {
+    const request = entry.request;
+    if (!request || request.type !== 'Document' || text(request.frameId) !== navigate.frame_id) continue;
+    if (navigate.loader_id && text(request.loaderId) !== navigate.loader_id) continue;
+    network.mainRequestId = requestId;
+    network.mainRequest = sanitizeRequest(request);
+    network.response = entry.response ? sanitizeResponse(entry.response) : null;
+    network.failure = entry.failure ? sanitizeFailure(entry.failure) : null;
+    return;
+  }
+}
 function sanitizeRequest(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null }; }
 function sanitizeResponse(event) { return { status: Number.isFinite(event?.response?.status) ? event.response.status : null, mime_type: text(event?.response?.mimeType) || null, protocol: text(event?.response?.protocol) || null }; }
 function sanitizeFailure(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null, error_text: text(event?.errorText).slice(0, 256) || null, canceled: typeof event?.canceled === 'boolean' ? event.canceled : null, blocked_reason: text(event?.blockedReason).slice(0, 128) || null, cors_error_status: sanitizeCorsStatus(event?.corsErrorStatus) }; }
