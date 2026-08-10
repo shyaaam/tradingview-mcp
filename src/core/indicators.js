@@ -23,6 +23,25 @@ function _resolve(deps) {
   };
 }
 
+function _requireBlueprintScopedRequest(args, allowMissingAuthority = false) {
+  const scope = _requireScopedRequest(args, allowMissingAuthority);
+  if (!args.indicator_id || typeof args.indicator_id !== 'string' || !args.indicator_id.trim()) {
+    throw new Error('indicator_id is required for scoped blueprint indicator apply');
+  }
+  if (typeof args.expected_is_price_study !== 'boolean') {
+    throw new Error('expected_is_price_study must be boolean for scoped blueprint indicator apply');
+  }
+  if (!args.expected_post_pane_signature || !/^[0-9a-f]{64}$/i.test(String(args.expected_post_pane_signature))) {
+    throw new Error('expected_post_pane_signature must be a SHA-256 hash');
+  }
+  return {
+    ...scope,
+    indicator_id: args.indicator_id.trim(),
+    expected_is_price_study: args.expected_is_price_study,
+    expected_post_pane_signature: String(args.expected_post_pane_signature).toLowerCase(),
+  };
+}
+
 function _parseObject(value, name, { allowEmpty = false } = {}) {
   const parsed = value ? (typeof value === 'string' ? JSON.parse(value) : value) : undefined;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -200,6 +219,59 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
         });
       }).catch(function(error) {
         return { error: String(error && error.message ? error.message : error) };
+      });
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  return result;
+}
+
+async function _applyBlueprintIndicator({ indicator_name, expected_settings, _deps }) {
+  const { evaluate } = _resolve(_deps);
+  const settingsJson = JSON.stringify(expected_settings);
+  const result = await evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.createStudy !== 'function') {
+        return { error: 'scoped blueprint indicator createStudy API is unavailable' };
+      }
+      var before = chart.getAllStudies ? chart.getAllStudies().map(function(study) { return study && study.id; }).filter(Boolean) : [];
+      var rawSettings = ${settingsJson};
+      var inputs = Object.keys(rawSettings).map(function(key) {
+        var value = rawSettings[key];
+        if (value && typeof value === 'object' && !Array.isArray(value)
+          && Object.prototype.hasOwnProperty.call(value, 'v')
+          && Object.keys(value).every(function(field) { return field === 'f' || field === 't' || field === 'v'; })) {
+          value = value.v;
+        }
+        return { id: key, value: value };
+      });
+      var creation;
+      try {
+        creation = chart.createStudy(${safeString(indicator_name)}, false, false, inputs);
+      } catch (_) {
+        return { error: 'scoped blueprint indicator createStudy failed' };
+      }
+      return Promise.resolve(creation).then(function() {
+        return new Promise(function(resolve) {
+          setTimeout(function() {
+            var after = chart.getAllStudies ? chart.getAllStudies() : [];
+            var added = after.filter(function(study) {
+              return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
+            });
+            if (added.length !== 1) return resolve({ error: 'scoped blueprint indicator add did not produce exactly one identifiable study' });
+            var addedStudy = added[0];
+            var addedName = String(addedStudy.name || addedStudy.title || '').trim();
+            if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
+              return resolve({ error: 'scoped blueprint indicator add resolved an unexpected study name' });
+            }
+            var study = chart.getStudyById ? chart.getStudyById(addedStudy.id) : null;
+            var inputValues = study && study.getInputValues ? study.getInputValues() : [];
+            resolve({ id: addedStudy.id, name: addedName, inputs: inputValues, values: addedStudy.values || addedStudy.description || null });
+          }, 1200);
+        });
+      }).catch(function() {
+        return { error: 'scoped blueprint indicator createStudy failed' };
       });
     })()
   `);
@@ -549,6 +621,56 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   if (action === 'remove_indicator' && matching.length !== 1) throw new Error('scoped indicator removal requires exactly one matching target study');
   if (action === 'remove_indicator' && matching[0]?.entity_id !== scope.expected_entity_id) throw new Error('scoped indicator removal reviewed entity ID is not present');
   if (action === 'apply_indicator' && matching.length > 1) throw new Error('scoped indicator add refuses duplicate matching studies');
+}
+
+export async function applyScopedBlueprintIndicator(args) {
+  const scope = _requireBlueprintScopedRequest(args, args?._deps !== undefined);
+  const expectedSettings = _parseObject(args.expected_settings, 'expected_settings', { allowEmpty: true });
+  await _resolve(args._deps).verifyMutationAuthority(scope, { action: 'apply_indicator', _deps: args._deps });
+  const focusResult = await _selectScopedChart({ ...scope, _deps: args._deps });
+  const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps: args._deps });
+  if (existingStudy?.error) throw new Error(existingStudy.error);
+  if (existingStudy) throw new Error(`scoped blueprint indicator add found an existing matching study: ${scope.indicator_name}`);
+
+  const appliedStudy = await _applyBlueprintIndicator({
+    indicator_name: scope.indicator_name,
+    expected_settings: expectedSettings,
+    _deps: args._deps,
+  });
+  const postInventory = await _resolve(args._deps).indicatorSignatures({ _deps: args._deps });
+  const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
+  if (!postPane) throw new Error(`scoped blueprint indicator pane ${scope.pane_index} missing from post-mutation inventory`);
+  const matching = postPane.indicators.filter((indicator) => indicator.indicator_name.toLowerCase() === scope.indicator_name.toLowerCase());
+  if (matching.length !== 1) throw new Error(`scoped blueprint indicator add did not produce exactly one post-mutation ${scope.indicator_name} indicator`);
+  const postIndicator = matching[0];
+  if (postIndicator.indicator_id !== scope.indicator_id) {
+    throw new Error('scoped blueprint indicator stable ID does not match approved blueprint');
+  }
+  if (postIndicator.is_price_study !== scope.expected_is_price_study) {
+    throw new Error('scoped blueprint indicator price-study classification does not match approved blueprint');
+  }
+  if (postPane.signature !== scope.expected_post_pane_signature) {
+    throw new Error('scoped blueprint indicator post-mutation pane signature does not match approved recovery step');
+  }
+  if (appliedStudy?.id && postIndicator.entity_id && appliedStudy.id !== postIndicator.entity_id) {
+    throw new Error('scoped blueprint indicator entity readback is inconsistent');
+  }
+  return {
+    success: true,
+    blueprint_apply_version: 'indicator-apply-blueprint-scoped-v1',
+    profile_id: scope.profile_id,
+    tab_index: scope.tab_index,
+    pane_index: scope.pane_index,
+    indicator_id: scope.indicator_id,
+    indicator_name: scope.indicator_name,
+    is_price_study: scope.expected_is_price_study,
+    entity_id: postIndicator.entity_id || appliedStudy?.id || null,
+    pre_mutation_signature: scope.expected_pane_signature,
+    post_mutation_signature: postPane.signature,
+    post_mutation_indicator_count: postPane.indicators.length,
+    mutations_performed: true,
+    focus: focusResult,
+  };
 }
 
 export async function updateScopedSettings(args) {
