@@ -311,6 +311,66 @@ export const chartRuntimeContentSnapshotInput = {
   expected_account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
 };
 
+const chartTargetHydrationV2PageNavigateOutput = {
+  frame_id: z.string().nullable(),
+  loader_id: z.string().nullable(),
+  error_text: z.string().nullable(),
+  is_download: z.boolean().nullable(),
+};
+
+const chartTargetHydrationV2ResponseOutput = {
+  status: z.number().nullable(),
+  mime_type: z.string().nullable(),
+  protocol: z.string().nullable(),
+};
+
+const chartTargetHydrationV2NetworkOutput = {
+  request_id: z.string().nullable(),
+  frame_id: z.string().nullable(),
+  loader_id: z.string().nullable(),
+  error_text: z.string().nullable(),
+  canceled: z.boolean().nullable(),
+  blocked_reason: z.string().nullable(),
+  cors_error_status: z.object({
+    corsError: z.string().nullable(),
+    failedParameter: z.string().nullable(),
+  }).nullable(),
+  response: z.object(chartTargetHydrationV2ResponseOutput).nullable(),
+};
+
+const chartTargetHydrationV2Output = {
+  success: z.literal(true),
+  hydration_version: z.literal('chart-target-hydration-v2'),
+  authority_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+  authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+  profile_id: z.string().min(1),
+  target_id: z.string().min(1).nullable(),
+  requested_url: z.string().url(),
+  target_metadata_url: z.string().nullable(),
+  runtime_url: z.string(),
+  document_ready_state: z.enum(['loading', 'interactive', 'complete', 'unavailable']),
+  saved_chart_id: z.string().min(1),
+  navigation_performed: z.boolean(),
+  target_created: z.boolean(),
+  renderer_verified: z.boolean(),
+  page_navigate: z.object(chartTargetHydrationV2PageNavigateOutput),
+  main_document_network: z.object(chartTargetHydrationV2NetworkOutput),
+  chrome_error_page: z.boolean(),
+  state: z.enum([
+    'renderer-verified',
+    'existing-renderer-verified',
+    'blocked-page-navigate-error',
+    'blocked-main-document-network-failure',
+    'blocked-chrome-error-document',
+    'blocked-login-required',
+    'blocked-runtime-url-mismatch',
+    'blocked-target-missing',
+    'blocked-target-ambiguous',
+    'blocked-timeout',
+  ]),
+  mutations_performed: z.boolean(),
+};
+
 const observerCaptureCandleInput = {
   symbol: z.string().min(1),
   timeframe: z.string().min(1),
@@ -496,6 +556,18 @@ export const observerToolDefinitions = Object.freeze({
       authenticated: z.literal(true),
       state: z.enum(['hydrated', 'existing-identical']),
     },
+  },
+  tv_observer_hydrate_chart_target_v2: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      authority_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
+      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      chart_url: z.string().url(),
+      saved_chart_id: z.string().min(1),
+      allowed_origins: z.array(z.string().url()).min(1),
+    },
+    outputSchema: chartTargetHydrationV2Output,
   },
   tv_observer_identity: {
     classification: 'read_only',
@@ -821,7 +893,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1') {
       requireObserverSession();
     }
     return handler(args, extra);

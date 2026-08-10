@@ -24,6 +24,7 @@ import { registerTabTools } from '../src/tools/tab.js';
 import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
+import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
@@ -74,6 +75,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_runtime_target_lifecycle_trace_v1',
     'chart_runtime_content_snapshot_v1',
     'tv_observer_hydrate_chart_target',
+    'tv_observer_hydrate_chart_target_v2',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -116,6 +118,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerPaneTools(fakeServer);
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
+  registerChartTargetHydrationV2Tool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
   registerChartRuntimeContentSnapshotTools(fakeServer);
@@ -168,6 +171,31 @@ test('observer result fixtures satisfy registered output schemas', () => {
       navigation_performed: false,
       authenticated: true,
       state: 'existing-identical',
+    },
+    tv_observer_hydrate_chart_target_v2: {
+      success: true,
+      hydration_version: 'chart-target-hydration-v2',
+      authority_id: `chart-target-authority-v2:${'a'.repeat(64)}`,
+      authority_hash: 'b'.repeat(64),
+      profile_id: 'profile-a',
+      target_id: 'chart-1',
+      requested_url: 'https://www.tradingview.com/chart/x/',
+      target_metadata_url: 'https://www.tradingview.com/chart/x/',
+      runtime_url: 'https://www.tradingview.com/chart/x/',
+      document_ready_state: 'complete',
+      saved_chart_id: 'x',
+      navigation_performed: true,
+      target_created: true,
+      renderer_verified: true,
+      page_navigate: { frame_id: 'frame-1', loader_id: 'loader-1', error_text: null, is_download: false },
+      main_document_network: {
+        request_id: 'request-1', frame_id: 'frame-1', loader_id: 'loader-1', error_text: null,
+        canceled: null, blocked_reason: null, cors_error_status: null,
+        response: { status: 200, mime_type: 'text/html', protocol: 'h2' },
+      },
+      chrome_error_page: false,
+      state: 'renderer-verified',
+      mutations_performed: true,
     },
     chart_runtime_readiness_probe_v1: {
       success: true,
