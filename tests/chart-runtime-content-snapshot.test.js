@@ -106,22 +106,52 @@ function paneEvidence(paneCount = 8) {
   return { signatures, inventory };
 }
 
-function rawDeps({ identity = INPUT.expected_account_subject_sha256, signatures, inventory, chartState } = {}) {
+function rawDeps({
+  identity = INPUT.expected_account_subject_sha256,
+  signatures,
+  inventory,
+  chartState,
+  identitySequence,
+  signaturesSequence,
+  inventorySequence,
+  chartStateSequence,
+  rawCalls,
+} = {}) {
   const evidence = paneEvidence();
+  const sequences = {
+    identity: [...(identitySequence || [])],
+    signatures: [...(signaturesSequence || [])],
+    inventory: [...(inventorySequence || [])],
+    chartState: [...(chartStateSequence || [])],
+  };
+  const indexes = { identity: 0, signatures: 0, inventory: 0, chartState: 0 };
   let call = 0;
+  const next = (name, fallback) => {
+    const sequence = sequences[name];
+    const value = sequence.length > 0 ? sequence[Math.min(indexes[name]++, sequence.length - 1)] : fallback;
+    if (value instanceof Error) throw value;
+    return value;
+  };
   const evaluate = async (expression) => {
     call += 1;
     if (expression.includes('account_subject_sha256')) {
-      return { chart_id: INPUT.expected_chart_id, layout_id: INPUT.expected_workspace_layout_id, account_subject_sha256: identity };
+      return next('identity', { chart_id: INPUT.expected_chart_id, layout_id: INPUT.expected_workspace_layout_id, account_subject_sha256: identity });
     }
-    if (expression.includes('pane indicator inventory')) return signatures || evidence.signatures;
-    if (expression.includes('mutation identity inventory')) return inventory || evidence.inventory;
-    if (expression.includes('getAllStudies')) return chartState || { success: true, symbol: 'NQ1!', resolution: '60', chartType: 1, studies: [] };
+    if (expression.includes('pane indicator inventory')) return next('signatures', signatures || evidence.signatures);
+    if (expression.includes('mutation identity inventory')) return next('inventory', inventory || evidence.inventory);
+    if (expression.includes('getAllStudies')) return next('chartState', chartState || { success: true, symbol: 'NQ1!', resolution: '60', chartType: 1, studies: [] });
     throw new Error(`unexpected raw expression ${call}`);
   };
   return {
     waitReady: async () => readiness(),
-    withExactRawTarget: async (_input, operation) => operation({ evaluate }),
+    withExactRawTarget: async (_input, operation) => {
+      if (rawCalls) rawCalls.count += 1;
+      return operation({ evaluate });
+    },
+    contentWaitTimeoutMs: 1,
+    contentPollIntervalMs: 1,
+    now: () => 0,
+    sleep: async () => {},
   };
 }
 
@@ -146,6 +176,10 @@ function relativeRawTargetDeps() {
     managerBaseUrl: 'http://127.0.0.1:8080/api',
     connect: async () => ({ Runtime: { enable: async () => {}, evaluate: async () => ({ result: { value: undefined } }) }, close: async () => {} }),
     rawEvaluate: evaluate,
+    contentWaitTimeoutMs: 1,
+    contentPollIntervalMs: 1,
+    now: () => 0,
+    sleep: async () => {},
   };
 }
 
@@ -192,6 +226,75 @@ test('READY snapshot reuses deterministic pane schemas and parity derivation', a
   assert.equal(result.pre_readiness.status, 'READY');
   assert.equal(result.post_readiness.status, 'READY');
   assert.doesNotThrow(() => z.object(chartRuntimeContentSnapshotOutput).parse(result));
+});
+
+test('transient identity, signature, inventory, and chart-state reads retry and converge', async () => {
+  const cases = [
+    ['identity', { identitySequence: [new Error('identity transient'), { chart_id: INPUT.expected_chart_id, layout_id: INPUT.expected_workspace_layout_id, account_subject_sha256: INPUT.expected_account_subject_sha256 }] }],
+    ['signatures', { signaturesSequence: [new Error('signatures transient'), paneEvidence().signatures] }],
+    ['inventory', { inventorySequence: [new Error('inventory transient'), paneEvidence().inventory] }],
+    ['chart state', { chartStateSequence: [new Error('chart state transient'), { success: true, symbol: 'NQ1!', resolution: '60', chartType: 1, studies: [] }] }],
+  ];
+  for (const [label, options] of cases) {
+    const result = await chartRuntimeContentSnapshot(INPUT, rawDeps(options));
+    assert.equal(result.status, 'READY', label);
+    assert.equal(result.mutations_performed, false, label);
+  }
+});
+
+test('persistent content reader failures return stage-specific block reasons and final readiness', async () => {
+  const cases = [
+    ['PANE_SIGNATURES_UNAVAILABLE', { signaturesSequence: [new Error('signature secret')] }],
+    ['PANE_MUTATION_INVENTORY_UNAVAILABLE', { inventorySequence: [new Error('inventory secret')] }],
+    ['CHART_STATE_UNAVAILABLE', { chartStateSequence: [new Error('chart secret')] }],
+  ];
+  for (const [blockReason, options] of cases) {
+    const result = await chartRuntimeContentSnapshot(INPUT, rawDeps(options));
+    assert.equal(result.status, 'BLOCKED', blockReason);
+    assert.equal(result.block_reason, blockReason);
+    assert.equal(result.post_readiness.status, 'READY', blockReason);
+    assert.doesNotMatch(JSON.stringify(result), /secret/u, blockReason);
+  }
+});
+
+test('authority mismatches terminate immediately without content retry', async () => {
+  const rawCalls = { count: 0 };
+  const result = await chartRuntimeContentSnapshot(INPUT, rawDeps({
+    identity: 'c'.repeat(64),
+    rawCalls,
+  }));
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(result.block_reason, 'ACCOUNT_HASH_MISMATCH');
+  assert.equal(rawCalls.count, 1);
+  assert.equal(result.post_readiness, null);
+});
+
+test('pre-readiness workspace and saved UID mismatches terminate without retry', async () => {
+  for (const [blockReason, overrides] of [
+    ['WORKSPACE_LAYOUT_MISMATCH', { workspace_layout_id: '4' }],
+    ['SAVED_LAYOUT_UID_MISMATCH', { saved_layout_uid: 'other' }],
+  ]) {
+    const rawCalls = { count: 0 };
+    const result = await chartRuntimeContentSnapshot(INPUT, {
+      ...rawDeps({ rawCalls }),
+      waitReady: async () => readiness(overrides),
+    });
+    assert.equal(result.status, 'BLOCKED', blockReason);
+    assert.equal(result.block_reason, blockReason);
+    assert.equal(rawCalls.count, 0);
+    assert.equal(result.post_readiness, null);
+  }
+});
+
+test('pane evidence mismatch may retry and converge', async () => {
+  const bad = paneEvidence(7);
+  const good = paneEvidence();
+  const result = await chartRuntimeContentSnapshot(INPUT, rawDeps({
+    signaturesSequence: [bad.signatures, good.signatures],
+    inventorySequence: [bad.inventory, good.inventory],
+  }));
+  assert.equal(result.status, 'READY');
+  assert.equal(result.mutations_performed, false);
 });
 
 test('content snapshot uses corrected relative Manager CDP binding', async () => {
@@ -248,6 +351,10 @@ test('raw account identity never appears in snapshot output or errors', async ()
   const secret = 'raw-account-subject-secret';
   const result = await chartRuntimeContentSnapshot(INPUT, {
     waitReady: async () => readiness(),
+    contentWaitTimeoutMs: 1,
+    contentPollIntervalMs: 1,
+    now: () => 0,
+    sleep: async () => {},
     withExactRawTarget: async (_input, operation) => operation({
       evaluate: async (expression) => {
         if (expression.includes('account_subject_sha256')) throw new Error(secret);
@@ -264,5 +371,6 @@ test('content snapshot source has no bound recovery or mutation path', async () 
   for (const forbidden of [/getBoundClient/iu, /recoverDisconnectedSession/iu, /\.click\s*\(/u, /Page\.navigate/iu, /\.reload\s*\(/u, /Target\.createTarget/iu, /saveExisting/iu, /\.focus\s*\(/u]) {
     assert.doesNotMatch(source, forbidden);
   }
+  assert.doesNotMatch(source, /CONTENT_READ_FAILED/iu);
   assert.equal(observerToolDefinitions.chart_runtime_content_snapshot_v1.classification, 'read_only');
 });
