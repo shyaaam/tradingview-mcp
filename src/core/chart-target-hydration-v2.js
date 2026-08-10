@@ -38,7 +38,7 @@ export const CHART_RUNTIME_HYDRATION_V2_EXPRESSION = `
     runtime_url: currentUrl,
     document_ready_state: ['loading', 'interactive', 'complete'].includes(document.readyState) ? document.readyState : 'unavailable',
     document_title: text(document.title),
-    chrome_error_page,
+    chrome_error_page: chromeErrorPage,
     login_state: login ? 'present' : 'absent',
     challenge_state: challenge ? 'present' : 'absent',
   };

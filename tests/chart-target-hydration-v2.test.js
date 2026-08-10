@@ -179,6 +179,37 @@ function exactTarget(id = 'target-existing') {
   return { id, type: 'page', url: TARGET_URL, webSocketDebuggerUrl: `ws://${id}` };
 }
 
+function evaluateHydrationExpression({ documentElementId = '' } = {}) {
+  const document = {
+    readyState: 'complete',
+    title: 'TradingView',
+    body: { innerText: 'Benign chart content', textContent: 'Benign chart content' },
+    documentElement: { id: documentElementId },
+    querySelector: () => null,
+  };
+  const window = {
+    location: {
+      href: TARGET_URL,
+      pathname: '/chart/SJ0J0zgb/',
+    },
+  };
+  return new Function('window', 'document', `return (${CHART_RUNTIME_HYDRATION_V2_EXPRESSION});`)(window, document);
+}
+
+test('exported hydration expression executes on a normal chart document', () => {
+  const result = evaluateHydrationExpression();
+  assert.equal(result.runtime_url, TARGET_URL);
+  assert.equal(result.document_ready_state, 'complete');
+  assert.equal(result.chrome_error_page, false);
+  assert.equal(result.login_state, 'absent');
+  assert.equal(result.challenge_state, 'absent');
+});
+
+test('exported hydration expression detects a Chrome error document', () => {
+  const result = evaluateHydrationExpression({ documentElementId: 'error-page' });
+  assert.equal(result.chrome_error_page, true);
+});
+
 test('existing exact renderer is verified without navigation', async () => {
   const harness = makeHarness({ targets: [exactTarget()] });
   const result = await hydrateChartTargetV2(input(), harness.deps);
