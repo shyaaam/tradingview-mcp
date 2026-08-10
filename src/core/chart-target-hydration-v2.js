@@ -377,19 +377,23 @@ function bufferNetworkEvent(network, kind, event) {
   network.events.set(requestId, entry);
 }
 function resolveMainDocument(network) {
-  if (network.mainRequestId) return;
-  const navigate = network.pageNavigate;
-  if (!navigate?.frame_id) return;
-  for (const [requestId, entry] of network.events) {
-    const request = entry.request;
-    if (!request || request.type !== 'Document' || text(request.frameId) !== navigate.frame_id) continue;
-    if (navigate.loader_id && text(request.loaderId) !== navigate.loader_id) continue;
-    network.mainRequestId = requestId;
-    network.mainRequest = sanitizeRequest(request);
-    network.response = entry.response ? sanitizeResponse(entry.response) : null;
-    network.failure = entry.failure ? sanitizeFailure(entry.failure) : null;
-    return;
+  if (!network.mainRequestId) {
+    const navigate = network.pageNavigate;
+    if (!navigate?.frame_id) return;
+    for (const [requestId, entry] of network.events) {
+      const request = entry.request;
+      if (!request || request.type !== 'Document' || text(request.frameId) !== navigate.frame_id) continue;
+      if (navigate.loader_id && text(request.loaderId) !== navigate.loader_id) continue;
+      network.mainRequestId = requestId;
+      break;
+    }
   }
+  if (!network.mainRequestId) return;
+  const entry = network.events.get(network.mainRequestId);
+  if (!entry) return;
+  if (entry.request) network.mainRequest = sanitizeRequest(entry.request);
+  network.response = entry.response ? sanitizeResponse(entry.response) : null;
+  network.failure = entry.failure ? sanitizeFailure(entry.failure) : null;
 }
 function sanitizeRequest(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null }; }
 function sanitizeResponse(event) { return { status: Number.isFinite(event?.response?.status) ? event.response.status : null, mime_type: text(event?.response?.mimeType) || null, protocol: text(event?.response?.protocol) || null }; }

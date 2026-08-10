@@ -46,6 +46,7 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     close: 0,
   };
   let clock = 0;
+  let sleepCount = 0;
   const listeners = {};
   const browser = {
     Target: {
@@ -111,7 +112,11 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
     },
     connectBrowser: async () => browser,
     connect: async () => client,
-    sleep: async (ms) => { clock += ms; },
+    sleep: async (ms) => {
+      clock += ms;
+      for (const event of state.navigate.sleepEvents?.[sleepCount] || []) listeners[event.name]?.(event.value);
+      sleepCount += 1;
+    },
     now: () => clock,
   };
   return { deps, calls, state };
@@ -234,6 +239,66 @@ test('correlated main-document loading failure blocks and is sanitized', async (
   assert.equal(result.main_document_network.request_id, 'request-1');
   assert.equal(result.main_document_network.response.status, 200);
   assert.doesNotMatch(JSON.stringify(result), /cookie|authorization|header|body/iu);
+});
+
+test('late main-document failure refreshes selected request evidence on next poll', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtimeSequence: [runtime({ document_ready_state: 'loading' }), runtime({ document_ready_state: 'loading' })],
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+      ],
+      sleepEvents: [[{
+        name: 'loadingFailed',
+        value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1', errorText: 'net::ERR_PROXY_CONNECTION_FAILED', canceled: false },
+      }]],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'blocked-main-document-network-failure');
+  assert.equal(result.main_document_network.request_id, 'top');
+  assert.equal(result.main_document_network.error_text, 'net::ERR_PROXY_CONNECTION_FAILED');
+});
+
+test('late main-document response refreshes selected request evidence', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtimeSequence: [runtime({ document_ready_state: 'loading' }), runtime({ document_ready_state: 'interactive' })],
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+      ],
+      sleepEvents: [[{
+        name: 'responseReceived',
+        value: { requestId: 'top', type: 'Document', response: { status: 200, mimeType: 'text/html', protocol: 'h2' } },
+      }]],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.main_document_network.request_id, 'top');
+  assert.deepEqual(result.main_document_network.response, { status: 200, mime_type: 'text/html', protocol: 'h2' });
+});
+
+test('late iframe Document failure cannot overwrite selected main request', async () => {
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtimeSequence: [runtime({ document_ready_state: 'loading' }), runtime({ document_ready_state: 'interactive' })],
+      events: [
+        { name: 'requestWillBeSent', value: { requestId: 'top', type: 'Document', frameId: 'frame-1', loaderId: 'loader-1' } },
+      ],
+      sleepEvents: [[
+        { name: 'requestWillBeSent', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe' } },
+        { name: 'loadingFailed', value: { requestId: 'iframe', type: 'Document', frameId: 'frame-iframe', loaderId: 'loader-iframe', errorText: 'net::ERR_FAILED' } },
+      ]],
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  assert.equal(result.state, 'renderer-verified');
+  assert.equal(result.main_document_network.request_id, 'top');
+  assert.equal(result.main_document_network.error_text, null);
 });
 
 test('iframe Document failure does not block top-level renderer', async () => {
