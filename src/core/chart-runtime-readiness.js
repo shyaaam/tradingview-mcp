@@ -267,7 +267,7 @@ export function runtimeReadinessIsReady(result) {
   return result?.profile_state === 'ready'
     && result.target_state === 'exact'
     && result.target_url === result.current_url
-    && result.document_ready_state === 'complete'
+    && ['interactive', 'complete'].includes(result.document_ready_state)
     && result.tradingview_api_present
     && result.chart_widget_collection_present
     && result.active_widget_wrapper_present

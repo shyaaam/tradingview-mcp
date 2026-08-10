@@ -98,6 +98,42 @@ test('exact target can exist while runtime remains not ready, without throwing',
   assert.equal(result.mutations_performed, false);
 });
 
+test('interactive document with every authority surface ready reaches READY', async () => {
+  const result = await waitForChartRuntimeReady(input(), {
+    ...probeDeps(readySnapshot({ document_ready_state: 'interactive' })),
+  });
+  assert.equal(result.status, 'READY');
+  assert.equal(result.probe.ready, true);
+});
+
+test('loading document remains not ready while interactive and complete remain ready', async () => {
+  const interactive = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot({ document_ready_state: 'interactive' })));
+  const complete = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot({ document_ready_state: 'complete' })));
+  assert.equal(interactive.ready, true);
+  assert.equal(complete.ready, true);
+
+  let now = 0;
+  const loading = await waitForChartRuntimeReady({ ...input(), timeout_ms: 3, poll_interval_ms: 1 }, {
+    probe: async () => ({
+      success: true,
+      probe_version: 'chart-runtime-readiness-probe-v1',
+      profile_id: PROFILE_ID,
+      target_id: TARGET_ID,
+      target_url: TARGET_URL,
+      profile_state: 'ready',
+      target_state: 'exact',
+      ...readySnapshot({ document_ready_state: 'loading' }),
+      probe_error: null,
+      ready: false,
+    }),
+    now: () => now,
+    sleep: async () => { now += 1; },
+  });
+  assert.equal(loading.status, 'TIMEOUT_NOT_READY');
+  assert.equal(loading.probe.document_ready_state, 'loading');
+  assert.equal(loading.probe.ready, false);
+});
+
 test('missing collection and null active widget are ordinary not-ready states', async () => {
   const missingCollection = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot({ chart_widget_collection_present: false })));
   const nullActive = await probeChartRuntimeReadiness(input(), probeDeps(readySnapshot({ active_widget_non_null: false })));
