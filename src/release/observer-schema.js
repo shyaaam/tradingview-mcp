@@ -342,7 +342,6 @@ const chartTargetHydrationV2RuntimeEvaluationOutput = {
   status: z.enum(['ok', 'protocol-error', 'exception']),
   error_text: z.string().nullable(),
   exception_class: z.string().nullable(),
-  exception_description: z.string().nullable(),
   attempt_count: z.number().int().nonnegative(),
   connection_source: z.literal('fresh-current-target'),
 };

@@ -194,7 +194,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
         response: { status: 200, mime_type: 'text/html', protocol: 'h2' },
       },
       runtime_evaluation: {
-        status: 'ok', error_text: null, exception_class: null, exception_description: null,
+        status: 'ok', error_text: null, exception_class: null,
         attempt_count: 1, connection_source: 'fresh-current-target',
       },
       frame_tree: {

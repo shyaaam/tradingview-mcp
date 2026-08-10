@@ -406,7 +406,7 @@ test('persistent Runtime.evaluate protocol failure is explicit, not generic time
   const result = await hydrateChartTargetV2(input(), harness.deps);
   assert.equal(result.state, 'blocked-runtime-evaluation-unavailable');
   assert.equal(result.runtime_evaluation.status, 'protocol-error');
-  assert.match(result.runtime_evaluation.error_text, /Runtime\.evaluate transport failed/iu);
+  assert.equal(result.runtime_evaluation.error_text, 'Runtime evaluation failed');
   assert.doesNotMatch(JSON.stringify(result), /private\.example|token|at\s+.+/iu);
   assert.ok(harness.calls.evaluationOrder.indexOf('runtime-enable') < harness.calls.evaluationOrder.indexOf('runtime-evaluate'));
   assert.ok(harness.calls.close > 0);
@@ -430,8 +430,59 @@ test('Runtime.evaluate exceptionDetails is explicit and sanitized', async () => 
   assert.equal(result.state, 'blocked-runtime-evaluation-unavailable');
   assert.equal(result.runtime_evaluation.status, 'exception');
   assert.equal(result.runtime_evaluation.exception_class, 'ReferenceError');
-  assert.match(result.runtime_evaluation.exception_description, /ReferenceError/iu);
+  assert.equal('exception_description' in result.runtime_evaluation, false);
   assert.doesNotMatch(JSON.stringify(result), /private\.example|privateToken|at\s+.+/iu);
+});
+
+test('public hydrate-v2 output redacts unauthorized URLs and credential-bearing diagnostics', async () => {
+  const unauthorizedUrl = 'https://example/login?state=STATE_SECRET&code=CODE_SECRET#FRAGMENT_SECRET';
+  const secretDiagnostics = [
+    unauthorizedUrl,
+    'Bearer BEARER_SECRET',
+    'authorization=AUTH_SECRET',
+    'session=SESSION_SECRET',
+    'token=TOKEN_SECRET',
+    'cookie=COOKIE_SECRET',
+    'password=PASSWORD_SECRET',
+    'stack/source https://example/SECRET',
+  ].join(' ');
+  const harness = makeHarness({
+    targets: [],
+    navigate: {
+      runtime: runtime({ runtime_url: unauthorizedUrl }),
+      frameTree: { frame: { id: 'frame-main', loaderId: 'loader-main', url: unauthorizedUrl } },
+      errorText: secretDiagnostics,
+    },
+  });
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  const serialized = JSON.stringify(result);
+  assert.equal(result.runtime_url, '[redacted-non-authorized-url]');
+  assert.equal(result.frame_tree.url, '[redacted-non-authorized-url]');
+  assert.equal(result.target_metadata_url, TARGET_URL);
+  for (const secret of ['STATE_SECRET', 'CODE_SECRET', 'FRAGMENT_SECRET', 'BEARER_SECRET', 'AUTH_SECRET', 'SESSION_SECRET', 'TOKEN_SECRET', 'COOKIE_SECRET', 'PASSWORD_SECRET', 'SECRET']) {
+    assert.doesNotMatch(serialized, new RegExp(secret, 'u'));
+  }
+  assert.doesNotMatch(serialized, /https:\/\/example\/login|https:\/\/example\/SECRET/iu);
+  assert.equal(result.page_navigate.error_text, 'Diagnostic unavailable');
+});
+
+test('public hydrate-v2 output redacts unexpected target metadata URLs', async () => {
+  const harness = makeHarness({ targets: [] });
+  const originalFetch = harness.deps.fetch;
+  let listCount = 0;
+  harness.deps.fetch = async (url) => {
+    const responseValue = await originalFetch(url);
+    if (!url.endsWith('/json/list')) return responseValue;
+    listCount += 1;
+    const targets = await responseValue.json();
+    if (listCount >= 3 && targets[0]) targets[0].url = 'https://example/login?token=TARGET_SECRET';
+    return { ...responseValue, json: async () => targets };
+  };
+  const result = await hydrateChartTargetV2(input(), harness.deps);
+  const serialized = JSON.stringify(result);
+  assert.equal(result.state, 'blocked-runtime-url-mismatch');
+  assert.equal(result.target_metadata_url, '[redacted-non-authorized-url]');
+  assert.doesNotMatch(serialized, /example\/login|TARGET_SECRET/iu);
 });
 
 test('strict verifier enables Runtime before evaluating and uses fresh current-target connection', async () => {

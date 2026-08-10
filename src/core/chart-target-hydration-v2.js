@@ -7,6 +7,19 @@ import { normalizeChartUrl } from './chart-target-hydration.js';
 const DEFAULT_VERIFICATION_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 250;
 const SAVED_CHART_PATH = /^\/chart\/([A-Za-z0-9_-]+)\/?$/u;
+const REDACTED_NON_AUTHORIZED_URL = '[redacted-non-authorized-url]';
+const RUNTIME_EVALUATION_FAILURE = 'Runtime evaluation failed';
+const SAFE_EXCEPTION_CLASSES = new Set([
+  'AggregateError',
+  'DOMException',
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+]);
 
 export const CHART_RUNTIME_HYDRATION_V2_EXPRESSION = `
 (() => {
@@ -336,8 +349,8 @@ function successResult(expected, details) {
     profile_id: expected.profileId,
     target_id: details.targetId,
     requested_url: expected.chartUrl,
-    target_metadata_url: details.targetMetadataUrl || expected.chartUrl,
-    runtime_url: details.renderer?.runtime?.runtime_url || expected.chartUrl,
+    target_metadata_url: sanitizePublicUrl(details.targetMetadataUrl || expected.chartUrl, expected.chartUrl),
+    runtime_url: sanitizePublicUrl(details.renderer?.runtime?.runtime_url || expected.chartUrl, expected.chartUrl) || '',
     document_ready_state: details.renderer?.runtime?.document_ready_state || 'complete',
     saved_chart_id: expected.savedChartId,
     navigation_performed: details.navigationPerformed,
@@ -346,7 +359,7 @@ function successResult(expected, details) {
     page_navigate: details.pageNavigate || emptyNavigate(),
     main_document_network: details.network || emptyNetwork(),
     runtime_evaluation: details.renderer?.runtimeEvaluation || details.runtimeEvaluation || emptyRuntimeEvaluation(),
-    frame_tree: details.renderer?.frameTree || details.frameTree || emptyFrameTree(),
+    frame_tree: sanitizeFrameTree(details.renderer?.frameTree || details.frameTree || emptyFrameTree(), expected.chartUrl),
     chrome_error_page: false,
     state: details.state,
     mutations_performed: details.navigationPerformed || details.targetCreated,
@@ -363,8 +376,8 @@ function blocked(expected, details) {
     profile_id: expected.profileId,
     target_id: details.targetId || null,
     requested_url: expected.chartUrl,
-    target_metadata_url: details.targetMetadataUrl || null,
-    runtime_url: runtime.runtime_url,
+    target_metadata_url: sanitizePublicUrl(details.targetMetadataUrl, expected.chartUrl),
+    runtime_url: sanitizePublicUrl(runtime.runtime_url, expected.chartUrl) || '',
     document_ready_state: runtime.document_ready_state,
     saved_chart_id: expected.savedChartId,
     navigation_performed: details.navigationPerformed === true,
@@ -373,7 +386,7 @@ function blocked(expected, details) {
     page_navigate: details.pageNavigate || emptyNavigate(),
     main_document_network: details.network || emptyNetwork(),
     runtime_evaluation: details.renderer?.runtimeEvaluation || details.runtimeEvaluation || emptyRuntimeEvaluation(),
-    frame_tree: details.renderer?.frameTree || details.frameTree || emptyFrameTree(),
+    frame_tree: sanitizeFrameTree(details.renderer?.frameTree || details.frameTree || emptyFrameTree(), expected.chartUrl),
     chrome_error_page: runtime.chrome_error_page,
     state: details.state,
     mutations_performed: details.navigationPerformed === true || details.targetCreated === true,
@@ -452,18 +465,17 @@ function runtimeEvaluationOk() {
     status: 'ok',
     error_text: null,
     exception_class: null,
-    exception_description: null,
     attempt_count: 1,
     connection_source: 'fresh-current-target',
   };
 }
 
 function runtimeEvaluationFailure(status, error) {
+  void error;
   return {
     status,
-    error_text: sanitizeRuntimeError(error),
+    error_text: RUNTIME_EVALUATION_FAILURE,
     exception_class: null,
-    exception_description: null,
     attempt_count: 1,
     connection_source: 'fresh-current-target',
   };
@@ -472,9 +484,8 @@ function runtimeEvaluationFailure(status, error) {
 function runtimeEvaluationException(details) {
   return {
     status: 'exception',
-    error_text: sanitizeRuntimeError(details?.text),
-    exception_class: sanitizeExceptionToken(details?.exception?.className),
-    exception_description: sanitizeExceptionToken(details?.exception?.description),
+    error_text: RUNTIME_EVALUATION_FAILURE,
+    exception_class: sanitizeExceptionClass(details?.exception?.className),
     attempt_count: 1,
     connection_source: 'fresh-current-target',
   };
@@ -485,7 +496,6 @@ function emptyRuntimeEvaluation() {
     status: 'protocol-error',
     error_text: null,
     exception_class: null,
-    exception_description: null,
     attempt_count: 0,
     connection_source: 'fresh-current-target',
   };
@@ -504,26 +514,45 @@ function emptyFrameTree() {
   };
 }
 
-function sanitizeRuntimeError(error) {
-  const raw = text(error?.message || error);
-  return raw
-    .replace(/(?:https?|wss?):\/\/\S+/giu, '[redacted-url]')
-    .replace(/\s+at\s+.+$/iu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, 256) || null;
+function sanitizeExceptionClass(value) {
+  const raw = text(value);
+  return SAFE_EXCEPTION_CLASSES.has(raw) ? raw : null;
 }
 
-function sanitizeExceptionToken(value) {
+function sanitizeDiagnostic(value) {
+  const raw = text(value?.message || value);
+  if (!raw) return null;
+  const match = raw.match(/^(?:net::)?ERR_[A-Z0-9_*]+$/u);
+  return match ? match[0] : 'Diagnostic unavailable';
+}
+
+function sanitizeSafeToken(value) {
   const raw = text(value);
   if (!raw) return null;
-  return raw
-    .replace(/(?:https?|wss?):\/\/\S+/giu, '[redacted-url]')
-    .replace(/[\w-]*(?:password|secret|token|cookie|authorization|dsn)[\w-]*/giu, '[redacted]')
-    .replace(/\s+at\s+.+$/iu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .slice(0, 256) || null;
+  if (/(?:bearer|authorization|cookie|session|token|password|secret|dsn)/iu.test(raw)) return '[redacted]';
+  return /^[A-Za-z0-9_.:-]{1,128}$/u.test(raw) ? raw : '[redacted]';
+}
+
+function sanitizePublicUrl(value, expectedUrl) {
+  if (value === null || value === undefined) return null;
+  const raw = text(value);
+  if (!raw) return '';
+  if (raw === expectedUrl || raw === 'about:blank' || raw === 'chrome-error://chromewebdata/') return raw;
+  return REDACTED_NON_AUTHORIZED_URL;
+}
+
+function sanitizeFrameTree(value, expectedUrl) {
+  const frameTree = value && typeof value === 'object' ? value : emptyFrameTree();
+  return {
+    status: frameTree.status === 'available' ? 'available' : 'unavailable',
+    main_frame_id: text(frameTree.main_frame_id) || null,
+    loader_id: text(frameTree.loader_id) || null,
+    url: sanitizePublicUrl(frameTree.url, expectedUrl) || '',
+    url_matches_expected: frameTree.url_matches_expected === true,
+    mime_type: text(frameTree.mime_type) || null,
+    scheme: text(frameTree.scheme) || null,
+    origin_matches_expected: frameTree.origin_matches_expected === true,
+  };
 }
 
 function emptyRuntime() { return normalizeRuntime({}); }
@@ -543,8 +572,8 @@ function summarizeNetwork(network) {
     response: network.response || null,
   };
 }
-function sanitizeNavigate(value) { return { frame_id: text(value?.frameId) || null, loader_id: text(value?.loaderId) || null, error_text: text(value?.errorText).slice(0, 256) || null, is_download: typeof value?.isDownload === 'boolean' ? value.isDownload : null }; }
-function sanitizeNavigateError(error) { return { ...emptyNavigate(), error_text: text(error?.message || error).slice(0, 256) || 'Page.navigate failed' }; }
+function sanitizeNavigate(value) { return { frame_id: text(value?.frameId) || null, loader_id: text(value?.loaderId) || null, error_text: sanitizeDiagnostic(value?.errorText), is_download: typeof value?.isDownload === 'boolean' ? value.isDownload : null }; }
+function sanitizeNavigateError(error) { return { ...emptyNavigate(), error_text: sanitizeDiagnostic(error) || 'Page.navigate failed' }; }
 function bufferNetworkEvent(network, kind, event) {
   const requestId = text(event?.requestId);
   if (!requestId) return;
@@ -573,8 +602,8 @@ function resolveMainDocument(network) {
 }
 function sanitizeRequest(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null }; }
 function sanitizeResponse(event) { return { status: Number.isFinite(event?.response?.status) ? event.response.status : null, mime_type: text(event?.response?.mimeType) || null, protocol: text(event?.response?.protocol) || null }; }
-function sanitizeFailure(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null, error_text: text(event?.errorText).slice(0, 256) || null, canceled: typeof event?.canceled === 'boolean' ? event.canceled : null, blocked_reason: text(event?.blockedReason).slice(0, 128) || null, cors_error_status: sanitizeCorsStatus(event?.corsErrorStatus) }; }
-function sanitizeCorsStatus(value) { return value && typeof value === 'object' ? { corsError: text(value.corsError).slice(0, 128) || null, failedParameter: text(value.failedParameter).slice(0, 128) || null } : null; }
+function sanitizeFailure(event) { return { request_id: text(event?.requestId) || null, frame_id: text(event?.frameId) || null, loader_id: text(event?.loaderId) || null, error_text: sanitizeDiagnostic(event?.errorText), canceled: typeof event?.canceled === 'boolean' ? event.canceled : null, blocked_reason: sanitizeSafeToken(event?.blockedReason), cors_error_status: sanitizeCorsStatus(event?.corsErrorStatus) }; }
+function sanitizeCorsStatus(value) { return value && typeof value === 'object' ? { corsError: sanitizeSafeToken(value.corsError), failedParameter: sanitizeSafeToken(value.failedParameter) } : null; }
 function subscribe(method, handler) { if (typeof method === 'function') method(handler); }
 async function fetchJson(url, deps) { const response = await (deps.fetch || fetch)(url); if (!response?.ok) throw new Error(`request failed: ${response?.status || 'unknown'}`); return response.json(); }
 function profileIdFromEntry(entry) { return text(entry?.profile_id || entry?.id || entry?.profileId); }
