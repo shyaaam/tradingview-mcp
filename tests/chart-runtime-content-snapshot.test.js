@@ -5,7 +5,13 @@ import { z } from 'zod';
 
 import { chartRuntimeContentSnapshot } from '../src/core/chart-runtime-content-snapshot.js';
 import {
+  CHART_RUNTIME_CONTENT_SNAPSHOT_V2_CONTENT_WAIT_MS,
+  CHART_RUNTIME_CONTENT_SNAPSHOT_V2_POLL_MS,
+  chartRuntimeContentSnapshotV2,
+} from '../src/core/chart-runtime-content-snapshot-v2.js';
+import {
   chartRuntimeContentSnapshotOutput,
+  chartRuntimeContentSnapshotV2Output,
   observerToolDefinitions,
 } from '../src/release/observer-schema.js';
 import { derivePaneIndicatorParityHash } from '../src/core/pane.js';
@@ -366,6 +372,74 @@ test('raw account identity never appears in snapshot output or errors', async ()
   assert.doesNotMatch(JSON.stringify(result), new RegExp(secret, 'u'));
 });
 
+test('deadline-safe v2 keeps exact snapshot semantics with immediate pre/post probes', async () => {
+  let probeCalls = 0;
+  const dependencies = rawDeps();
+  delete dependencies.waitReady;
+  const result = await chartRuntimeContentSnapshotV2(INPUT, {
+    ...dependencies,
+    probe: async () => {
+      probeCalls += 1;
+      return readiness().probe;
+    },
+  });
+  assert.equal(result.status, 'READY');
+  assert.equal(result.snapshot_version, 'chart-runtime-content-snapshot-v2');
+  assert.equal(probeCalls, 2);
+  assert.equal(result.pre_readiness.attempts, 1);
+  assert.equal(result.post_readiness.attempts, 1);
+  assert.equal(result.workspace_layout_id, INPUT.expected_workspace_layout_id);
+  assert.equal(result.saved_layout_uid, INPUT.expected_saved_layout_uid);
+  assert.equal(result.mutations_performed, false);
+  assert.doesNotThrow(() => z.object(chartRuntimeContentSnapshotV2Output).parse(result));
+});
+
+test('deadline-safe v2 caps retry budget and returns structured BLOCKED before transport lifecycle', async () => {
+  let nowMs = 0;
+  let probeCalls = 0;
+  let rawCalls = 0;
+  const result = await chartRuntimeContentSnapshotV2(INPUT, {
+    probe: async () => {
+      probeCalls += 1;
+      return readiness().probe;
+    },
+    withExactRawTarget: async (_input, operation) => {
+      rawCalls += 1;
+      return operation({ evaluate: async (expression) => {
+        if (expression.includes('account_subject_sha256')) {
+          return { chart_id: INPUT.expected_chart_id, layout_id: INPUT.expected_workspace_layout_id, account_subject_sha256: INPUT.expected_account_subject_sha256 };
+        }
+        if (expression.includes('pane indicator inventory')) throw new Error('persistent signatures');
+        throw new Error('unexpected expression');
+      } });
+    },
+    contentWaitTimeoutMs: 30_000,
+    contentPollIntervalMs: 10_000,
+    now: () => nowMs,
+    sleep: async (milliseconds) => { nowMs += milliseconds; },
+  });
+  assert.equal(CHART_RUNTIME_CONTENT_SNAPSHOT_V2_CONTENT_WAIT_MS, 6_000);
+  assert.equal(CHART_RUNTIME_CONTENT_SNAPSHOT_V2_POLL_MS, 500);
+  assert.equal(nowMs, 6_000);
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(result.block_reason, 'PANE_SIGNATURES_UNAVAILABLE');
+  assert.equal(probeCalls, 2);
+  assert.equal(result.post_readiness.status, 'READY');
+  assert.ok(rawCalls > 1);
+  assert.equal(result.mutations_performed, false);
+});
+
+test('deadline-safe v2 preserves terminal pre-probe blockers and performs no content read', async () => {
+  let rawCalls = 0;
+  const result = await chartRuntimeContentSnapshotV2(INPUT, {
+    probe: async () => ({ ...readiness().probe, login_state: 'present', ready: false }),
+    withExactRawTarget: async () => { rawCalls += 1; throw new Error('must not attach'); },
+  });
+  assert.equal(result.status, 'BLOCKED');
+  assert.equal(result.block_reason, 'PRE_READINESS_LOGIN_REQUIRED');
+  assert.equal(rawCalls, 0);
+});
+
 test('content snapshot source has no bound recovery or mutation path', async () => {
   const source = await readFile(new URL('../src/core/chart-runtime-content-snapshot.js', import.meta.url), 'utf8');
   for (const forbidden of [/getBoundClient/iu, /recoverDisconnectedSession/iu, /\.click\s*\(/u, /Page\.navigate/iu, /\.reload\s*\(/u, /Target\.createTarget/iu, /saveExisting/iu, /\.focus\s*\(/u]) {
@@ -373,4 +447,5 @@ test('content snapshot source has no bound recovery or mutation path', async () 
   }
   assert.doesNotMatch(source, /CONTENT_READ_FAILED/iu);
   assert.equal(observerToolDefinitions.chart_runtime_content_snapshot_v1.classification, 'read_only');
+  assert.equal(observerToolDefinitions.chart_runtime_content_snapshot_v2.classification, 'read_only');
 });
