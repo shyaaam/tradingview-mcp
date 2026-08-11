@@ -33,6 +33,24 @@ export function registerPaneTools(server) {
     }
   });
 
+  registerObserverTool(server, 'pane_set_layout_scoped_v1', 'Set one exact existing chart layout with profile, target, account, saved-layout, and pane-count fences', async (input) => {
+    try {
+      return jsonResult(await core.setLayoutScoped(input));
+    } catch (err) {
+      const layoutInvoked = err?.layoutInvoked === true;
+      return jsonResult({
+        success: false,
+        profile_id: input?.profile_id || null,
+        chart_target_id: input?.chart_target_id || null,
+        layout_invoked: layoutInvoked,
+        mutations_performed: layoutInvoked,
+        effect_phase: err?.phase || 'pre-layout-authority',
+        effect_state: err?.effectState || 'blocked',
+        error: err instanceof Error ? err.message : 'Scoped pane layout mutation failed.',
+      }, true);
+    }
+  });
+
   server.tool('pane_set_layout', 'Change the chart grid layout (e.g., single, 2x2, 2h, 3v)', {
     layout: z.string().describe('Layout code: s (single), 2h, 2v, 2-1, 1-2, 3h, 3v, 4 (2x2), 6, 8. Also accepts: single, 2x1, 1x2, 2x2, quad'),
   }, async ({ layout }) => {

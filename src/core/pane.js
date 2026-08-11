@@ -3,9 +3,14 @@
  * Controls multi-chart layouts (split panes) in TradingView.
  */
 import { createHash } from 'node:crypto';
-import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
+import { evaluate, evaluateAsync, evaluateBound, getObserverSession, safeString } from '../connection.js';
+import { identity as observerIdentity } from './observer-evidence.js';
+import { resolveCloakManagerBaseUrl } from './cloak.js';
+import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
+import { list as listTabs } from './tab.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+const HASH = /^[0-9a-f]{64}$/i;
 export const PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION = 'pane-indicator-signatures-v1';
 export const PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION = 'pane-indicator-mutation-inventory-v1';
 const VOLATILE_INDICATOR_INPUT_KEYS = new Set([
@@ -34,6 +39,52 @@ export const LAYOUT_NAMES = {
   '14': '14 charts',
   '16': '16 charts',
 };
+
+const SCOPED_LAYOUT_STATE_EXPRESSION = `
+  (function() {
+    function read(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value === null || value === undefined ? null : String(value);
+      } catch (e) { return null; }
+    }
+    var collection = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+    var rawMetaInfo = collection && collection.metaInfo;
+    var metaInfo = rawMetaInfo;
+    if (typeof metaInfo === 'function') metaInfo = metaInfo();
+    if (metaInfo && typeof metaInfo.value === 'function') metaInfo = metaInfo.value();
+    else if (metaInfo && Object.prototype.hasOwnProperty.call(metaInfo, 'value')) metaInfo = metaInfo.value;
+    var count = read(collection && collection.inlineChartsCount);
+    var uid = metaInfo && typeof metaInfo === 'object' ? read(metaInfo.uid) : null;
+    return {
+      saved_layout_uid: uid,
+      pane_count: count === null ? null : Number(count),
+    };
+  })()
+`;
+
+const SCOPED_LAYOUT_MUTATION_EXPRESSION = (layout) => `
+  (function() {
+    var collection = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+    if (!collection || typeof collection.setLayout !== 'function') {
+      return { success: false, error: 'TradingView chart layout mutation is unavailable.' };
+    }
+    collection.setLayout(${safeString(layout)});
+    return { success: true };
+  })()
+`;
+
+export class ScopedPaneLayoutEffectError extends Error {
+  constructor(message, { phase, effectState, layoutInvoked }) {
+    super(message);
+    this.name = 'ScopedPaneLayoutEffectError';
+    this.phase = phase;
+    this.effectState = effectState;
+    this.layoutInvoked = layoutInvoked;
+  }
+}
 
 /**
  * List all panes in the current layout with their symbols and index.
@@ -462,6 +513,219 @@ export async function setLayout({ layout }) {
     chart_count: state.chart_count,
     panes: state.panes,
   };
+}
+
+const SCOPED_LAYOUT_TIMEOUT_MS = 10_000;
+const SCOPED_LAYOUT_POLL_INTERVAL_MS = 500;
+const SCOPED_LAYOUT_MAX_POLL_INTERVAL_MS = 2_000;
+
+function scopedText(value, name) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required.`);
+  return value.trim();
+}
+
+function scopedIdentifier(value, name) {
+  const normalized = scopedText(value, name);
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) throw new Error(`${name} is invalid.`);
+  return normalized;
+}
+
+function scopedHash(value, name) {
+  const normalized = scopedText(value, name).toLowerCase();
+  if (!HASH.test(normalized)) throw new Error(`${name} must be a SHA-256 hash.`);
+  return normalized;
+}
+
+function scopedCount(value, name) {
+  const count = Number(value);
+  if (!Number.isInteger(count) || count < 1 || count > 16) {
+    throw new Error(`${name} must be an integer between 1 and 16.`);
+  }
+  return count;
+}
+
+function normalizeScopedLayoutInput(input = {}) {
+  const expected = {
+    profileId: scopedIdentifier(input.profile_id, 'profile_id'),
+    targetId: scopedIdentifier(input.chart_target_id, 'chart_target_id'),
+    chartId: scopedIdentifier(input.expected_chart_id, 'expected_chart_id'),
+    accountHash: scopedHash(input.expected_account_subject_sha256, 'expected_account_subject_sha256'),
+    savedLayoutUid: scopedIdentifier(input.expected_saved_layout_uid, 'expected_saved_layout_uid'),
+    preLayoutId: scopedText(input.expected_pre_layout_id, 'expected_pre_layout_id'),
+    prePaneCount: scopedCount(input.expected_pre_pane_count, 'expected_pre_pane_count'),
+    desiredLayoutId: scopedText(input.desired_layout_id, 'desired_layout_id'),
+    postPaneCount: scopedCount(input.expected_post_pane_count, 'expected_post_pane_count'),
+    timeoutMs: Number(input.timeout_ms ?? SCOPED_LAYOUT_TIMEOUT_MS),
+    pollIntervalMs: Number(input.poll_interval_ms ?? SCOPED_LAYOUT_POLL_INTERVAL_MS),
+  };
+  if (!LAYOUT_NAMES[expected.preLayoutId] || !LAYOUT_NAMES[expected.desiredLayoutId]) {
+    throw new Error('Scoped pane layout mutation uses an unknown layout identity.');
+  }
+  if (!Number.isInteger(expected.timeoutMs) || expected.timeoutMs < 1 || expected.timeoutMs > SCOPED_LAYOUT_TIMEOUT_MS) {
+    throw new Error(`timeout_ms must be an integer between 1 and ${SCOPED_LAYOUT_TIMEOUT_MS}.`);
+  }
+  if (!Number.isInteger(expected.pollIntervalMs) || expected.pollIntervalMs < 1 || expected.pollIntervalMs > SCOPED_LAYOUT_MAX_POLL_INTERVAL_MS) {
+    throw new Error(`poll_interval_ms must be an integer between 1 and ${SCOPED_LAYOUT_MAX_POLL_INTERVAL_MS}.`);
+  }
+  return expected;
+}
+
+function scopedCanonicalChartUrl(chartId) {
+  return `https://www.tradingview.com/chart/${chartId}/`;
+}
+
+async function readScopedManagerProfile(profileId, dependencies) {
+  let matches;
+  if (dependencies.readManagerProfile) {
+    const profile = await dependencies.readManagerProfile(profileId);
+    matches = profile ? [profile] : [];
+  } else {
+    const baseUrl = await resolveCloakManagerBaseUrl();
+    if (!baseUrl) throw new Error('Scoped pane layout mutation Manager is unavailable.');
+    const response = await fetch(new URL('profiles', `${baseUrl}/`).toString());
+    if (!response.ok) throw new Error('Scoped pane layout mutation Manager identity read failed.');
+    const payload = await response.json();
+    const profiles = Array.isArray(payload) ? payload : payload?.profiles;
+    matches = Array.isArray(profiles) ? profiles.filter((profile) => {
+      const id = profile?.id || profile?.profile_id || profile?.profileId;
+      return String(id || '') === profileId;
+    }) : [];
+  }
+  if (matches.length !== 1) throw new Error('Scoped pane layout mutation live Manager profile identity is not unique.');
+  const profileIdFromResult = matches[0]?.id || matches[0]?.profile_id || matches[0]?.profileId;
+  if (String(profileIdFromResult || '') !== profileId) throw new Error('Scoped pane layout mutation live Manager profile identity does not match.');
+  const status = String(matches[0].status || matches[0].state || '').toLowerCase();
+  if (!['running', 'active'].includes(status)) throw new Error('Scoped pane layout mutation live Manager profile is not running.');
+  return matches[0];
+}
+
+async function readScopedState(expected, dependencies) {
+  if (dependencies.readState) return dependencies.readState(expected);
+  const session = getObserverSession();
+  const identity = await observerIdentity({ _deps: { evaluateBound } });
+  const raw = await evaluateBound(SCOPED_LAYOUT_STATE_EXPRESSION, { awaitPromise: true });
+  return {
+    profile_id: session.profileId,
+    chart_target_id: session.chartTargetId,
+    chart_id: identity.chart_id,
+    canonical_url: session.chartTargetUrl,
+    workspace_layout_id: identity.layout_id,
+    account_subject_sha256: identity.account_subject_sha256,
+    saved_layout_uid: raw?.saved_layout_uid,
+    pane_count: raw?.pane_count,
+  };
+}
+
+async function readScopedTabs(dependencies) {
+  return dependencies.listTabs ? dependencies.listTabs() : listTabs();
+}
+
+function assertScopedSession(expected, dependencies) {
+  const session = dependencies.session || getObserverSession();
+  const canonicalUrl = scopedCanonicalChartUrl(expected.chartId);
+  if (!session
+    || session.profileId !== expected.profileId
+    || session.chartTargetId !== expected.targetId
+    || session.chartTargetUrl !== canonicalUrl) {
+    throw new Error('Scoped pane layout mutation session identity does not match reviewed authority.');
+  }
+  return { session, canonicalUrl };
+}
+
+async function assertScopedTarget(expected, canonicalUrl, dependencies) {
+  const tabs = await readScopedTabs(dependencies);
+  const matches = Array.isArray(tabs?.tabs)
+    ? tabs.tabs.filter((tab) => tab?.id === expected.targetId)
+    : [];
+  if (tabs?.success !== true || matches.length !== 1) {
+    throw new Error('Scoped pane layout mutation target identity is not unique.');
+  }
+  const tab = matches[0];
+  if (tab.chart_id !== expected.chartId || tab.url !== canonicalUrl) {
+    throw new Error('Scoped pane layout mutation chart identity does not match reviewed authority.');
+  }
+  return tab;
+}
+
+function assertScopedState(state, expected, canonicalUrl, phase) {
+  const identityMatches = state
+    && state.profile_id === expected.profileId
+    && state.chart_target_id === expected.targetId
+    && state.chart_id === expected.chartId
+    && state.canonical_url === canonicalUrl
+    && state.account_subject_sha256 === expected.accountHash
+    && state.saved_layout_uid === expected.savedLayoutUid;
+  if (!identityMatches) {
+    throw new ScopedPaneLayoutEffectError(
+      `Scoped pane layout mutation ${phase} identity does not match reviewed authority.`,
+      { phase, effectState: phase === 'pre-layout-authority' ? 'blocked' : 'ambiguous', layoutInvoked: phase !== 'pre-layout-authority' },
+    );
+  }
+  return state;
+}
+
+export async function setLayoutScoped(input = {}, { _deps = {} } = {}) {
+  const expected = normalizeScopedLayoutInput(input);
+  const dependencies = _deps || {};
+  const { canonicalUrl } = assertScopedSession(expected, dependencies);
+  await readScopedManagerProfile(expected.profileId, dependencies);
+  await assertScopedTarget(expected, canonicalUrl, dependencies);
+  const before = assertScopedState(await readScopedState(expected, dependencies), expected, canonicalUrl, 'pre-layout-authority');
+  if (before.workspace_layout_id !== expected.preLayoutId) throw new Error('Scoped pane layout mutation pre-layout identity does not match reviewed authority.');
+  if (before.pane_count !== expected.prePaneCount) throw new Error('Scoped pane layout mutation pre-pane count does not match reviewed authority.');
+
+  const invokeLayout = dependencies.invokeLayout || (async (layout) => evaluateBound(SCOPED_LAYOUT_MUTATION_EXPRESSION(layout), { awaitPromise: true }));
+  let layoutInvoked = true;
+  try {
+    const result = await invokeLayout(expected.desiredLayoutId);
+    if (result?.success === false) throw new Error(result.error || 'Scoped pane layout mutation was unavailable.');
+  } catch (error) {
+    throw new ScopedPaneLayoutEffectError(
+      error instanceof Error ? error.message : 'Scoped pane layout mutation invocation failed.',
+      { phase: 'layout-invocation', effectState: 'ambiguous', layoutInvoked },
+    );
+  }
+
+  const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = dependencies.now || (() => Date.now());
+  const deadline = now() + expected.timeoutMs;
+  while (now() <= deadline) {
+    let after;
+    try {
+      after = assertScopedState(await readScopedState(expected, dependencies), expected, canonicalUrl, 'post-layout-verification');
+    } catch (error) {
+      if (error instanceof ScopedPaneLayoutEffectError) throw error;
+      throw new ScopedPaneLayoutEffectError(
+        error instanceof Error ? error.message : 'Scoped pane layout mutation post-state read failed.',
+        { phase: 'post-layout-verification', effectState: 'ambiguous', layoutInvoked },
+      );
+    }
+    if (after.workspace_layout_id === expected.desiredLayoutId && after.pane_count === expected.postPaneCount) {
+      return {
+        success: true,
+        topology_mutation_version: 'pane-set-layout-scoped-v1',
+        profile_id: expected.profileId,
+        chart_target_id: expected.targetId,
+        chart_id: expected.chartId,
+        canonical_url: canonicalUrl,
+        account_subject_sha256: expected.accountHash,
+        saved_layout_uid: expected.savedLayoutUid,
+        pre_layout_id: expected.preLayoutId,
+        pre_pane_count: expected.prePaneCount,
+        desired_layout_id: expected.desiredLayoutId,
+        post_layout_id: after.workspace_layout_id,
+        post_pane_count: after.pane_count,
+        layout_invoked: true,
+        mutations_performed: true,
+        effect_state: 'confirmed',
+      };
+    }
+    await sleep(Math.min(expected.pollIntervalMs, Math.max(1, deadline - now())));
+  }
+  throw new ScopedPaneLayoutEffectError(
+    'Scoped pane layout mutation post-state was not confirmed.',
+    { phase: 'post-layout-verification', effectState: 'ambiguous', layoutInvoked },
+  );
 }
 
 /**

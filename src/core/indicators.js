@@ -6,6 +6,7 @@ import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from
 import { switchTab as _switchTab, list as _listTabs } from './tab.js';
 import { getObserverSession } from './observer-session.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
+import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 const CHART_COLLECTION = 'window.TradingViewApi._chartWidgetCollection';
@@ -610,7 +611,8 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   const tab = tabMatches[0];
   const expectedUrl = `https://www.tradingview.com/chart/${scope.expected_chart_id}/`;
   if (tab.chart_id !== scope.expected_chart_id || tab.url !== expectedUrl) throw new Error('scoped indicator mutation chart identity does not match reviewed authority');
-  const chartState = await evaluate(`(function(){var c=window.TradingViewApi&&window.TradingViewApi._chartWidgetCollection; var l=c&&c._layoutType; if(l&&typeof l.value==='function') l=l.value(); return {layout_id:String(l||'')};})()`);
+  const chartState = await evaluate(`(function(){${LEGACY_LAYOUT_IDENTITY_HELPER} var identity=deriveLegacyLayoutId(window.TradingViewApi); return {layout_id:identity.layout_id||'', error:identity.error||null};})()`);
+  if (chartState?.error) throw new Error(chartState.error);
   if (!chartState || chartState.layout_id !== scope.expected_layout_id) throw new Error('scoped indicator mutation layout identity does not match reviewed authority');
   const inventory = await indicatorSignatures({ _deps });
   const pane = inventory.panes.find((entry) => entry.index === scope.pane_index);
