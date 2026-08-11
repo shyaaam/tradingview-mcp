@@ -300,6 +300,11 @@ export const chartRuntimeContentSnapshotOutput = {
   mutations_performed: z.literal(false),
 };
 
+export const chartRuntimeContentSnapshotV2Output = {
+  ...chartRuntimeContentSnapshotOutput,
+  snapshot_version: z.literal('chart-runtime-content-snapshot-v2'),
+};
+
 export const chartRuntimeContentSnapshotInput = {
   profile_id: z.string().min(1),
   target_id: z.string().min(1),
@@ -554,6 +559,11 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'read_only',
     inputSchema: chartRuntimeContentSnapshotInput,
     outputSchema: chartRuntimeContentSnapshotOutput,
+  },
+  chart_runtime_content_snapshot_v2: {
+    classification: 'read_only',
+    inputSchema: chartRuntimeContentSnapshotInput,
+    outputSchema: chartRuntimeContentSnapshotV2Output,
   },
   tv_observer_hydrate_chart_target: {
     classification: 'bootstrap_mutation',
@@ -948,7 +958,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);
