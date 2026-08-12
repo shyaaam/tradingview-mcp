@@ -42,7 +42,6 @@ test('indicator signatures read every pane without mutation and exclude volatile
   const changed = await indicatorSignatures({ _deps: { evaluate: async () => rawInventory({ changed: true }) } });
   assert.notEqual(result.panes[0].signature, changed.panes[1].signature);
 });
-
 test('indicator signatures fail closed on malformed or duplicate evidence', async () => {
   await assert.rejects(
     indicatorSignatures({ _deps: { evaluate: async () => ({ pane_count: 2, panes: [] }) } }),
@@ -83,4 +82,3 @@ test('mutation inventory carries entity addressability and read-only expression 
   assert.match(expression, /getAllStudies/);
   assert.doesNotMatch(expression, /setLayout|setSymbol|setResolution|removeEntity|insertStudy|\.click\(|navigate/);
 });
-
