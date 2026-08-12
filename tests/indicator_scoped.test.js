@@ -1,9 +1,16 @@
 /**
  * Scoped indicator mutation unit tests — no TradingView connection needed.
  */
-import { describe, it } from 'node:test';
+import { describe, it, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyScopedPlanItem, updateScopedSettings } from '../src/core/indicators.js';
+import {
+  applyScopedIndicator,
+  applyScopedPlanItem,
+  readScopedIndicatorSignatures,
+  removeScopedIndicator,
+  updateScopedIndicatorSettings,
+  updateScopedSettings,
+} from '../src/core/indicators.js';
 
 function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) {
   const state = {
@@ -95,4 +102,99 @@ describe('scoped indicator plan primitives', () => {
   it('blocks update when target indicator is missing', async () => {
     await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /indicator not found for update/);
   });
+});
+
+function scopedDeps({ indicatorName = 'Relative Strength Index', entityId = 'study-1', include = true } = {}) {
+  const state = {
+    indicators: include ? [{
+      indicator_id: 'RSI@tv-basicstudies', entity_id: entityId, indicator_name: indicatorName,
+      is_price_study: false, settings: { length: 14 },
+    }] : [],
+  };
+  const inventory = () => ({
+    success: true,
+    schema_version: 'pane-indicator-signatures-v1',
+    pane_count: 1,
+    canonical_pane_index: 0,
+    panes: [{ index: 0, signature: state.indicators.length ? 'a'.repeat(64) : 'b'.repeat(64), indicators: state.indicators }],
+  });
+  const deps = {
+    session: { profileId: 'profile-a', chartTargetId: 'target-a', chartTargetUrl: 'https://www.tradingview.com/chart/chart-a/' },
+    async listTabs() {
+      return { success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-a', url: 'https://www.tradingview.com/chart/chart-a/' }] };
+    },
+    async switchTab() { return { success: true, action: 'switched', index: 0 }; },
+    async focusPane() { return { success: true, focused_index: 0, total_panes: 1 }; },
+    async indicatorSignatures() { return inventory(); },
+    async evaluate(expression) {
+      if (expression.includes('layout_id')) return { layout_id: '8' };
+      if (expression.includes('chart.createStudy')) {
+        state.indicators.push({ indicator_id: 'RSI@tv-basicstudies', entity_id: 'study-new', indicator_name: indicatorName, is_price_study: false, settings: { length: 14 } });
+        return { id: 'study-new', name: indicatorName, inputs: [{ id: 'length', value: 14 }] };
+      }
+      if (expression.includes('getAllStudies')) {
+        const item = state.indicators[0];
+        return item ? { id: item.entity_id, name: item.indicator_name, inputs: [{ id: 'length', value: item.settings.length }] } : null;
+      }
+      if (expression.includes('study.setInputValues')) {
+        state.indicators[0].settings.length = 50;
+        return { id: entityId, previous: { length: 14 }, inputs: [{ id: 'length', value: 50 }] };
+      }
+      if (expression.includes('removeEntity')) {
+        state.indicators.length = 0;
+        return { id: entityId, removed: true };
+      }
+      throw new Error(`unexpected expression: ${expression.slice(0, 80)}`);
+    },
+  };
+  return { deps, inventory };
+}
+
+const fence = {
+  profile_id: 'profile-a', expected_chart_target_id: 'target-a', expected_chart_id: 'chart-a',
+  expected_layout_id: '8', tab_index: 0, pane_index: 0,
+};
+
+test('observer indicator read is fenced to exact profile/chart/tab/pane', async () => {
+  const { deps } = scopedDeps();
+  const result = await readScopedIndicatorSignatures(fence, { _deps: deps });
+  assert.equal(result.profile_id, 'profile-a');
+  assert.equal(result.chart_target_id, 'target-a');
+  assert.equal(result.panes[0].index, 0);
+});
+
+test('observer indicator mutation blocks stale pane signature before focus or effect', async () => {
+  const { deps } = scopedDeps({ include: false });
+  await assert.rejects(
+    applyScopedIndicator({ ...fence, indicator_name: 'Relative Strength Index', expected_settings: {}, expected_pane_signature: 'a'.repeat(64) }, { _deps: deps }),
+    /pre-mutation pane signature/,
+  );
+});
+
+test('observer apply requires empty target and returns verified post signature', async () => {
+  const { deps } = scopedDeps({ include: false });
+  const result = await applyScopedIndicator({
+    ...fence, indicator_name: 'Relative Strength Index', expected_settings: '{}', expected_pane_signature: 'b'.repeat(64),
+  }, { _deps: deps });
+  assert.equal(result.action, 'apply_indicator');
+  assert.equal(result.post_mutation_signature, 'a'.repeat(64));
+  assert.equal(result.entity_id, 'study-new');
+});
+
+test('observer update and remove require exact entity identity and return post signatures', async () => {
+  const update = scopedDeps();
+  const updated = await updateScopedIndicatorSettings({
+    ...fence, indicator_name: 'Relative Strength Index', expected_entity_id: 'study-1',
+    expected_pane_signature: 'a'.repeat(64), expected_settings: { length: 50 },
+  }, { _deps: update.deps });
+  assert.equal(updated.action, 'update_indicator_settings');
+  assert.equal(updated.post_mutation_signature, 'a'.repeat(64));
+
+  const remove = scopedDeps();
+  const removed = await removeScopedIndicator({
+    ...fence, indicator_name: 'Relative Strength Index', expected_entity_id: 'study-1',
+    expected_pane_signature: 'a'.repeat(64),
+  }, { _deps: remove.deps });
+  assert.equal(removed.action, 'remove_indicator');
+  assert.equal(removed.post_mutation_indicator_count, 0);
 });

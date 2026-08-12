@@ -6,6 +6,86 @@ import { requireObserverSession } from '../connection.js';
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
 
+const scopedIndicatorFenceInput = {
+  profile_id: z.string().min(1),
+  expected_chart_target_id: z.string().min(1),
+  expected_chart_id: z.string().min(1),
+  expected_layout_id: z.string().min(1),
+  tab_index: z.coerce.number().int().nonnegative(),
+  pane_index: z.coerce.number().int().nonnegative(),
+};
+
+const scopedIndicatorMutationInput = {
+  ...scopedIndicatorFenceInput,
+  expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+};
+
+const indicatorEvidence = z.object({
+  indicator_id: z.string().min(1),
+  entity_id: z.string().min(1),
+  indicator_name: z.string().min(1),
+  is_price_study: z.boolean(),
+  settings: jsonObject,
+});
+
+const paneIndicatorSignaturesOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-signatures-v1'),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  tab_index: z.number().int().nonnegative(),
+  pane_index: z.number().int().nonnegative(),
+  pane_count: z.number().int().positive().max(16),
+  canonical_pane_index: z.number().int().nonnegative(),
+  panes: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    signature: z.string().regex(/^[0-9a-f]{64}$/),
+    indicators: z.array(indicatorEvidence),
+  })),
+};
+
+const paneIndicatorMutationInventoryOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-mutation-inventory-v1'),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  tab_index: z.number().int().nonnegative(),
+  pane_index: z.number().int().nonnegative(),
+  pane_count: z.number().int().positive().max(16),
+  canonical_pane_index: z.number().int().nonnegative(),
+  panes: z.array(z.object({
+    index: z.number().int().nonnegative(),
+    signature: z.string().regex(/^[0-9a-f]{64}$/),
+    indicators: z.array(z.object({
+      ...indicatorEvidence.shape,
+      get_study_by_id_resolves: z.boolean(),
+      present_in_get_all_studies: z.boolean(),
+      mutation_visible: z.boolean(),
+    })),
+  })),
+};
+
+function scopedIndicatorMutationOutput(action) {
+  return {
+    success: z.literal(true),
+    profile_id: z.string().min(1),
+    chart_target_id: z.string().min(1),
+    chart_id: z.string().min(1),
+    tab_index: z.number().int().nonnegative(),
+    pane_index: z.number().int().nonnegative(),
+    indicator_name: z.string().min(1),
+    action: z.literal(action),
+    entity_id: z.string().min(1).nullable(),
+    pre_mutation_signature: z.string().regex(/^[0-9a-f]{64}$/),
+    post_mutation_signature: z.string().regex(/^[0-9a-f]{64}$/),
+    post_mutation_indicator_count: z.number().int().nonnegative(),
+    mutations_performed: z.literal(true),
+    focus: jsonObject,
+  };
+}
+
 const tabShape = {
   index: z.number(),
   id: z.string(),
@@ -245,6 +325,16 @@ export const observerToolDefinitions = Object.freeze({
       })),
     },
   },
+  pane_indicator_signatures: {
+    classification: 'read_only',
+    inputSchema: scopedIndicatorFenceInput,
+    outputSchema: paneIndicatorSignaturesOutput,
+  },
+  pane_indicator_mutation_inventory: {
+    classification: 'read_only',
+    inputSchema: scopedIndicatorFenceInput,
+    outputSchema: paneIndicatorMutationInventoryOutput,
+  },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',
     inputSchema: {
@@ -285,6 +375,34 @@ export const observerToolDefinitions = Object.freeze({
       chartType: z.number(),
       studies: z.array(z.object({ id: z.string(), name: z.string() })),
     },
+  },
+  indicator_apply_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      ...scopedIndicatorMutationInput,
+      indicator_name: z.string().min(1),
+      expected_settings: z.string().min(2).describe('JSON object containing expected indicator settings'),
+    },
+    outputSchema: scopedIndicatorMutationOutput('apply_indicator'),
+  },
+  indicator_update_settings_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      ...scopedIndicatorMutationInput,
+      indicator_name: z.string().min(1),
+      expected_entity_id: z.string().min(1),
+      expected_settings: z.string().min(2).describe('JSON object containing expected indicator settings'),
+    },
+    outputSchema: scopedIndicatorMutationOutput('update_indicator_settings'),
+  },
+  indicator_remove_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      ...scopedIndicatorMutationInput,
+      indicator_name: z.string().min(1),
+      expected_entity_id: z.string().min(1),
+    },
+    outputSchema: scopedIndicatorMutationOutput('remove_indicator'),
   },
   chart_set_symbol: {
     classification: 'chart_mutation',

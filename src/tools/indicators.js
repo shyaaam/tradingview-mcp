@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/indicators.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerIndicatorTools(server) {
   server.tool('indicator_set_inputs', 'Change indicator/study input values (e.g., length, source, period)', {
@@ -19,25 +20,28 @@ export function registerIndicatorTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('indicator_apply_scoped', 'Apply an indicator to a scoped tab/pane and return scoped evidence, including previous/new settings when TradingView exposes them', {
-    profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
-    tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
-    pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
-    indicator_name: z.string().describe('TradingView-recognized study name/title to apply, including custom/private confluence indicators'),
-    expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
-  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
-    try { return jsonResult(await core.applyScopedPlanItem({ profile_id, tab_index, pane_index, indicator_name, expected_settings, action: 'apply_indicator' })); }
-    catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'apply_indicator', applied: false, error: err.message }, true); }
+  registerObserverTool(server, 'pane_indicator_signatures', 'Read exact scoped pane indicator signatures and normalized settings without focus or mutation', async (input) => {
+    try { return jsonResult(await core.readScopedIndicatorSignatures(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('indicator_update_settings_scoped', 'Update indicator settings on a scoped tab/pane and return scoped evidence, including previous/new settings when TradingView exposes them', {
-    profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
-    tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
-    pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
-    indicator_name: z.string().describe('Existing indicator/study name/title to update, including custom/private confluence indicators'),
-    expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
-  }, async ({ profile_id, tab_index, pane_index, indicator_name, expected_settings }) => {
-    try { return jsonResult(await core.updateScopedSettings({ profile_id, tab_index, pane_index, indicator_name, expected_settings })); }
-    catch (err) { return jsonResult({ success: false, profile_id, tab_index, pane_index, indicator_name, action: 'update_indicator_settings', applied: false, error: err.message }, true); }
+  registerObserverTool(server, 'pane_indicator_mutation_inventory', 'Read exact scoped pane indicator mutation identities without focus or mutation', async (input) => {
+    try { return jsonResult(await core.readScopedIndicatorMutationInventory(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'indicator_apply_scoped', 'Apply one indicator only after exact profile, chart, tab, pane, and signature fences', async (input) => {
+    try { return jsonResult(await core.applyScopedIndicator(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'indicator_update_settings_scoped', 'Update one exact indicator entity only after exact identity and signature fences', async (input) => {
+    try { return jsonResult(await core.updateScopedIndicatorSettings(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'indicator_remove_scoped', 'Remove one exact indicator entity only after exact identity and signature fences', async (input) => {
+    try { return jsonResult(await core.removeScopedIndicator(input)); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }

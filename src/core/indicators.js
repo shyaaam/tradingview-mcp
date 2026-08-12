@@ -4,6 +4,9 @@
 import { evaluate as _evaluate, safeString } from '../connection.js';
 import { focus as _focusPane } from './pane.js';
 import { switchTab as _switchTab } from './tab.js';
+import { list as _listTabs } from './tab.js';
+import { indicatorSignatures as _indicatorSignatures, mutationIdentityInventory as _mutationIdentityInventory } from './pane.js';
+import { getObserverSession } from './observer-session.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -17,12 +20,12 @@ function _resolve(deps) {
   };
 }
 
-function _parseObject(value, name) {
+function _parseObject(value, name, { allowEmpty = false } = {}) {
   const parsed = value ? (typeof value === 'string' ? JSON.parse(value) : value) : undefined;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`${name} must be a non-empty object`);
   }
-  if (Object.keys(parsed).length === 0) throw new Error(`${name} must be a non-empty object`);
+  if (!allowEmpty && Object.keys(parsed).length === 0) throw new Error(`${name} must be a non-empty object`);
   return parsed;
 }
 
@@ -254,4 +257,198 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
 
 export async function updateScopedSettings(args) {
   return applyScopedPlanItem({ ...args, action: 'update_indicator_settings' });
+}
+
+const HASH = /^[0-9a-f]{64}$/i;
+
+function normalizeObserverIndicatorFence(input = {}, { mutation = false, entity = false } = {}) {
+  const text = (value, name) => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required`);
+    return value.trim();
+  };
+  const index = (value, name) => {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0) throw new Error(`${name} must be a non-negative integer`);
+    return number;
+  };
+  const signature = input.expected_pane_signature === undefined
+    ? undefined
+    : text(input.expected_pane_signature, 'expected_pane_signature');
+  if (mutation && (!signature || !HASH.test(signature))) throw new Error('expected_pane_signature must be a SHA-256 hash');
+  if (!mutation && signature !== undefined && !HASH.test(signature)) throw new Error('expected_pane_signature must be a SHA-256 hash');
+  if (entity) text(input.expected_entity_id, 'expected_entity_id');
+  return {
+    profile_id: text(input.profile_id, 'profile_id'),
+    expected_chart_target_id: text(input.expected_chart_target_id, 'expected_chart_target_id'),
+    expected_chart_id: text(input.expected_chart_id, 'expected_chart_id'),
+    expected_layout_id: text(input.expected_layout_id, 'expected_layout_id'),
+    tab_index: index(input.tab_index, 'tab_index'),
+    pane_index: index(input.pane_index, 'pane_index'),
+    ...(input.expected_pane_signature === undefined ? {} : { expected_pane_signature: signature.toLowerCase() }),
+    ...(input.expected_entity_id === undefined ? {} : { expected_entity_id: text(input.expected_entity_id, 'expected_entity_id') }),
+  };
+}
+
+async function verifyObserverIndicatorFence(scope, _deps) {
+  const session = _deps?.session || getObserverSession();
+  if (!session
+    || session.profileId !== scope.profile_id
+    || session.chartTargetId !== scope.expected_chart_target_id
+    || session.chartTargetUrl !== `https://www.tradingview.com/chart/${scope.expected_chart_id}/`) {
+    throw new Error('scoped indicator observer identity does not match exact profile/chart authority');
+  }
+  const listTabs = _deps?.listTabs || _listTabs;
+  const tabs = await listTabs();
+  const matches = Array.isArray(tabs?.tabs)
+    ? tabs.tabs.filter((tab) => tab?.index === scope.tab_index && tab?.id === scope.expected_chart_target_id)
+    : [];
+  if (tabs?.success !== true || matches.length !== 1) throw new Error('scoped indicator exact tab target is not unique');
+  const tab = matches[0];
+  if (tab.chart_id !== scope.expected_chart_id || tab.url !== session.chartTargetUrl) {
+    throw new Error('scoped indicator exact chart target does not match authority');
+  }
+  const evaluate = _deps?.evaluate || _evaluate;
+  const layout = await evaluate(`
+    (function() {
+      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
+      var layout = cwc && cwc._layoutType;
+      if (layout && typeof layout.value === 'function') layout = layout.value();
+      return { layout_id: layout == null ? '' : String(layout) };
+    })()
+  `);
+  if (!layout || layout.layout_id !== scope.expected_layout_id) {
+    throw new Error('scoped indicator exact pane layout does not match authority');
+  }
+}
+
+function scopedPane(inventory, paneIndex) {
+  const pane = inventory?.panes?.find((entry) => entry.index === paneIndex);
+  if (!pane) throw new Error(`scoped indicator pane ${paneIndex} is unavailable`);
+  return pane;
+}
+
+function matchingIndicators(pane, name) {
+  return pane.indicators.filter((indicator) => indicator.indicator_name.toLowerCase() === name.toLowerCase());
+}
+
+export async function readScopedIndicatorSignatures(input = {}, { _deps } = {}) {
+  const scope = normalizeObserverIndicatorFence(input);
+  await verifyObserverIndicatorFence(scope, _deps);
+  const inventory = await (_deps?.indicatorSignatures || _indicatorSignatures)({ _deps });
+  scopedPane(inventory, scope.pane_index);
+  return {
+    ...inventory,
+    profile_id: scope.profile_id,
+    chart_target_id: scope.expected_chart_target_id,
+    chart_id: scope.expected_chart_id,
+    tab_index: scope.tab_index,
+    pane_index: scope.pane_index,
+  };
+}
+
+export async function readScopedIndicatorMutationInventory(input = {}, { _deps } = {}) {
+  const scope = normalizeObserverIndicatorFence(input);
+  await verifyObserverIndicatorFence(scope, _deps);
+  const inventory = await (_deps?.mutationIdentityInventory || _mutationIdentityInventory)({ _deps });
+  scopedPane(inventory, scope.pane_index);
+  return {
+    ...inventory,
+    profile_id: scope.profile_id,
+    chart_target_id: scope.expected_chart_target_id,
+    chart_id: scope.expected_chart_id,
+    tab_index: scope.tab_index,
+    pane_index: scope.pane_index,
+  };
+}
+
+async function runObserverIndicatorMutation(input, action, { _deps } = {}) {
+  const scope = normalizeObserverIndicatorFence(input, {
+    mutation: true,
+    entity: action !== 'apply_indicator',
+  });
+  const indicatorName = typeof input.indicator_name === 'string' && input.indicator_name.trim();
+  if (!indicatorName) throw new Error('indicator_name is required');
+  const expectedSettings = action === 'remove_indicator'
+    ? {}
+    : _parseObject(input.expected_settings, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
+
+  await verifyObserverIndicatorFence(scope, _deps);
+  const readSignatures = _deps?.indicatorSignatures || _indicatorSignatures;
+  const before = await readSignatures({ _deps });
+  const beforePane = scopedPane(before, scope.pane_index);
+  if (beforePane.signature !== scope.expected_pane_signature) {
+    throw new Error('scoped indicator pre-mutation pane signature does not match authority');
+  }
+  const matching = matchingIndicators(beforePane, indicatorName);
+  if (action === 'apply_indicator' && matching.length !== 0) {
+    throw new Error('scoped indicator apply refuses an existing matching indicator');
+  }
+  if (action !== 'apply_indicator') {
+    if (matching.length !== 1) throw new Error(`scoped indicator ${action === 'remove_indicator' ? 'remove' : 'update'} requires exactly one matching indicator`);
+    if (matching[0].entity_id !== scope.expected_entity_id) throw new Error('scoped indicator expected entity ID does not match authority');
+  }
+
+  const focusResult = await _selectScopedChart({ tab_index: scope.tab_index, pane_index: scope.pane_index, _deps });
+  const existing = await _getStudyByName({ indicator_name: indicatorName, _deps });
+  if (existing?.error) throw new Error(existing.error);
+  if (action !== 'apply_indicator' && (!existing || existing.id !== scope.expected_entity_id)) {
+    throw new Error('scoped indicator live entity ID does not match authority');
+  }
+  if (action === 'apply_indicator' && existing) throw new Error('scoped indicator apply found an existing live indicator');
+
+  let effect;
+  if (action === 'apply_indicator') effect = await _applyIndicator({ indicator_name: indicatorName, expected_settings: expectedSettings, _deps });
+  else if (action === 'update_indicator_settings') effect = await _updateIndicatorSettings({ entity_id: scope.expected_entity_id, expected_settings: expectedSettings, _deps });
+  else effect = await _removeScopedEntity({ entity_id: scope.expected_entity_id, _deps });
+
+  const after = await readSignatures({ _deps });
+  const afterPane = scopedPane(after, scope.pane_index);
+  const afterMatching = matchingIndicators(afterPane, indicatorName);
+  if (action === 'remove_indicator' && afterMatching.length !== 0) throw new Error('scoped indicator removal post-readback still contains target');
+  if (action !== 'remove_indicator' && afterMatching.length !== 1) throw new Error('scoped indicator mutation post-readback is ambiguous');
+  if (action !== 'remove_indicator' && action !== 'apply_indicator' && afterMatching[0].entity_id !== scope.expected_entity_id) throw new Error('scoped indicator update post-readback entity ID changed');
+  return {
+    success: true,
+    profile_id: scope.profile_id,
+    chart_target_id: scope.expected_chart_target_id,
+    chart_id: scope.expected_chart_id,
+    tab_index: scope.tab_index,
+    pane_index: scope.pane_index,
+    indicator_name: indicatorName,
+    action,
+    entity_id: afterMatching[0]?.entity_id || effect?.id || null,
+    pre_mutation_signature: beforePane.signature,
+    post_mutation_signature: afterPane.signature,
+    post_mutation_indicator_count: afterPane.indicators.length,
+    mutations_performed: true,
+    focus: focusResult,
+  };
+}
+
+async function _removeScopedEntity({ entity_id, _deps }) {
+  const evaluate = _deps?.evaluate || _evaluate;
+  const result = await evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.removeEntity !== 'function') return { error: 'scoped indicator removal API is unavailable' };
+      if (!chart.getStudyById || !chart.getStudyById(${safeString(entity_id)})) return { error: 'scoped indicator removal target is unavailable' };
+      chart.removeEntity(${safeString(entity_id)});
+      return { id: ${safeString(entity_id)}, removed: true };
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  if (result?.removed !== true || result.id !== entity_id) throw new Error('scoped indicator removal readback failed');
+  return result;
+}
+
+export async function applyScopedIndicator(input = {}, options = {}) {
+  return runObserverIndicatorMutation(input, 'apply_indicator', options);
+}
+
+export async function updateScopedIndicatorSettings(input = {}, options = {}) {
+  return runObserverIndicatorMutation(input, 'update_indicator_settings', options);
+}
+
+export async function removeScopedIndicator(input = {}, options = {}) {
+  return runObserverIndicatorMutation(input, 'remove_indicator', options);
 }

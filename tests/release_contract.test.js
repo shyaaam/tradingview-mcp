@@ -24,6 +24,7 @@ import { registerTabTools } from '../src/tools/tab.js';
 import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
+import { registerIndicatorTools } from '../src/tools/indicators.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json');
@@ -72,6 +73,11 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tab_new',
     'tab_switch',
     'pane_list',
+    'pane_indicator_signatures',
+    'pane_indicator_mutation_inventory',
+    'indicator_apply_scoped',
+    'indicator_update_settings_scoped',
+    'indicator_remove_scoped',
     'pane_probe_layout_capability',
     'chart_get_state',
     'chart_set_symbol',
@@ -79,6 +85,21 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   ]);
   assert.equal(names.includes('data_get_ohlcv'), false);
   assert.equal(names.includes('capture_screenshot'), false);
+
+  const classifications = Object.fromEntries(observerCapabilityManifest.capabilities.map((capability) => [capability.name, capability.classification]));
+  assert.deepEqual({
+    pane_indicator_signatures: classifications.pane_indicator_signatures,
+    pane_indicator_mutation_inventory: classifications.pane_indicator_mutation_inventory,
+    indicator_apply_scoped: classifications.indicator_apply_scoped,
+    indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
+    indicator_remove_scoped: classifications.indicator_remove_scoped,
+  }, {
+    pane_indicator_signatures: 'read_only',
+    pane_indicator_mutation_inventory: 'read_only',
+    indicator_apply_scoped: 'chart_mutation',
+    indicator_update_settings_scoped: 'chart_mutation',
+    indicator_remove_scoped: 'chart_mutation',
+  });
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(capability.inputSchema.type, 'object');
@@ -99,6 +120,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerPaneTools(fakeServer);
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
+  registerIndicatorTools(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(registered.has(capability.name), true, `missing MCP tool: ${capability.name}`);
@@ -185,6 +207,45 @@ test('observer result fixtures satisfy registered output schemas', () => {
     pane_list: {
       success: true, layout: 's', layout_name: '1 chart', chart_count: 1, active_index: 0,
       panes: [{ index: 0, symbol: 'AAPL', resolution: '60' }],
+    },
+    pane_indicator_signatures: {
+      success: true,
+      schema_version: 'pane-indicator-signatures-v1',
+      profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', tab_index: 0, pane_index: 0,
+      pane_count: 1, canonical_pane_index: 0,
+      panes: [{ index: 0, signature: 'a'.repeat(64), indicators: [{
+        indicator_id: 'RSI@tv-basicstudies', entity_id: 'study-1', indicator_name: 'Relative Strength Index',
+        is_price_study: false, settings: { length: 14 },
+      }] }],
+    },
+    pane_indicator_mutation_inventory: {
+      success: true,
+      schema_version: 'pane-indicator-mutation-inventory-v1',
+      profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', tab_index: 0, pane_index: 0,
+      pane_count: 1, canonical_pane_index: 0,
+      panes: [{ index: 0, signature: 'a'.repeat(64), indicators: [{
+        indicator_id: 'RSI@tv-basicstudies', entity_id: 'study-1', indicator_name: 'Relative Strength Index',
+        is_price_study: false, settings: { length: 14 }, get_study_by_id_resolves: true,
+        present_in_get_all_studies: true, mutation_visible: true,
+      }] }],
+    },
+    indicator_apply_scoped: {
+      success: true, profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', tab_index: 0, pane_index: 0,
+      indicator_name: 'Relative Strength Index', action: 'apply_indicator', entity_id: 'study-1',
+      pre_mutation_signature: 'a'.repeat(64), post_mutation_signature: 'b'.repeat(64),
+      post_mutation_indicator_count: 1, mutations_performed: true, focus: { success: true, focused_index: 0 },
+    },
+    indicator_update_settings_scoped: {
+      success: true, profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', tab_index: 0, pane_index: 0,
+      indicator_name: 'Relative Strength Index', action: 'update_indicator_settings', entity_id: 'study-1',
+      pre_mutation_signature: 'a'.repeat(64), post_mutation_signature: 'b'.repeat(64),
+      post_mutation_indicator_count: 1, mutations_performed: true, focus: { success: true, focused_index: 0 },
+    },
+    indicator_remove_scoped: {
+      success: true, profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', tab_index: 0, pane_index: 0,
+      indicator_name: 'Relative Strength Index', action: 'remove_indicator', entity_id: 'study-1',
+      pre_mutation_signature: 'a'.repeat(64), post_mutation_signature: 'b'.repeat(64),
+      post_mutation_indicator_count: 0, mutations_performed: true, focus: { success: true, focused_index: 0 },
     },
     pane_probe_layout_capability: {
       success: true,

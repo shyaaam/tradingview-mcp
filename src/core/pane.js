@@ -2,9 +2,17 @@
  * Core pane/layout management logic.
  * Controls multi-chart layouts (split panes) in TradingView.
  */
+import { createHash } from 'node:crypto';
 import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
+export const PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION = 'pane-indicator-signatures-v1';
+export const PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION = 'pane-indicator-mutation-inventory-v1';
+const VOLATILE_INDICATOR_INPUT_KEYS = new Set([
+  'first_visible_bar_time',
+  'last_visible_bar_time',
+  'subscribeRealtime',
+]);
 
 export const LAYOUT_NAMES = {
   's': '1 chart',
@@ -74,6 +82,228 @@ export async function list() {
     active_index: result.active_index,
     panes: result.panes,
   };
+}
+
+/**
+ * Read indicator settings from every visible pane. No focus or mutation occurs.
+ * Entity IDs are returned as evidence but excluded from stable signatures.
+ */
+export async function indicatorSignatures({ _deps } = {}) {
+  const evaluateFn = _deps?.evaluate || evaluate;
+  const raw = await evaluateFn(`
+    (function() {
+      var cwc = ${CWC};
+      var count = cwc && cwc.inlineChartsCount;
+      if (count && typeof count.value === 'function') count = count.value();
+      var visibleCount = Number(count);
+      var all = cwc && typeof cwc.getAll === 'function' ? cwc.getAll() : [];
+      if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
+        return { error: 'TradingView pane indicator inventory is unavailable.' };
+      }
+      var panes = [];
+      for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
+        var widget = all[paneIndex];
+        var wrapper = widget && typeof widget.model === 'function' ? widget.model() : null;
+        var model = wrapper && typeof wrapper.model === 'function' ? wrapper.model() : null;
+        var sources = model && typeof model.dataSources === 'function' ? model.dataSources() : null;
+        if (!Array.isArray(sources)) return { error: 'TradingView pane indicator inventory is unavailable.' };
+        var indicators = [];
+        for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+          var source = sources[sourceIndex];
+          if (!source || typeof source.metaInfo !== 'function') continue;
+          var meta = source.metaInfo();
+          if (!meta || typeof meta.id !== 'string' || !meta.id.trim()) continue;
+          var entityId = '';
+          try {
+            if (typeof source.id === 'function') entityId = String(source.id() || '').trim();
+            if (!entityId && source._id !== undefined) entityId = String(source._id || '').trim();
+          } catch (_) {}
+          if (!entityId) return { error: 'TradingView pane indicator live entity identity is unavailable.' };
+          if (typeof source.inputs !== 'function') return { error: 'TradingView pane indicator settings are unavailable.' };
+          var settings;
+          try { settings = source.inputs(); JSON.stringify(settings); }
+          catch (_) { return { error: 'TradingView pane indicator settings are unavailable.' }; }
+          indicators.push({
+            indicator_id: meta.id.trim(),
+            entity_id: entityId,
+            indicator_name: String(meta.description || meta.shortDescription || meta.id).trim(),
+            is_price_study: meta.is_price_study === true,
+            settings,
+          });
+        }
+        panes.push({ index: paneIndex, indicators });
+      }
+      return { pane_count: visibleCount, panes };
+    })()
+  `);
+  return normalizeIndicatorSignatureResult(raw);
+}
+
+/**
+ * Read mutation-addressability evidence without changing pane focus or chart state.
+ */
+export async function mutationIdentityInventory({ _deps } = {}) {
+  const evaluateFn = _deps?.evaluate || evaluate;
+  const raw = await evaluateFn(`
+    (function() {
+      var cwc = ${CWC};
+      var count = cwc && cwc.inlineChartsCount;
+      if (count && typeof count.value === 'function') count = count.value();
+      var visibleCount = Number(count);
+      var all = cwc && typeof cwc.getAll === 'function' ? cwc.getAll() : [];
+      if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
+        return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+      }
+      var active = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+        && typeof window.TradingViewApi._activeChartWidgetWV.value === 'function'
+        ? window.TradingViewApi._activeChartWidgetWV.value() : null;
+      var publicStudies = active && typeof active.getAllStudies === 'function' ? active.getAllStudies() : [];
+      if (!Array.isArray(publicStudies)) return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+      var publicIds = Object.create(null);
+      for (var publicIndex = 0; publicIndex < publicStudies.length; publicIndex++) {
+        var publicId = publicStudies[publicIndex] && String(publicStudies[publicIndex].id || '').trim();
+        if (!publicId || publicIds[publicId]) return { error: 'TradingView pane mutation identity inventory contains duplicate getAllStudies identity.' };
+        publicIds[publicId] = true;
+      }
+      var panes = [];
+      for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
+        var wrapper = all[paneIndex] && typeof all[paneIndex].model === 'function' ? all[paneIndex].model() : null;
+        var model = wrapper && typeof wrapper.model === 'function' ? wrapper.model() : null;
+        var sources = model && typeof model.dataSources === 'function' ? model.dataSources() : null;
+        if (!model || typeof model.getStudyById !== 'function' || !Array.isArray(sources)) {
+          return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+        }
+        var indicators = [];
+        for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+          var source = sources[sourceIndex];
+          if (!source || typeof source.metaInfo !== 'function') continue;
+          var meta = source.metaInfo();
+          if (!meta || typeof meta.id !== 'string' || !meta.id.trim()) continue;
+          var entityId = typeof source.id === 'function' ? String(source.id() || '').trim() : String(source._id || '').trim();
+          if (!entityId || typeof source.inputs !== 'function') return { error: 'TradingView pane mutation identity evidence is unavailable.' };
+          var settings;
+          try { settings = source.inputs(); JSON.stringify(settings); }
+          catch (_) { return { error: 'TradingView pane indicator settings are unavailable.' }; }
+          var resolves = false;
+          try { resolves = model.getStudyById(entityId) != null; } catch (_) {}
+          indicators.push({
+            indicator_id: meta.id.trim(),
+            entity_id: entityId,
+            indicator_name: String(meta.description || meta.shortDescription || meta.id).trim(),
+            is_price_study: meta.is_price_study === true,
+            settings,
+            get_study_by_id_resolves: resolves,
+            present_in_get_all_studies: publicIds[entityId] === true,
+            mutation_visible: resolves && publicIds[entityId] === true,
+          });
+        }
+        panes.push({ index: paneIndex, indicators });
+      }
+      return { pane_count: visibleCount, panes };
+    })()
+  `);
+  const result = normalizeIndicatorSignatureResult(raw);
+  return {
+    ...result,
+    schema_version: PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION,
+    panes: result.panes.map((pane) => ({
+      ...pane,
+      indicators: pane.indicators.map((indicator) => {
+        for (const field of ['get_study_by_id_resolves', 'present_in_get_all_studies', 'mutation_visible']) {
+          if (typeof indicator[field] !== 'boolean') throw new Error('TradingView pane mutation identity inventory is incompatible.');
+        }
+        if (indicator.mutation_visible !== (indicator.get_study_by_id_resolves && indicator.present_in_get_all_studies)) {
+          throw new Error('TradingView pane mutation identity inventory is incompatible.');
+        }
+        return indicator;
+      }),
+    })),
+  };
+}
+
+export function derivePaneIndicatorSignature(indicators) {
+  return createHash('sha256').update(canonicalJson({
+    schema_version: PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION,
+    indicators: indicators.map((indicator) => ({
+      indicator_id: indicator.indicator_id,
+      indicator_name: indicator.indicator_name,
+      is_price_study: indicator.is_price_study,
+      settings: removeVolatileSettings(indicator.settings),
+    })),
+  }), 'utf8').digest('hex');
+}
+
+function normalizeIndicatorSignatureResult(raw) {
+  if (!raw || typeof raw !== 'object' || raw.error) throw new Error(raw?.error || 'TradingView pane indicator inventory is unavailable.');
+  const paneCount = Number(raw.pane_count);
+  if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
+    throw new Error('TradingView pane indicator inventory is incompatible.');
+  }
+  const panes = raw.panes.map((pane, index) => {
+    if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) throw new Error('TradingView pane indicator inventory is incompatible.');
+    const indicators = pane.indicators.map((indicator) => normalizeIndicator(indicator));
+    assertUniqueIndicators(indicators);
+    indicators.sort((left, right) => canonicalJson(stableIndicator(left)).localeCompare(canonicalJson(stableIndicator(right))));
+    return { index, signature: derivePaneIndicatorSignature(indicators), indicators };
+  });
+  return { success: true, schema_version: PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION, pane_count: paneCount, canonical_pane_index: 0, panes };
+}
+
+function normalizeIndicator(indicator) {
+  if (!indicator || typeof indicator !== 'object' || Array.isArray(indicator)) throw new Error('TradingView pane indicator inventory is incompatible.');
+  const normalized = {
+    indicator_id: String(indicator.indicator_id || '').trim(),
+    entity_id: String(indicator.entity_id || '').trim(),
+    indicator_name: String(indicator.indicator_name || '').trim(),
+    is_price_study: indicator.is_price_study,
+    settings: normalizeJsonValue(indicator.settings, 'indicator settings'),
+  };
+  if (!normalized.indicator_id || !normalized.entity_id || !normalized.indicator_name || typeof normalized.is_price_study !== 'boolean') throw new Error('TradingView pane indicator inventory is incompatible.');
+  if ('get_study_by_id_resolves' in indicator) normalized.get_study_by_id_resolves = indicator.get_study_by_id_resolves;
+  if ('present_in_get_all_studies' in indicator) normalized.present_in_get_all_studies = indicator.present_in_get_all_studies;
+  if ('mutation_visible' in indicator) normalized.mutation_visible = indicator.mutation_visible;
+  return normalized;
+}
+
+function assertUniqueIndicators(indicators) {
+  const ids = new Set();
+  const entities = new Set();
+  for (const indicator of indicators) {
+    if (ids.has(indicator.indicator_id)) throw new Error('TradingView pane indicator inventory contains duplicate indicator identity.');
+    if (entities.has(indicator.entity_id)) throw new Error('TradingView pane indicator inventory contains duplicate entity identity.');
+    ids.add(indicator.indicator_id);
+    entities.add(indicator.entity_id);
+  }
+}
+
+function stableIndicator(indicator) {
+  return {
+    indicator_id: indicator.indicator_id,
+    indicator_name: indicator.indicator_name,
+    is_price_study: indicator.is_price_study,
+    settings: removeVolatileSettings(indicator.settings),
+  };
+}
+
+function removeVolatileSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !VOLATILE_INDICATOR_INPUT_KEYS.has(key))
+    .map(([key, entry]) => [key, removeVolatileSettings(entry)]));
+}
+
+function normalizeJsonValue(value, name) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) return value.map((entry) => normalizeJsonValue(entry, name));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, normalizeJsonValue(value[key], name)]));
+  }
+  throw new Error(`${name} is not JSON-compatible.`);
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(value);
 }
 
 /**
