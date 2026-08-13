@@ -14,6 +14,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_identity',
   'tv_observer_capture_candle',
   'tv_observer_capture_telemetry_ohlcv',
+  'tv_observer_capture_pane_telemetry_ohlcv',
   'tab_list',
   'tab_new',
   'tab_switch',

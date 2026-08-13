@@ -15,6 +15,10 @@ export function registerObserverEvidenceTools(server) {
     try { return jsonResult(await core.captureTelemetryOhlcv(args)); }
     catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
   });
+  registerObserverTool(server, 'tv_observer_capture_pane_telemetry_ohlcv', 'Capture bounded OHLCV and same-pane study telemetry from one exact pane without focus or mutation.', async ({ ...args }) => {
+    try { return jsonResult(await core.capturePaneTelemetryOhlcv(args)); }
+    catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
+  });
 }
 
 function sanitizeError(error) {
