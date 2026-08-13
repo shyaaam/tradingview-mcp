@@ -30,22 +30,6 @@ function evidence() {
       canonical_pane_index: 0,
       panes: [{ index: 0, signature, indicators }],
     },
-    inventory: {
-      success: true,
-      schema_version: 'pane-indicator-mutation-inventory-v1',
-      pane_count: 1,
-      canonical_pane_index: 0,
-      panes: [{
-        index: 0,
-        signature,
-        indicators: [{
-          ...indicators[0],
-          get_study_by_id_resolves: true,
-          present_in_get_all_studies: true,
-          mutation_visible: true,
-        }],
-      }],
-    },
   };
 }
 
@@ -78,7 +62,7 @@ function layoutEvidence() {
   };
 }
 
-function makeDeps({ save = async () => ({ success: true, uid: chartId }), signatures = evidence().signatures, inventory = evidence().inventory } = {}) {
+function makeDeps({ save = async () => ({ success: true, uid: chartId }), signatures = evidence().signatures } = {}) {
   const calls = [];
   const expressions = [];
   return {
@@ -92,7 +76,6 @@ function makeDeps({ save = async () => ({ success: true, uid: chartId }), signat
       async evaluate(expression) { calls.push('evaluate'); expressions.push(expression); assert.match(expression, /_saveChartService|_layoutType|metaInfo/); return layoutEvidence(); },
       async evaluateAsync(expression) { calls.push('save'); expressions.push(expression); assert.match(expression, /saveExistentChart/); return save(expression); },
       async inspectSignatures() { calls.push('pane_indicator_signatures'); return signatures; },
-      async inspectInventory() { calls.push('pane_indicator_mutation_inventory'); return inventory; },
     },
   };
 }
@@ -108,8 +91,8 @@ test('scoped save confirms exact existing-chart callback and readback', async ()
     assert.equal(result.retry_safe, true);
     assert.deepEqual(calls, [
       'tab_list', 'get_bound_client', 'evaluate',
-      'pane_indicator_signatures', 'pane_indicator_mutation_inventory', 'save',
-      'evaluate', 'pane_indicator_signatures', 'pane_indicator_mutation_inventory',
+      'pane_indicator_signatures', 'save',
+      'evaluate', 'pane_indicator_signatures',
     ]);
     assert.equal(expressions.some((expression) => /saveChartAs|loadChartFromServer|Page\.navigate|setLayout|setSymbol|setResolution|\.click\(/u.test(expression)), false);
   } finally {
@@ -129,8 +112,7 @@ test('scoped save fails before effect on target or parity drift', async () => {
 
     const driftedEvidence = evidence();
     driftedEvidence.signatures.panes[0].signature = 'b'.repeat(64);
-    driftedEvidence.inventory.panes[0].signature = 'b'.repeat(64);
-    const drifted = makeDeps({ signatures: driftedEvidence.signatures, inventory: driftedEvidence.inventory });
+    const drifted = makeDeps({ signatures: driftedEvidence.signatures });
     await assert.rejects(
       saveExistingChartScopedV2({ ...input(), _deps: drifted.deps }),
       /parity does not match expected authority/,

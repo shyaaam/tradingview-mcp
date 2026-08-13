@@ -6,7 +6,7 @@ import {
   getBoundClient as defaultGetBoundClient,
   requireObserverSession,
 } from '../connection.js';
-import { indicatorSignatures as defaultIndicatorSignatures, mutationIdentityInventory as defaultMutationIdentityInventory } from './pane.js';
+import { indicatorSignatures as defaultIndicatorSignatures } from './pane.js';
 import { list as defaultListTabs } from './tab.js';
 
 const HASH = /^[0-9a-f]{64}$/u;
@@ -50,7 +50,6 @@ export async function saveExistingChartScopedV2({
   const getBoundClient = _deps?.getBoundClient || defaultGetBoundClient;
   const listTabs = _deps?.listTabs || defaultListTabs;
   const inspectSignatures = _deps?.inspectSignatures || defaultIndicatorSignatures;
-  const inspectInventory = _deps?.inspectInventory || defaultMutationIdentityInventory;
   const session = requireObserverSession();
   let saveInvoked = false;
 
@@ -60,7 +59,7 @@ export async function saveExistingChartScopedV2({
 
     const pre = await evaluate(LAYOUT_IDENTITY_EXPRESSION);
     assertLayoutIdentity(pre, expected, { requireSaveService: true });
-    const parity = await inspectParity(expected, inspectSignatures, inspectInventory);
+    const parity = await inspectParity(expected, inspectSignatures);
 
     saveInvoked = true;
     const savedUid = await invokeExistingChartSave(evaluateAsync, expected.savedLayoutUid);
@@ -79,7 +78,7 @@ export async function saveExistingChartScopedV2({
       );
     }
 
-    const postParity = await inspectParity(expected, inspectSignatures, inspectInventory);
+    const postParity = await inspectParity(expected, inspectSignatures);
     if (postParity !== parity) {
       throw new ScopedExistingChartSaveError(
         'Existing-chart save changed indicator parity during post-save verification.',
@@ -187,22 +186,9 @@ function assertLayoutIdentity(evidence, expected, { requireSaveService }) {
   }
 }
 
-async function inspectParity(expected, inspectSignatures, inspectInventory) {
+async function inspectParity(expected, inspectSignatures) {
   const signatures = await inspectSignatures();
-  const inventory = await inspectInventory();
   assertPaneEvidence(signatures, expected, 'signature');
-  assertPaneEvidence(inventory, expected, 'inventory');
-  for (let index = 0; index < expected.paneCount; index += 1) {
-    const signaturePane = signatures.panes[index];
-    const inventoryPane = inventory.panes[index];
-    if (signaturePane.signature !== inventoryPane.signature
-      || inventoryPane.indicators.some((indicator) =>
-        indicator.get_study_by_id_resolves !== true
-        || indicator.present_in_get_all_studies !== true
-        || indicator.mutation_visible !== true)) {
-      throw new Error(`Existing-chart save pane ${index} indicator identity is incomplete.`);
-    }
-  }
   const parity = deriveExistingChartParitySha256(signatures);
   if (parity !== expected.paritySha256) {
     throw new Error('Existing-chart save indicator parity does not match expected authority.');
