@@ -83,6 +83,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_capture_candle',
     'tv_observer_capture_screenshot',
     'tv_observer_capture_telemetry_ohlcv',
+    'tv_observer_capture_pane_telemetry_ohlcv',
     'tab_list',
     'tab_new',
     'tab_switch',
@@ -102,6 +103,27 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   ]);
   assert.equal(names.includes('data_get_ohlcv'), false);
   assert.equal(names.includes('capture_screenshot'), false);
+
+  const classifications = Object.fromEntries(observerCapabilityManifest.capabilities.map((capability) => [capability.name, capability.classification]));
+  assert.deepEqual({
+    pane_indicator_signatures: classifications.pane_indicator_signatures,
+    pane_indicator_mutation_inventory: classifications.pane_indicator_mutation_inventory,
+    indicator_apply_scoped: classifications.indicator_apply_scoped,
+    indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
+    indicator_remove_scoped: classifications.indicator_remove_scoped,
+    chart_saved_layout_identity: classifications.chart_saved_layout_identity,
+    chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
+    tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+  }, {
+    pane_indicator_signatures: 'read_only',
+    pane_indicator_mutation_inventory: 'read_only',
+    indicator_apply_scoped: 'chart_mutation',
+    indicator_update_settings_scoped: 'chart_mutation',
+    indicator_remove_scoped: 'chart_mutation',
+    chart_saved_layout_identity: 'read_only',
+    chart_save_existing_scoped_v2: 'chart_mutation',
+    tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+  });
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(capability.inputSchema.type, 'object');
@@ -597,6 +619,17 @@ test('observer result fixtures satisfy registered output schemas', () => {
         study_name: 'RSI',
         values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }],
       }],
+    },
+    tv_observer_capture_pane_telemetry_ohlcv: {
+      success: true,
+      extraction_version: 'observer-pane-telemetry-ohlcv-v1',
+      profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', layout_id: '8',
+      tab_index: 0, pane_index: 0, pane_count: 8, symbol: 'AAPL', timeframe: '60', requested_count: 2,
+      captured_at: '2026-07-17T10:00:01Z',
+      candles: [
+        { opened_at: '2026-07-17T08:00:00Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' },
+      ],
+      studies: [{ study_id: 'study-rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
     },
     tab_list: tabs,
     tab_new: { ...tabs, action: 'new_tab_opened' },
