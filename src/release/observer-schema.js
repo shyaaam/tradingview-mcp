@@ -20,6 +20,37 @@ const scopedIndicatorMutationInput = {
   expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
 };
 
+const scopedExistingChartSaveInput = {
+  profile_id: z.string().min(1),
+  tab_index: z.coerce.number().int().nonnegative(),
+  chart_target_id: z.string().min(1),
+  expected_chart_id: z.string().min(1),
+  expected_workspace_layout_id: z.string().min(1),
+  expected_saved_layout_uid: z.string().min(1),
+  expected_pane_count: z.coerce.number().int().positive().max(16),
+  expected_eight_pane_parity_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+};
+
+const scopedExistingChartSaveOutput = {
+  success: z.literal(true),
+  save_version: z.literal('chart-save-existing-scoped-v2'),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  canonical_url: z.string().url(),
+  workspace_layout_id: z.string().min(1),
+  saved_layout_uid: z.string().min(1),
+  pane_count: z.number().int().positive().max(16),
+  indicator_parity_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  saved_existing: z.literal(true),
+  mutations_performed: z.literal(true),
+  save_invoked: z.literal(true),
+  effect_state: z.literal('confirmed'),
+  effect_phase: z.literal('post-save-verification'),
+  save_callback_confirmed: z.literal(true),
+  retry_safe: z.literal(true),
+};
+
 const indicatorEvidence = z.object({
   indicator_id: z.string().min(1),
   entity_id: z.string().min(1),
@@ -375,6 +406,11 @@ export const observerToolDefinitions = Object.freeze({
       chartType: z.number(),
       studies: z.array(z.object({ id: z.string(), name: z.string() })),
     },
+  },
+  chart_save_existing_scoped_v2: {
+    classification: 'chart_mutation',
+    inputSchema: scopedExistingChartSaveInput,
+    outputSchema: scopedExistingChartSaveOutput,
   },
   indicator_apply_scoped: {
     classification: 'chart_mutation',

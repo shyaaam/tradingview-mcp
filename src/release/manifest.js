@@ -25,6 +25,7 @@ const CAPABILITY_NAMES = [
   'indicator_remove_scoped',
   'pane_probe_layout_capability',
   'chart_get_state',
+  'chart_save_existing_scoped_v2',
   'chart_set_symbol',
   'chart_set_timeframe',
 ];

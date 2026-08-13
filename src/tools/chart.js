@@ -1,12 +1,30 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
+import { saveExistingChartScopedV2 } from '../core/chart-save.js';
 import { registerObserverTool } from '../release/observer-schema.js';
+
+function saveErrorResult(error) {
+  return jsonResult({
+    success: false,
+    error: error instanceof Error ? error.message : String(error),
+    save_invoked: error?.saveInvoked === true,
+    effect_state: error?.effectState || 'not-started',
+    effect_phase: error?.phase || 'pre-effect',
+    save_callback_confirmed: error?.saveCallbackConfirmed === true,
+    retry_safe: error?.retrySafe === true,
+  }, true);
+}
 
 export function registerChartTools(server) {
   registerObserverTool(server, 'chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', async () => {
     try { return jsonResult(await core.getState()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'chart_save_existing_scoped_v2', 'Save one exact existing chart after dual identity, pane capacity, and indicator parity checks', async (input) => {
+    try { return jsonResult(await saveExistingChartScopedV2(input)); }
+    catch (err) { return saveErrorResult(err); }
   });
 
   registerObserverTool(server, 'chart_set_symbol', 'Change the chart symbol', async ({ symbol }) => {

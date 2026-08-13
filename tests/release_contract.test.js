@@ -80,6 +80,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'indicator_remove_scoped',
     'pane_probe_layout_capability',
     'chart_get_state',
+    'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
   ]);
@@ -93,12 +94,14 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     indicator_apply_scoped: classifications.indicator_apply_scoped,
     indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
     indicator_remove_scoped: classifications.indicator_remove_scoped,
+    chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
     indicator_apply_scoped: 'chart_mutation',
     indicator_update_settings_scoped: 'chart_mutation',
     indicator_remove_scoped: 'chart_mutation',
+    chart_save_existing_scoped_v2: 'chart_mutation',
   });
 
   for (const capability of observerCapabilityManifest.capabilities) {
@@ -268,6 +271,16 @@ test('observer result fixtures satisfy registered output schemas', () => {
       observations: [],
     },
     chart_get_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [{ id: 'study-1', name: 'Volume' }] },
+    chart_save_existing_scoped_v2: {
+      success: true,
+      save_version: 'chart-save-existing-scoped-v2',
+      profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x',
+      canonical_url: 'https://www.tradingview.com/chart/x/',
+      workspace_layout_id: '8', saved_layout_uid: 'x', pane_count: 1,
+      indicator_parity_sha256: 'a'.repeat(64), saved_existing: true,
+      mutations_performed: true, save_invoked: true, effect_state: 'confirmed',
+      effect_phase: 'post-save-verification', save_callback_confirmed: true, retry_safe: true,
+    },
     chart_set_symbol: { success: true, symbol: 'AAPL', chart_ready: true },
     chart_set_timeframe: { success: true, timeframe: '60', chart_ready: true },
   };
