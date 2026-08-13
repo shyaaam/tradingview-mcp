@@ -51,6 +51,28 @@ const scopedExistingChartSaveOutput = {
   retry_safe: z.literal(true),
 };
 
+const savedLayoutIdentityInput = {
+  profile_id: z.string().min(1),
+  tab_index: z.coerce.number().int().nonnegative(),
+  chart_target_id: z.string().min(1),
+  expected_chart_id: z.string().min(1),
+  expected_workspace_layout_id: z.string().min(1),
+  expected_pane_count: z.coerce.number().int().positive().max(16),
+};
+
+const savedLayoutIdentityOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('chart-saved-layout-identity-v1'),
+  profile_id: z.string().min(1),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  canonical_url: z.string().url(),
+  tab_index: z.number().int().nonnegative(),
+  workspace_layout_id: z.string().min(1),
+  saved_layout_uid: z.string().min(1),
+  pane_count: z.number().int().positive().max(16),
+};
+
 const indicatorEvidence = z.object({
   indicator_id: z.string().min(1),
   entity_id: z.string().min(1),
@@ -406,6 +428,11 @@ export const observerToolDefinitions = Object.freeze({
       chartType: z.number(),
       studies: z.array(z.object({ id: z.string(), name: z.string() })),
     },
+  },
+  chart_saved_layout_identity: {
+    classification: 'read_only',
+    inputSchema: savedLayoutIdentityInput,
+    outputSchema: savedLayoutIdentityOutput,
   },
   chart_save_existing_scoped_v2: {
     classification: 'chart_mutation',

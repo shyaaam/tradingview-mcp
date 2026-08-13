@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/chart.js';
+import { readSavedLayoutIdentityV1 } from '../core/chart-saved-layout-identity.js';
 import { saveExistingChartScopedV2 } from '../core/chart-save.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
@@ -19,6 +20,11 @@ function saveErrorResult(error) {
 export function registerChartTools(server) {
   registerObserverTool(server, 'chart_get_state', 'Get current chart state (symbol, timeframe, chart type, indicators)', async () => {
     try { return jsonResult(await core.getState()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'chart_saved_layout_identity', 'Read exact saved-layout UID for one prepared existing chart', async (input) => {
+    try { return jsonResult(await readSavedLayoutIdentityV1(input)); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

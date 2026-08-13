@@ -80,6 +80,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'indicator_remove_scoped',
     'pane_probe_layout_capability',
     'chart_get_state',
+    'chart_saved_layout_identity',
     'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
@@ -94,6 +95,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     indicator_apply_scoped: classifications.indicator_apply_scoped,
     indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
     indicator_remove_scoped: classifications.indicator_remove_scoped,
+    chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
   }, {
     pane_indicator_signatures: 'read_only',
@@ -101,6 +103,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     indicator_apply_scoped: 'chart_mutation',
     indicator_update_settings_scoped: 'chart_mutation',
     indicator_remove_scoped: 'chart_mutation',
+    chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
   });
 
@@ -271,6 +274,13 @@ test('observer result fixtures satisfy registered output schemas', () => {
       observations: [],
     },
     chart_get_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [{ id: 'study-1', name: 'Volume' }] },
+    chart_saved_layout_identity: {
+      success: true,
+      schema_version: 'chart-saved-layout-identity-v1',
+      profile_id: 'profile-a', chart_target_id: 'target-1', chart_id: 'x',
+      canonical_url: 'https://www.tradingview.com/chart/x/', tab_index: 0,
+      workspace_layout_id: '8', saved_layout_uid: 'layout-uid', pane_count: 8,
+    },
     chart_save_existing_scoped_v2: {
       success: true,
       save_version: 'chart-save-existing-scoped-v2',
