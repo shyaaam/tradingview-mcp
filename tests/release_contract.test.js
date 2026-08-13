@@ -219,6 +219,8 @@ test('observer result fixtures satisfy registered output schemas', () => {
       candles: [
         { opened_at: '2026-07-17T08:00:00Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' },
       ],
+      study_telemetry_state: 'available',
+      study_telemetry_reason: null,
       studies: [{ study_id: 'study-rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
     },
     tab_list: tabs,

@@ -197,6 +197,8 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
           symbol: 'BITSTAMP:BTCUSDT',
           timeframe: '60',
           candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+          study_telemetry_state: 'available',
+          study_telemetry_reason: null,
           studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
         };
       },
@@ -219,11 +221,52 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
     requested_count: 2,
     captured_at: '2026-07-17T10:00:01.000Z',
     candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+    study_telemetry_state: 'available',
+    study_telemetry_reason: null,
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
   assert.match(expressions[1], /cwc\.getAll\(\)/);
   assert.match(expressions[1], /all\[paneIndex\]/);
   assert.doesNotMatch(expressions[1], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+});
+
+test('exact pane telemetry keeps OHLCV success when study enrichment is unavailable', async () => {
+  setObserverSession(session);
+  const result = await capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 3,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    count: 1,
+    _deps: {
+      listTabs: async () => ({
+        success: true,
+        tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
+      }),
+      evaluateBound: async (expression) => expression.includes('layout_id')
+        ? { layout_id: '8' }
+        : {
+          pane_index: 3,
+          pane_count: 8,
+          symbol: 'BITSTAMP:BTCUSDT',
+          timeframe: '60',
+          candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+          study_telemetry_state: 'unavailable',
+          study_telemetry_reason: 'missing-or-ambiguous',
+          studies: [],
+        },
+      now: () => new Date('2026-07-17T10:00:01Z'),
+    },
+  });
+
+  assert.equal(result.study_telemetry_state, 'unavailable');
+  assert.equal(result.study_telemetry_reason, 'missing-or-ambiguous');
+  assert.deepEqual(result.studies, []);
+  assert.equal(result.candles[0].close, '105');
 });
 
 test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {

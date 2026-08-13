@@ -253,39 +253,54 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
       if (candles.length === 0) return { error: 'Exact requested pane has no bounded OHLCV candles.' };
 
       var sources = model && typeof model.dataSources === 'function' ? model.dataSources() : null;
-      if (!Array.isArray(sources)) return { error: 'Exact requested pane study telemetry is unavailable.' };
+      var studyTelemetryState = 'available';
+      var studyTelemetryReason = null;
       var studies = [];
-      var studyIds = Object.create(null);
-      for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
-        var source = sources[sourceIndex];
-        if (!source || typeof source.metaInfo !== 'function') continue;
-        var meta = source.metaInfo();
-        var studyId = String(meta && (meta.id || '')).trim();
-        var studyName = String(meta && (meta.description || meta.shortDescription || meta.id || '')).trim();
-        if (!studyId || !studyName || studyIds[studyId]) return { error: 'Exact requested pane study telemetry is missing or ambiguous.' };
-        studyIds[studyId] = true;
-        var values = [];
-        try {
-          var view = source.dataWindowView && source.dataWindowView();
-          var items = view && view.items && view.items();
-          var valueKeys = Object.create(null);
-          for (var valueIndex = 0; items && valueIndex < items.length; valueIndex++) {
-            var item = items[valueIndex];
-            if (!item || !item._title) continue;
-            var raw = item._value;
-            if (raw === undefined || raw === null || raw === '∅') continue;
-            var fieldLabel = String(item._title);
-            var valueKey = 'data-window:' + fieldLabel;
-            if (valueKeys[valueKey]) return { error: 'Exact requested pane study telemetry is missing or ambiguous.' };
-            valueKeys[valueKey] = true;
-            values.push({ source_label: 'data-window', field_label: fieldLabel, raw_value: String(raw) });
+      if (!Array.isArray(sources)) {
+        studyTelemetryState = 'unavailable';
+        studyTelemetryReason = 'missing-or-ambiguous';
+      } else {
+        var studyIds = Object.create(null);
+        var studyTelemetryFailed = false;
+        for (var sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+          var source = sources[sourceIndex];
+          if (!source || typeof source.metaInfo !== 'function') continue;
+          var meta;
+          try { meta = source.metaInfo(); } catch (_) { studyTelemetryFailed = true; break; }
+          var studyId = String(meta && (meta.id || '')).trim();
+          var studyName = String(meta && (meta.description || meta.shortDescription || meta.id || '')).trim();
+          if (!studyName) continue;
+          if (!studyId || studyIds[studyId]) { studyTelemetryFailed = true; break; }
+          studyIds[studyId] = true;
+          var values = [];
+          try {
+            var view = source.dataWindowView && source.dataWindowView();
+            var items = view && view.items && view.items();
+            var valueKeys = Object.create(null);
+            for (var valueIndex = 0; items && valueIndex < items.length; valueIndex++) {
+              var item = items[valueIndex];
+              if (!item || !item._title) continue;
+              var raw = item._value;
+              if (raw === undefined || raw === null || raw === '∅') continue;
+              var fieldLabel = String(item._title);
+              var valueKey = 'data-window:' + fieldLabel;
+              if (valueKeys[valueKey]) { studyTelemetryFailed = true; break; }
+              valueKeys[valueKey] = true;
+              values.push({ source_label: 'data-window', field_label: fieldLabel, raw_value: String(raw) });
+            }
+          } catch (_) {
+            studyTelemetryFailed = true;
           }
-        } catch (_) {
-          return { error: 'Exact requested pane study telemetry is unavailable.' };
+          if (studyTelemetryFailed) break;
+          studies.push({ study_id: studyId, study_name: studyName, values: values });
         }
-        studies.push({ study_id: studyId, study_name: studyName, values: values });
+        if (studyTelemetryFailed) {
+          studyTelemetryState = 'unavailable';
+          studyTelemetryReason = 'missing-or-ambiguous';
+          studies = [];
+        }
       }
-      return { pane_index: paneIndex, pane_count: paneCount, symbol: actualSymbol, timeframe: actualTimeframe, candles: candles, studies: studies };
+      return { pane_index: paneIndex, pane_count: paneCount, symbol: actualSymbol, timeframe: actualTimeframe, candles: candles, study_telemetry_state: studyTelemetryState, study_telemetry_reason: studyTelemetryReason, studies: studies };
     })()
   `);
   if (!result || result.error) throw new Error(result?.error || 'Exact pane telemetry/OHLCV extraction failed.');
@@ -296,7 +311,16 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
   const capturedAt = (_deps?.now || (() => new Date()))().toISOString();
   if (!ISO_DATE_TIME.test(capturedAt)) throw new Error('Capture timestamp is invalid.');
   const candles = normalizePaneCandles(result.candles);
-  const studies = normalizePaneStudies(result.studies);
+  if (result.study_telemetry_state !== 'available' && result.study_telemetry_state !== 'unavailable') {
+    throw new Error('Exact pane study telemetry state is incompatible.');
+  }
+  if (result.study_telemetry_state === 'available' && result.study_telemetry_reason !== null) {
+    throw new Error('Exact pane study telemetry reason is incompatible.');
+  }
+  if (result.study_telemetry_state === 'unavailable' && result.study_telemetry_reason !== 'missing-or-ambiguous') {
+    throw new Error('Exact pane study telemetry reason is incompatible.');
+  }
+  const studies = result.study_telemetry_state === 'available' ? normalizePaneStudies(result.studies) : [];
   return {
     success: true,
     extraction_version: OBSERVER_PANE_TELEMETRY_OHLCV_VERSION,
@@ -312,6 +336,8 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     requested_count: scope.count,
     captured_at: capturedAt,
     candles,
+    study_telemetry_state: result.study_telemetry_state,
+    study_telemetry_reason: result.study_telemetry_reason,
     studies,
   };
 }
