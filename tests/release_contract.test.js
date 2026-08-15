@@ -70,6 +70,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_capture_candle',
     'tv_observer_capture_telemetry_ohlcv',
     'tv_observer_capture_pane_telemetry_ohlcv',
+    'tv_observer_capture_named_plot_telemetry',
     'tab_list',
     'tab_new',
     'tab_switch',
@@ -99,6 +100,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+    tv_observer_capture_named_plot_telemetry: classifications.tv_observer_capture_named_plot_telemetry,
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
@@ -108,6 +110,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    tv_observer_capture_named_plot_telemetry: 'read_only',
   });
 
   for (const capability of observerCapabilityManifest.capabilities) {
@@ -222,6 +225,15 @@ test('observer result fixtures satisfy registered output schemas', () => {
       study_telemetry_state: 'available',
       study_telemetry_reason: null,
       studies: [{ study_id: 'study-rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
+    },
+    tv_observer_capture_named_plot_telemetry: {
+      success: true,
+      extraction_version: 'observer-named-plot-telemetry-v1',
+      profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', layout_id: '8',
+      tab_index: 0, pane_index: 0, pane_count: 8, symbol: 'AAPL', timeframe: '60',
+      study_id: 'study-telemetry', study_name: 'Telemetry Companion',
+      plots: [{ plot_name: 'TVOBS_HTF_V1_PVP_RAIL', raw_value: '24123.5' }],
+      captured_at: '2026-07-17T10:00:01Z',
     },
     tab_list: tabs,
     tab_new: { ...tabs, action: 'new_tab_opened' },

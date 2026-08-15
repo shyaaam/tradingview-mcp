@@ -1,5 +1,6 @@
 import { jsonResult } from './_format.js';
 import * as core from '../core/observer-evidence.js';
+import { captureNamedPlotTelemetry } from '../core/observer-named-plot.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerObserverEvidenceTools(server) {
@@ -17,6 +18,10 @@ export function registerObserverEvidenceTools(server) {
   });
   registerObserverTool(server, 'tv_observer_capture_pane_telemetry_ohlcv', 'Capture bounded OHLCV and optional same-pane study telemetry from one exact pane without focus or mutation.', async ({ ...args }) => {
     try { return jsonResult(await core.capturePaneTelemetryOhlcv(args)); }
+    catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
+  });
+  registerObserverTool(server, 'tv_observer_capture_named_plot_telemetry', 'Capture exact named plot values from one exact pane and study without focus or mutation.', async ({ ...args }) => {
+    try { return jsonResult(await captureNamedPlotTelemetry(args)); }
     catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
   });
 }
