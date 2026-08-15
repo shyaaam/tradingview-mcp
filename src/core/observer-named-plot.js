@@ -87,14 +87,16 @@ export async function captureNamedPlotTelemetry(input = {}) {
         if (!requestedSet[fieldLabel]) continue;
         if (Object.prototype.hasOwnProperty.call(found, fieldLabel)) return { error: 'Requested study plot is duplicated or ambiguous.' };
         var raw = item._value;
-        if (raw === undefined || raw === null || raw === '∅') return { error: 'Requested study plot value is missing or ambiguous.' };
-        found[fieldLabel] = String(raw);
+        if (raw === undefined || raw === null) return { error: 'Requested study plot value is missing or ambiguous.' };
+        found[fieldLabel] = raw === '∅'
+          ? { raw_value: null, value_state: 'not-present' }
+          : { raw_value: String(raw), value_state: 'present' };
       }
       var plots = [];
       for (var outputIndex = 0; outputIndex < requested.length; outputIndex++) {
         var plotName = requested[outputIndex];
-        if (!Object.prototype.hasOwnProperty.call(found, plotName) || !found[plotName]) return { error: 'Requested study plot is missing or ambiguous.' };
-        plots.push({ plot_name: plotName, raw_value: found[plotName] });
+        if (!Object.prototype.hasOwnProperty.call(found, plotName)) return { error: 'Requested study plot is missing or ambiguous.' };
+        plots.push({ plot_name: plotName, ...found[plotName] });
       }
       return { pane_index: paneIndex, pane_count: paneCount, symbol: actualSymbol, timeframe: actualTimeframe, study_id: ${JSON.stringify(scope.study_id)}, study_name: ${JSON.stringify(scope.study_name)}, plots: plots };
     })()
@@ -111,10 +113,14 @@ export async function captureNamedPlotTelemetry(input = {}) {
   const plots = result.plots.map((plot, index) => {
     if (!plot || typeof plot !== 'object' || Array.isArray(plot)) throw new Error(`plots[${index}] is incompatible.`);
     const plotName = String(plot.plot_name || '').trim();
-    const rawValue = String(plot.raw_value ?? '');
-    if (!requestedNames.has(plotName) || seenNames.has(plotName) || !rawValue) throw new Error(`plots[${index}] is missing or ambiguous.`);
+    const rawValue = plot.raw_value === null ? null : String(plot.raw_value ?? '');
+    const valueState = String(plot.value_state || '').trim();
+    if (!requestedNames.has(plotName) || seenNames.has(plotName)
+      || !['present', 'not-present'].includes(valueState)
+      || (valueState === 'present' && !rawValue)
+      || (valueState === 'not-present' && rawValue !== null)) throw new Error(`plots[${index}] is missing or ambiguous.`);
     seenNames.add(plotName);
-    return { plot_name: plotName, raw_value: rawValue };
+    return { plot_name: plotName, raw_value: rawValue, value_state: valueState };
   });
   if (seenNames.size !== requestedNames.size) throw new Error('Exact named-plot telemetry result is incomplete or ambiguous.');
   const capturedAt = (_deps?.now || (() => new Date()))().toISOString();

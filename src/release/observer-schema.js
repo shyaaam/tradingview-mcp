@@ -416,7 +416,8 @@ export const observerToolDefinitions = Object.freeze({
       study_name: z.string().min(1),
       plots: z.array(z.object({
         plot_name: z.string().regex(/^TVOBS_[A-Z0-9]+_V1_[A-Z0-9_]+$/),
-        raw_value: z.string().min(1),
+        raw_value: z.string().min(1).nullable(),
+        value_state: z.enum(['present', 'not-present']),
       })).min(1).max(64),
       captured_at: z.string().datetime(),
     },
