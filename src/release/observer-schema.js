@@ -749,6 +749,8 @@ export const observerToolDefinitions = Object.freeze({
         close: z.string().min(1),
         volume: z.string().min(1).nullable(),
       })).min(1).max(500),
+      study_telemetry_state: z.enum(['available', 'unavailable']),
+      study_telemetry_reason: z.enum(['missing-or-ambiguous']).nullable(),
       studies: z.array(z.object({
         study_id: z.string().min(1),
         study_name: z.string().min(1),

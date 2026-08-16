@@ -219,6 +219,8 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
     requested_count: 2,
     captured_at: '2026-07-17T10:00:01.000Z',
     candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+    study_telemetry_state: 'available',
+    study_telemetry_reason: null,
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
   assert.match(expressions[1], /cwc\.getAll\(\)/);

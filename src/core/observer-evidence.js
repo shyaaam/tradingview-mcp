@@ -313,6 +313,8 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     requested_count: scope.count,
     captured_at: capturedAt,
     candles,
+    study_telemetry_state: studies.length > 0 ? 'available' : 'unavailable',
+    study_telemetry_reason: studies.length > 0 ? null : 'missing-or-ambiguous',
     studies,
   };
 }
