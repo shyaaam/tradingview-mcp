@@ -6,6 +6,27 @@ import { requireObserverSession } from '../connection.js';
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
 
+const scopedIndicatorMutationOutput = {
+  success: z.literal(true),
+  profile_id: z.string().min(1),
+  tab_index: z.number().int().nonnegative(),
+  pane_index: z.number().int().nonnegative(),
+  indicator_name: z.string().min(1),
+  action: z.enum(['apply_indicator', 'update_indicator_settings', 'remove_indicator']),
+  applied: z.literal(true),
+  entity_id: z.string().nullable(),
+  previous_settings: jsonObject,
+  new_settings: jsonObject,
+  previous_settings_source: z.string().min(1),
+  new_settings_source: z.string().min(1),
+  settings_unavailable_reason: jsonObject,
+  post_mutation_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+  post_mutation_indicator: jsonObject.nullable(),
+  post_mutation_indicator_count: z.number().int().nonnegative(),
+  focus: jsonObject,
+  message: z.string().min(1),
+};
+
 const tabShape = {
   index: z.number(),
   id: z.string(),
@@ -888,6 +909,53 @@ export const observerToolDefinitions = Object.freeze({
       mutations_performed: z.literal(true),
       focus: jsonObject,
     },
+  },
+  indicator_apply_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+      tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+      pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+      indicator_name: z.string().describe('TradingView-recognized study name/title to apply, including custom/private confluence indicators'),
+      expected_chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_layout_id: z.string().min(1),
+      expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+      expected_entity_id: z.string().min(1).optional(),
+      expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
+    },
+    outputSchema: scopedIndicatorMutationOutput,
+  },
+  indicator_update_settings_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+      tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+      pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+      indicator_name: z.string().describe('Existing indicator/study name/title to update, including custom/private confluence indicators'),
+      expected_chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_layout_id: z.string().min(1),
+      expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+      expected_entity_id: z.string().min(1).optional(),
+      expected_settings: z.string().describe('JSON object of expected custom indicator settings/inputs, e.g. \'{"length":14}\''),
+    },
+    outputSchema: scopedIndicatorMutationOutput,
+  },
+  indicator_remove_scoped: {
+    classification: 'chart_mutation',
+    inputSchema: {
+      profile_id: z.string().describe('Runtime/browser profile id supplied by the orchestrator'),
+      tab_index: z.coerce.number().int().nonnegative().describe('TradingView chart tab index'),
+      pane_index: z.coerce.number().int().nonnegative().describe('TradingView pane index'),
+      indicator_name: z.string().describe('Exact TradingView study name/title'),
+      expected_chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_layout_id: z.string().min(1),
+      expected_pane_signature: z.string().regex(/^[0-9a-f]{64}$/i),
+      expected_entity_id: z.string().min(1),
+    },
+    outputSchema: scopedIndicatorMutationOutput,
   },
   chart_get_state: {
     classification: 'read_only',
