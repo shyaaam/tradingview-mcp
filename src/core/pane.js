@@ -915,7 +915,9 @@ export async function setSymbol({ index, symbol }) {
   // Now set symbol on the now-active chart and wait for chart state readback.
   const result = await evaluateAsync(`
     (async function() {
-      var chart = window.TradingViewApi._activeChartWidgetWV.value();
+      var collection = window.TradingViewApi._chartWidgetCollection;
+      var all = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
+      var chart = all[${idx}];
       var expected = String(${safeString(symbol)}).trim().toUpperCase();
       var deadline = Date.now() + 5000;
       function observedSymbol() {
