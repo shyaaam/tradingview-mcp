@@ -912,16 +912,42 @@ export async function setSymbol({ index, symbol }) {
   await focus({ index: idx });
   await new Promise(r => setTimeout(r, 300));
 
-  // Now set symbol on the now-active chart
-  await evaluateAsync(`
-    (function() {
+  // Now set symbol on the now-active chart and wait for chart state readback.
+  const result = await evaluateAsync(`
+    (async function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value();
-      return new Promise(function(resolve) {
-        chart.setSymbol(${safeString(symbol)}, {});
-        setTimeout(resolve, 500);
-      });
+      var expected = String(${safeString(symbol)}).trim().toUpperCase();
+      var deadline = Date.now() + 5000;
+      function observedSymbol() {
+        try {
+          var model = chart && typeof chart.model === 'function' ? chart.model() : null;
+          var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
+          return series && typeof series.symbol === 'function' ? String(series.symbol() || '').trim() : '';
+        } catch (e) {
+          return '';
+        }
+      }
+      function matchesExpected(observed) {
+        var normalized = observed.toUpperCase();
+        return expected.includes(':')
+          ? normalized === expected
+          : normalized === expected || normalized.endsWith(':' + expected);
+      }
+      if (!chart || typeof chart.setSymbol !== 'function') {
+        return { success: false, error: 'Active chart symbol mutation is unavailable.' };
+      }
+      chart.setSymbol(${safeString(symbol)}, {});
+      while (Date.now() <= deadline) {
+        var observed = observedSymbol();
+        if (matchesExpected(observed)) return { success: true, symbol: observed };
+        await new Promise(function(resolve) { setTimeout(resolve, 200); });
+      }
+      return { success: false, error: 'Pane symbol readback did not reach requested symbol.', symbol: observedSymbol() };
     })()
   `);
+  if (!result || result.success !== true) {
+    throw new Error(result?.error || 'Pane symbol readback failed.');
+  }
 
   return { success: true, index: idx, symbol };
 }
