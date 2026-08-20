@@ -22,7 +22,7 @@ export async function prepare(input = {}) {
   if (!profile) throw new Error(`Configured CloakBrowser profile not found: ${profileId}`);
 
   const profileStatus = String(profile.status || profile.state || '').toLowerCase();
-  if (restart) {
+  if (restart && ['running', 'active'].includes(profileStatus)) {
     await fetchJson(new URL(`profiles/${encodeURIComponent(profileId)}/stop`, `${managerBaseUrl}/`).toString(), {
       method: 'POST',
     });

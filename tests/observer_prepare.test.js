@@ -194,6 +194,56 @@ test('observer preparation launches exact stopped profile without fallback', asy
   assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
 });
 
+test('observer restart launches stopped profile without calling stop on an already stopped profile', async () => {
+  const calls = [];
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    calls.push({ url, method: init.method || 'GET' });
+    if (url === `${BASE_URL}/profiles`) return response([{ id: PROFILE_ID, status: 'stopped' }]);
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+      return response({ status: 'running', cdp_url: `${BASE_URL}/profiles/${PROFILE_ID}/cdp` });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const result = await prepare({ profile_id: PROFILE_ID, restart: true });
+  assert.equal(result.restart_requested, true);
+  assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
+  assert.equal(calls.some((call) => call.url.endsWith(`/profiles/${PROFILE_ID}/launch`)), true);
+});
+
+test('observer restart stops active profile before relaunching exact profile', async () => {
+  const calls = [];
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    calls.push({ url, method: init.method || 'GET' });
+    if (url === `${BASE_URL}/profiles`) return response([{ id: PROFILE_ID, status: 'running' }]);
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/stop`) return response({ status: 'stopped' });
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+      return response({ status: 'running', cdp_url: `${BASE_URL}/profiles/${PROFILE_ID}/cdp` });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  await prepare({ profile_id: PROFILE_ID, restart: true });
+  const stopIndex = calls.findIndex((call) => call.url.endsWith('/stop'));
+  const launchIndex = calls.findIndex((call) => call.url.endsWith(`/profiles/${PROFILE_ID}/launch`));
+  assert.ok(stopIndex >= 0);
+  assert.ok(launchIndex > stopIndex);
+});
+
 function response(value) {
   return new Response(JSON.stringify(value), {
     status: 200,
