@@ -253,7 +253,7 @@ test('v2 scoped save binds workspace layout and saved UID independently', async 
         },
         evaluateAsync: async (expression) => {
           saveExpression = expression;
-          return { success: true, uid: 'chart-x' };
+          return { success: true, explicit_uid: 'chart-x' };
         },
         inspectInventory: async () => ({ success: true, pane_count: 2, panes: [
           { index: 0, indicators: [{ get_study_by_id_resolves: true }] },
@@ -270,6 +270,71 @@ test('v2 scoped save binds workspace layout and saved UID independently', async 
     assert.equal(result.effect_state, 'confirmed');
     assert.match(saveExpression, /saveExistentChart/);
     assert.doesNotMatch(saveExpression, /saveNewChart|saveChartAs|renameChart|setLayout/);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 scoped save accepts direct or absent callback UID after exact post verification', async () => {
+  const parityHash = derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes });
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api', profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp', chartTargetId: 'target-a', chartTargetUrl: targetUrl,
+  });
+  try {
+    for (const callbackResult of [
+      { success: true, explicit_uid: 'chart-x' },
+      { success: true, explicit_uid: null },
+    ]) {
+      const result = await saveExistingChartScopedV2({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', expected_chart_id: 'chart-x',
+        expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+        expected_indicator_parity_hash: parityHash,
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'chart-x', pane_count: 2, chart_available: true, save_service_available: true, save_existent_chart_type: 'function' }),
+          evaluateAsync: async () => callbackResult,
+          inspectInventory: async () => ({ success: true, pane_count: 2, panes: [{ index: 0, indicators: [{ get_study_by_id_resolves: true }] }, { index: 1, indicators: [{ get_study_by_id_resolves: true }] }] }),
+          inspectSignatures: async () => signatures,
+        },
+      });
+      assert.equal(result.saved_layout_uid, 'chart-x');
+      assert.equal(result.effect_state, 'confirmed');
+    }
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('v2 scoped save rejects explicit conflicting callback UID as ambiguous', async () => {
+  const parityHash = derivePaneIndicatorParityHash({ paneCapacity: 2, canonicalPaneIndex: 0, panes: signatures.panes });
+  setObserverSession({
+    managerBaseUrl: 'http://127.0.0.1:8080/api', profileId: 'profile-a',
+    cdpUrl: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp', chartTargetId: 'target-a', chartTargetUrl: targetUrl,
+  });
+  try {
+    await assert.rejects(
+      saveExistingChartScopedV2({
+        profile_id: 'profile-a', tab_index: 0, chart_target_id: 'target-a', expected_chart_id: 'chart-x',
+        expected_workspace_layout_id: '8', expected_saved_layout_uid: 'chart-x', expected_pane_count: 2,
+        expected_indicator_parity_hash: parityHash,
+        _deps: {
+          listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-a', chart_id: 'chart-x', url: targetUrl }] }),
+          getBoundClient: async () => ({}),
+          evaluate: async () => ({ href: targetUrl, canonical_url: targetUrl, chart_id: 'chart-x', workspace_layout_id: '8', saved_layout_uid: 'chart-x', pane_count: 2, chart_available: true, save_service_available: true, save_existent_chart_type: 'function' }),
+          evaluateAsync: async () => ({ success: true, explicit_uid: 'other-chart' }),
+          inspectInventory: async () => ({ success: true, pane_count: 2, panes: [{ index: 0, indicators: [{ get_study_by_id_resolves: true }] }, { index: 1, indicators: [{ get_study_by_id_resolves: true }] }] }),
+          inspectSignatures: async () => signatures,
+        },
+      }),
+      (error) => {
+        assert.equal(error.name, 'ScopedSaveEffectError');
+        assert.equal(error.effectState, 'ambiguous');
+        assert.equal(error.phase, 'save-callback');
+        return true;
+      },
+    );
   } finally {
     clearObserverSession();
   }
