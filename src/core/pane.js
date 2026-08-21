@@ -905,15 +905,21 @@ export async function probeLayoutCapability({
   };
 }
 
-export async function setSymbol({ index, symbol }) {
+export async function setSymbol({ index, symbol, _deps } = {}) {
   const idx = Number(index);
+  if (!Number.isSafeInteger(idx) || idx < 0) {
+    throw new Error('Pane index must be a non-negative integer.');
+  }
 
   // Focus the target pane first
-  await focus({ index: idx });
+  await (_deps?.focus ?? focus)({ index: idx });
   await new Promise(r => setTimeout(r, 300));
 
-  // Now set symbol on the now-active chart and wait for chart state readback.
-  const result = await evaluateAsync(`
+  // Chart symbol synchronization can be enabled in the saved workspace. The
+  // public chart.setSymbol() path therefore changes every linked pane even
+  // after focusing one pane. Use TradingView's explicit chart-list setter and
+  // fail closed when that scoped internal capability is unavailable.
+  const result = await (_deps?.evaluateAsync ?? evaluateAsync)(`
     (async function() {
       var collection = window.TradingViewApi._chartWidgetCollection;
       var all = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
@@ -935,16 +941,36 @@ export async function setSymbol({ index, symbol }) {
           ? normalized === expected
           : normalized === expected || normalized.endsWith(':' + expected);
       }
-      if (!chart || typeof chart.setSymbol !== 'function') {
-        return { success: false, error: 'Active chart symbol mutation is unavailable.' };
+      if (!chart || !collection || typeof collection._setSymbolImpl !== 'function') {
+        return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
-      chart.setSymbol(${safeString(symbol)}, {});
+      var beforeSymbols = all.map(observedSymbol);
+      await collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
+        var afterSymbols = all.map(observedSymbol);
+        var siblingDrift = afterSymbols.some(function(value, paneIndex) {
+          return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
+        });
+        if (siblingDrift) {
+          return {
+            success: false,
+            error: 'Scoped pane symbol mutation changed another pane.',
+            symbol: observed,
+            before_symbols: beforeSymbols,
+            after_symbols: afterSymbols,
+          };
+        }
         if (matchesExpected(observed)) return { success: true, symbol: observed };
         await new Promise(function(resolve) { setTimeout(resolve, 200); });
       }
-      return { success: false, error: 'Pane symbol readback did not reach requested symbol.', symbol: observedSymbol() };
+      return {
+        success: false,
+        error: 'Pane symbol readback did not reach requested symbol.',
+        symbol: observedSymbol(),
+        before_symbols: beforeSymbols,
+        after_symbols: all.map(observedSymbol),
+      };
     })()
   `);
   if (!result || result.success !== true) {
