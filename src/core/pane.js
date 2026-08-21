@@ -969,8 +969,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         return { success: false, error: 'Scoped pane symbol watcher isolation is unavailable.' };
       }
       var linking = window.TradingViewApi && window.TradingViewApi.linking;
-      if (!linking || typeof linking.muteGroup !== 'function') {
+      if (!linking || typeof linking.muteGroup !== 'function'
+        || typeof linking._updateLinkingGroups !== 'function') {
         return { success: false, error: 'Scoped pane symbol link mute is unavailable.' };
+      }
+      function refreshLinkingGroups() {
+        if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
+          collection._updateLinkingGroupCharts();
+        }
+        linking._updateLinkingGroups();
       }
       var numericGroups = all.map(function(candidate) {
         try {
@@ -993,9 +1000,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         groups.forEach(function(group, paneIndex) {
           group.property.setValue(isolationGroup + paneIndex);
         });
-        if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
-          collection._updateLinkingGroupCharts();
-        }
+        refreshLinkingGroups();
         watchersDetached = true;
         symbolWatchers.forEach(function(entry) {
           entry.watcher._listeners = [];
@@ -1019,11 +1024,16 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
             groups.forEach(function(group) {
               group.property.setValue(group.value);
             });
-            if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
-              collection._updateLinkingGroupCharts();
-            }
+            refreshLinkingGroups();
           } catch (error) {
             return { success: false, error: 'Scoped pane symbol linking-group restoration failed.' };
+          }
+        }
+        if (groupsChanged && effectInvoked) {
+          try {
+            refreshLinkingGroups();
+          } catch (error) {
+            return { success: false, error: 'Scoped pane symbol linking-group refresh failed.' };
           }
         }
         if (linkingMuted) {
