@@ -1020,7 +1020,6 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         series._symbolIntervalChanged._listeners = [];
         effectInvoked = true;
         symbolProperty.setValueSilently(${safeString(symbol)});
-        chart._symbolWV._value = ${safeString(symbol)};
         await series._applySymbolParamsChanges({
           symbolChanged: true,
           intervalChanged: false,
