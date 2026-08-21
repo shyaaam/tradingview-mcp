@@ -19,6 +19,10 @@ describe('pane_set_symbol scoped mutation', () => {
 
     assert.deepEqual(result, { success: true, index: 2, symbol: 'BTCUSDT' });
     assert.equal(expressions.length, 1);
+    assert.match(expressions[0], /function observedSymbol\(candidate\)/u);
+    assert.doesNotMatch(expressions[0], /function observedSymbol\(\)/u);
+    assert.match(expressions[0], /beforeSymbols = all\.map\(function\(candidate\) \{ return observedSymbol\(candidate\); \}\)/u);
+    assert.match(expressions[0], /var observed = observedSymbol\(chart\)/u);
     assert.match(expressions[0], /linkingGroupIndex\(\)/u);
     assert.match(expressions[0], /groups\.forEach\(function\(group, paneIndex\)/u);
     assert.match(expressions[0], /group\.property\.setValue\(isolationGroup \+ paneIndex\)/u);
