@@ -953,7 +953,12 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
+      var symbolListeners = chart._symbolWV._listeners;
+      if (!Array.isArray(symbolListeners)) {
+        return { success: false, error: 'Scoped pane symbol mutation listeners are unavailable.' };
+      }
       try {
+        chart._symbolWV._listeners = [];
         symbolProperty.setValueSilently(${safeString(symbol)});
         chart._symbolWV._value = ${safeString(symbol)};
         await series._applySymbolParamsChanges({
@@ -965,6 +970,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
+      } finally {
+        chart._symbolWV._listeners = symbolListeners;
       }
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
