@@ -926,11 +926,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       var chart = all[${idx}];
       var expected = String(${safeString(symbol)}).trim().toUpperCase();
       var deadline = Date.now() + 5000;
-      function observedSymbol() {
+      function observedSymbol(candidate) {
         try {
-          var model = chart && typeof chart.model === 'function' ? chart.model() : null;
-          var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-          return series && typeof series.symbol === 'function' ? String(series.symbol() || '').trim() : '';
+          var candidateModel = candidate && typeof candidate.model === 'function' ? candidate.model() : null;
+          var candidateSeries = candidateModel && typeof candidateModel.mainSeries === 'function'
+            ? candidateModel.mainSeries()
+            : null;
+          return candidateSeries && typeof candidateSeries.symbol === 'function'
+            ? String(candidateSeries.symbol() || '').trim()
+            : '';
         } catch (e) {
           return '';
         }
@@ -943,15 +947,11 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      var symbolProperty = series && typeof series.properties === 'function'
-        ? series.properties().childs().symbol
-        : null;
-      if (!chart || !collection || !model || !series || !symbolProperty
-        || typeof symbolProperty.setValueSilently !== 'function'
-        || typeof series._applySymbolParamsChanges !== 'function') {
+      if (!chart || !collection || !model || !series
+        || typeof chart.setSymbol !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
-      var beforeSymbols = all.map(observedSymbol);
+      var beforeSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
       var groups = all.map(function(candidate) {
         try {
           var group = candidate && typeof candidate.linkingGroupIndex === 'function'
@@ -984,6 +984,23 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         }
         linking._updateLinkingGroups();
       }
+      function synchronizeLinkingGroupSymbols() {
+        if (!linking._linkingGroups || typeof linking._linkingGroups.get !== 'function') {
+          return false;
+        }
+        return all.every(function(candidate, paneIndex) {
+          try {
+            var groupIndex = candidate.linkingGroupIndex().value();
+            var group = linking._linkingGroups.get(groupIndex);
+            var watchedSymbol = group && group.watchedSymbol;
+            if (!watchedSymbol || !Object.prototype.hasOwnProperty.call(watchedSymbol, '_value')) return false;
+            watchedSymbol._value = beforeSymbols[paneIndex];
+            return true;
+          } catch (e) {
+            return false;
+          }
+        });
+      }
       var numericGroups = all.map(function(candidate) {
         try {
           var value = candidate.linkingGroupIndex().value();
@@ -1012,6 +1029,13 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
           group.property.setValue(isolationGroup + paneIndex);
         });
         refreshLinkingGroups();
+        // Refresh/rebind can repopulate each group's watcher from the stale
+        // global linking observable. Synchronize after refresh, immediately
+        // before the isolated effect, so unrelated panes retain their actual
+        // pre-effect symbols.
+        if (!synchronizeLinkingGroupSymbols()) {
+          return { success: false, error: 'Scoped pane symbol linking state synchronization is unavailable.' };
+        }
         watchersDetached = true;
         symbolWatchers.forEach(function(entry) {
           entry.watcher._listeners = [];
@@ -1019,16 +1043,11 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         symbolIntervalDetached = true;
         series._symbolIntervalChanged._listeners = [];
         effectInvoked = true;
-        symbolProperty.setValueSilently(${safeString(symbol)});
-        chart._symbolWV._value = ${safeString(symbol)};
-        await series._applySymbolParamsChanges({
-          symbolChanged: true,
-          intervalChanged: false,
-          currencyChanged: false,
-          unitChanged: false,
-          metricChanged: false,
-        });
-        effectAfterSymbols = all.map(observedSymbol);
+        // Use chart's canonical symbol path after isolating every chart
+        // watcher. This keeps chart, model, and series symbol state aligned
+        // without allowing link propagation to reach sibling panes.
+        chart.setSymbol(${safeString(symbol)});
+        effectAfterSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       } finally {
@@ -1069,31 +1088,41 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         }
       }
       while (Date.now() <= deadline) {
-        var observed = observedSymbol();
-        var afterSymbols = all.map(observedSymbol);
+        var observed = observedSymbol(chart);
+        var afterSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
         var siblingDrift = (effectAfterSymbols || []).some(function(value, paneIndex) {
           return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
         }) || afterSymbols.some(function(value, paneIndex) {
           return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
         });
-        if (siblingDrift) {
-          return {
-            success: false,
-            error: 'Scoped pane symbol mutation changed another pane.',
-            symbol: observed,
-            before_symbols: beforeSymbols,
-            after_symbols: afterSymbols,
-          };
+        // TradingView may briefly expose linked-pane propagation while the
+        // isolated target effect settles. Do not classify that transient
+        // state as a committed sibling mutation. Require target success and
+        // sibling restoration in the same authoritative readback instead.
+        if (matchesExpected(observed) && !siblingDrift) {
+          return { success: true, symbol: observed };
         }
-        if (matchesExpected(observed)) return { success: true, symbol: observed };
         await new Promise(function(resolve) { setTimeout(resolve, 200); });
+      }
+      var finalSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
+      var finalSiblingDrift = finalSymbols.some(function(value, paneIndex) {
+        return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
+      });
+      if (finalSiblingDrift) {
+        return {
+          success: false,
+          error: 'Scoped pane symbol mutation changed another pane.',
+          symbol: observedSymbol(chart),
+          before_symbols: beforeSymbols,
+          after_symbols: finalSymbols,
+        };
       }
       return {
         success: false,
         error: 'Pane symbol readback did not reach requested symbol.',
-        symbol: observedSymbol(),
+        symbol: observedSymbol(chart),
         before_symbols: beforeSymbols,
-        after_symbols: all.map(observedSymbol),
+        after_symbols: all.map(function(candidate) { return observedSymbol(candidate); }),
       };
     })()
   `);
