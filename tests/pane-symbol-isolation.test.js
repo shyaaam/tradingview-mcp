@@ -41,6 +41,8 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.doesNotMatch(expressions[0], /_setSymbolImpl\(/u);
     assert.doesNotMatch(expressions[0], /symbolLock\._value/u);
     assert.match(expressions[0], /siblingDrift/u);
+    assert.match(expressions[0], /matchesExpected\(observed\) && !siblingDrift/u);
+    assert.match(expressions[0], /finalSiblingDrift/u);
     assert.doesNotMatch(expressions[0], /chart\.setSymbol\(/u);
   });
 

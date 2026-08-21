@@ -1076,17 +1076,27 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         }) || afterSymbols.some(function(value, paneIndex) {
           return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
         });
-        if (siblingDrift) {
-          return {
-            success: false,
-            error: 'Scoped pane symbol mutation changed another pane.',
-            symbol: observed,
-            before_symbols: beforeSymbols,
-            after_symbols: afterSymbols,
-          };
+        // TradingView may briefly expose linked-pane propagation while the
+        // isolated target effect settles. Do not classify that transient
+        // state as a committed sibling mutation. Require target success and
+        // sibling restoration in the same authoritative readback instead.
+        if (matchesExpected(observed) && !siblingDrift) {
+          return { success: true, symbol: observed };
         }
-        if (matchesExpected(observed)) return { success: true, symbol: observed };
         await new Promise(function(resolve) { setTimeout(resolve, 200); });
+      }
+      var finalSymbols = all.map(observedSymbol);
+      var finalSiblingDrift = finalSymbols.some(function(value, paneIndex) {
+        return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
+      });
+      if (finalSiblingDrift) {
+        return {
+          success: false,
+          error: 'Scoped pane symbol mutation changed another pane.',
+          symbol: observedSymbol(),
+          before_symbols: beforeSymbols,
+          after_symbols: finalSymbols,
+        };
       }
       return {
         success: false,
