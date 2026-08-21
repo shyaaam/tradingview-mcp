@@ -984,6 +984,23 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         }
         linking._updateLinkingGroups();
       }
+      function synchronizeLinkingGroupSymbols() {
+        if (!linking._linkingGroups || typeof linking._linkingGroups.get !== 'function') {
+          return false;
+        }
+        return all.every(function(candidate, paneIndex) {
+          try {
+            var groupIndex = candidate.linkingGroupIndex().value();
+            var group = linking._linkingGroups.get(groupIndex);
+            var watchedSymbol = group && group.watchedSymbol;
+            if (!watchedSymbol || typeof watchedSymbol.setValueSilently !== 'function') return false;
+            watchedSymbol.setValueSilently(beforeSymbols[paneIndex]);
+            return true;
+          } catch (e) {
+            return false;
+          }
+        });
+      }
       var numericGroups = all.map(function(candidate) {
         try {
           var value = candidate.linkingGroupIndex().value();
@@ -1007,6 +1024,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       try {
         linking.muteGroup('all', true);
         linkingMuted = true;
+        if (!synchronizeLinkingGroupSymbols()) {
+          return { success: false, error: 'Scoped pane symbol linking state synchronization is unavailable.' };
+        }
         groupsChanged = true;
         groups.forEach(function(group, paneIndex) {
           group.property.setValue(isolationGroup + paneIndex);

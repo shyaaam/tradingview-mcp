@@ -31,6 +31,8 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.match(expressions[0], /series\._applySymbolParamsChanges\(/u);
     assert.doesNotMatch(expressions[0], /chart\._symbolWV\._value =/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', true\)/u);
+    assert.match(expressions[0], /synchronizeLinkingGroupSymbols\(\)/u);
+    assert.match(expressions[0], /watchedSymbol\.setValueSilently\(beforeSymbols\[paneIndex\]\)/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', false\)/u);
     assert.match(expressions[0], /linking\._updateLinkingGroups\(\)/u);
     assert.match(expressions[0], /refreshLinkingGroups\(\)/u);
