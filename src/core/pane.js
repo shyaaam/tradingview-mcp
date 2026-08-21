@@ -916,9 +916,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   await new Promise(r => setTimeout(r, 300));
 
   // Chart symbol synchronization can be enabled in the saved workspace. The
-  // public chart.setSymbol() path therefore changes every linked pane even
-  // after focusing one pane. Use the exact chart model setter, which avoids
-  // the collection-level symbol observable and keeps this mutation scoped.
+  // public chart/model setters therefore change every linked pane even after
+  // focusing one pane. Use target series' parameter setter, which avoids the
+  // collection-level symbol observable and keeps this mutation scoped.
   const result = await (_deps?.evaluateAsync ?? evaluateAsync)(`
     (async function() {
       var collection = window.TradingViewApi._chartWidgetCollection;
@@ -943,12 +943,12 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      if (!chart || !collection || !model || !series || typeof model.setSymbol !== 'function') {
+      if (!chart || !collection || !model || !series || typeof series.setSymbolParams !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
       try {
-        model.setSymbol(series, ${safeString(symbol)});
+        series.setSymbolParams({ symbol: ${safeString(symbol)} });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       }
