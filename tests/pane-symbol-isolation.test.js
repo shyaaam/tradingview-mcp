@@ -19,9 +19,12 @@ describe('pane_set_symbol scoped mutation', () => {
 
     assert.deepEqual(result, { success: true, index: 2, symbol: 'BTCUSDT' });
     assert.equal(expressions.length, 1);
-    assert.match(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
+    assert.match(expressions[0], /symbolProperty\.setValueSilently\(/u);
+    assert.match(expressions[0], /chart\._symbolWV\._value/u);
+    assert.match(expressions[0], /series\._applySymbolParamsChanges\(/u);
     assert.match(expressions[0], /mainSeries\(\)/u);
     assert.doesNotMatch(expressions[0], /model\.setSymbol\(/u);
+    assert.doesNotMatch(expressions[0], /series\.setSymbolParams\(/u);
     assert.doesNotMatch(expressions[0], /_setSymbolImpl\(/u);
     assert.doesNotMatch(expressions[0], /symbolLock\._value/u);
     assert.match(expressions[0], /siblingDrift/u);

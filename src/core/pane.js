@@ -916,9 +916,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   await new Promise(r => setTimeout(r, 300));
 
   // Chart symbol synchronization can be enabled in the saved workspace. The
-  // public chart/model setters therefore change every linked pane even after
-  // focusing one pane. Use target series' parameter setter, which avoids the
-  // collection-level symbol observable and keeps this mutation scoped.
+  // public chart/model/series setters therefore change every linked pane even
+  // after focusing one pane. Use silent target-series state plus its local
+  // reload path, avoiding watched-value listeners that perform linking.
   const result = await (_deps?.evaluateAsync ?? evaluateAsync)(`
     (async function() {
       var collection = window.TradingViewApi._chartWidgetCollection;
@@ -943,12 +943,26 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      if (!chart || !collection || !model || !series || typeof series.setSymbolParams !== 'function') {
+      var symbolProperty = series && typeof series.properties === 'function'
+        ? series.properties().childs().symbol
+        : null;
+      if (!chart || !collection || !model || !series || !symbolProperty
+        || typeof symbolProperty.setValueSilently !== 'function'
+        || typeof series._applySymbolParamsChanges !== 'function'
+        || !chart._symbolWV || !Object.prototype.hasOwnProperty.call(chart._symbolWV, '_value')) {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
       try {
-        series.setSymbolParams({ symbol: ${safeString(symbol)} });
+        symbolProperty.setValueSilently(${safeString(symbol)});
+        chart._symbolWV._value = ${safeString(symbol)};
+        await series._applySymbolParamsChanges({
+          symbolChanged: true,
+          intervalChanged: false,
+          currencyChanged: false,
+          unitChanged: false,
+          metricChanged: false,
+        });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       }
