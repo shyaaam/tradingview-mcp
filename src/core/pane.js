@@ -947,13 +947,18 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
-      var targetGroup = chart && typeof chart.linkingGroupIndex === 'function'
-        ? chart.linkingGroupIndex()
-        : null;
-      if (!targetGroup || typeof targetGroup.value !== 'function' || typeof targetGroup.setValue !== 'function') {
+      var groups = all.map(function(candidate) {
+        try {
+          var group = candidate && typeof candidate.linkingGroupIndex === 'function'
+            ? candidate.linkingGroupIndex()
+            : null;
+          if (!group || typeof group.value !== 'function' || typeof group.setValue !== 'function') return null;
+          return { property: group, value: group.value() };
+        } catch (e) { return null; }
+      });
+      if (groups.some(function(group) { return group === null; })) {
         return { success: false, error: 'Scoped pane symbol linking isolation is unavailable.' };
       }
-      var originalGroup = targetGroup.value();
       var numericGroups = all.map(function(candidate) {
         try {
           var value = candidate.linkingGroupIndex().value();
@@ -963,20 +968,26 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       var isolationGroup = numericGroups.length > 0
         ? Math.max.apply(null, numericGroups) + 1
         : 0;
-      var groupChanged = false;
+      var groupsChanged = false;
+      var effectAfterSymbols = null;
       try {
-        targetGroup.setValue(isolationGroup);
-        groupChanged = true;
+        groupsChanged = true;
+        groups.forEach(function(group, paneIndex) {
+          group.property.setValue(isolationGroup + paneIndex);
+        });
         if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
           collection._updateLinkingGroupCharts();
         }
         await series.setSymbolParams({ symbol: ${safeString(symbol)} });
+        effectAfterSymbols = all.map(observedSymbol);
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       } finally {
-        if (groupChanged) {
+        if (groupsChanged) {
           try {
-            targetGroup.setValue(originalGroup);
+            groups.forEach(function(group) {
+              group.property.setValue(group.value);
+            });
             if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
               collection._updateLinkingGroupCharts();
             }
@@ -988,7 +999,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
         var afterSymbols = all.map(observedSymbol);
-        var siblingDrift = afterSymbols.some(function(value, paneIndex) {
+        var siblingDrift = (effectAfterSymbols || []).some(function(value, paneIndex) {
+          return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
+        }) || afterSymbols.some(function(value, paneIndex) {
           return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
         });
         if (siblingDrift) {

@@ -20,9 +20,10 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.deepEqual(result, { success: true, index: 2, symbol: 'BTCUSDT' });
     assert.equal(expressions.length, 1);
     assert.match(expressions[0], /linkingGroupIndex\(\)/u);
-    assert.match(expressions[0], /targetGroup\.setValue\(isolationGroup\)/u);
+    assert.match(expressions[0], /groups\.forEach\(function\(group, paneIndex\)/u);
+    assert.match(expressions[0], /group\.property\.setValue\(isolationGroup \+ paneIndex\)/u);
     assert.match(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
-    assert.match(expressions[0], /targetGroup\.setValue\(originalGroup\)/u);
+    assert.match(expressions[0], /group\.property\.setValue\(group\.value\)/u);
     assert.match(expressions[0], /mainSeries\(\)/u);
     assert.doesNotMatch(expressions[0], /model\.setSymbol\(/u);
     assert.doesNotMatch(expressions[0], /_setSymbolImpl\(/u);
