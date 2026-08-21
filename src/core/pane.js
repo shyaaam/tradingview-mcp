@@ -943,7 +943,12 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      if (!chart || !collection || !model || !series || typeof series.setSymbolParams !== 'function') {
+      var symbolProperty = series && typeof series.properties === 'function'
+        ? series.properties().childs().symbol
+        : null;
+      if (!chart || !collection || !model || !series || !symbolProperty
+        || typeof symbolProperty.setValueSilently !== 'function'
+        || typeof series._applySymbolParamsChanges !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
@@ -990,9 +995,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         : 0;
       var groupsChanged = false;
       var watchersDetached = false;
+      var symbolIntervalDetached = false;
       var linkingMuted = false;
       var effectInvoked = false;
       var effectAfterSymbols = null;
+      var symbolIntervalListeners = series._symbolIntervalChanged
+        && series._symbolIntervalChanged._listeners;
+      if (!Array.isArray(symbolIntervalListeners)) {
+        return { success: false, error: 'Scoped pane symbol interval isolation is unavailable.' };
+      }
       try {
         linking.muteGroup('all', true);
         linkingMuted = true;
@@ -1005,8 +1016,18 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         symbolWatchers.forEach(function(entry) {
           entry.watcher._listeners = [];
         });
+        symbolIntervalDetached = true;
+        series._symbolIntervalChanged._listeners = [];
         effectInvoked = true;
-        await series.setSymbolParams({ symbol: ${safeString(symbol)} });
+        symbolProperty.setValueSilently(${safeString(symbol)});
+        chart._symbolWV._value = ${safeString(symbol)};
+        await series._applySymbolParamsChanges({
+          symbolChanged: true,
+          intervalChanged: false,
+          currencyChanged: false,
+          unitChanged: false,
+          metricChanged: false,
+        });
         effectAfterSymbols = all.map(observedSymbol);
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
@@ -1015,6 +1036,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
           symbolWatchers.forEach(function(entry) {
             entry.watcher._listeners = entry.listeners;
           });
+        }
+        if (symbolIntervalDetached) {
+          series._symbolIntervalChanged._listeners = symbolIntervalListeners;
         }
         // Keep unique groups after an invoked effect. Restoring the original
         // shared group would re-link panes when mute is released and undo the

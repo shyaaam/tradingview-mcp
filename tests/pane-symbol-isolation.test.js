@@ -25,12 +25,16 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.match(expressions[0], /symbolWatchers\.forEach\(function\(entry\)/u);
     assert.match(expressions[0], /entry\.watcher\._listeners = \[\]/u);
     assert.match(expressions[0], /entry\.watcher\._listeners = entry\.listeners/u);
+    assert.match(expressions[0], /symbolIntervalChanged/u);
+    assert.match(expressions[0], /series\._symbolIntervalChanged\._listeners = \[\]/u);
+    assert.match(expressions[0], /symbolProperty\.setValueSilently\(/u);
+    assert.match(expressions[0], /series\._applySymbolParamsChanges\(/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', true\)/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', false\)/u);
     assert.match(expressions[0], /linking\._updateLinkingGroups\(\)/u);
     assert.match(expressions[0], /refreshLinkingGroups\(\)/u);
     assert.match(expressions[0], /if \(groupsChanged && !effectInvoked\)/u);
-    assert.match(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
+    assert.doesNotMatch(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
     assert.match(expressions[0], /group\.property\.setValue\(group\.value\)/u);
     assert.match(expressions[0], /mainSeries\(\)/u);
     assert.doesNotMatch(expressions[0], /model\.setSymbol\(/u);
