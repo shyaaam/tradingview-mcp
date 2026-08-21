@@ -943,12 +943,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      var symbolProperty = series && typeof series.properties === 'function'
-        ? series.properties().childs().symbol
-        : null;
-      if (!chart || !collection || !model || !series || !symbolProperty
-        || typeof symbolProperty.setValueSilently !== 'function'
-        || typeof series._applySymbolParamsChanges !== 'function') {
+      if (!chart || !collection || !model || !series
+        || typeof chart.setSymbol !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
@@ -1043,14 +1039,10 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         symbolIntervalDetached = true;
         series._symbolIntervalChanged._listeners = [];
         effectInvoked = true;
-        symbolProperty.setValueSilently(${safeString(symbol)});
-        await series._applySymbolParamsChanges({
-          symbolChanged: true,
-          intervalChanged: false,
-          currencyChanged: false,
-          unitChanged: false,
-          metricChanged: false,
-        });
+        // Use chart's canonical symbol path after isolating every chart
+        // watcher. This keeps chart, model, and series symbol state aligned
+        // without allowing link propagation to reach sibling panes.
+        chart.setSymbol(${safeString(symbol)});
         effectAfterSymbols = all.map(observedSymbol);
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
