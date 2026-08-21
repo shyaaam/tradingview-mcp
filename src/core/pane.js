@@ -944,8 +944,28 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       if (!chart || !collection || typeof collection._setSymbolImpl !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
+      var symbolLock = collection._symbolLock;
+      var internalSymbolLock = collection._internalSymbolLock;
+      if (!symbolLock || !internalSymbolLock
+        || typeof symbolLock.value !== 'function'
+        || typeof internalSymbolLock.value !== 'function'
+        || !Object.prototype.hasOwnProperty.call(symbolLock, '_value')
+        || !Object.prototype.hasOwnProperty.call(internalSymbolLock, '_value')) {
+        return { success: false, error: 'Scoped pane symbol synchronization control is unavailable.' };
+      }
       var beforeSymbols = all.map(observedSymbol);
-      await collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
+      var previousSymbolLock = symbolLock.value();
+      var previousInternalSymbolLock = internalSymbolLock.value();
+      symbolLock._value = false;
+      internalSymbolLock._value = false;
+      try {
+        await collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
+      } catch (error) {
+        return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
+      } finally {
+        internalSymbolLock._value = previousInternalSymbolLock;
+        symbolLock._value = previousSymbolLock;
+      }
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
         var afterSymbols = all.map(observedSymbol);
