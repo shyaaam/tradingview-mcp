@@ -926,11 +926,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       var chart = all[${idx}];
       var expected = String(${safeString(symbol)}).trim().toUpperCase();
       var deadline = Date.now() + 5000;
-      function observedSymbol() {
+      function observedSymbol(candidate) {
         try {
-          var model = chart && typeof chart.model === 'function' ? chart.model() : null;
-          var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-          return series && typeof series.symbol === 'function' ? String(series.symbol() || '').trim() : '';
+          var candidateModel = candidate && typeof candidate.model === 'function' ? candidate.model() : null;
+          var candidateSeries = candidateModel && typeof candidateModel.mainSeries === 'function'
+            ? candidateModel.mainSeries()
+            : null;
+          return candidateSeries && typeof candidateSeries.symbol === 'function'
+            ? String(candidateSeries.symbol() || '').trim()
+            : '';
         } catch (e) {
           return '';
         }
@@ -951,7 +955,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         || typeof series._applySymbolParamsChanges !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
-      var beforeSymbols = all.map(observedSymbol);
+      var beforeSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
       var groups = all.map(function(candidate) {
         try {
           var group = candidate && typeof candidate.linkingGroupIndex === 'function'
@@ -1028,7 +1032,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
           unitChanged: false,
           metricChanged: false,
         });
-        effectAfterSymbols = all.map(observedSymbol);
+        effectAfterSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       } finally {
@@ -1069,8 +1073,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         }
       }
       while (Date.now() <= deadline) {
-        var observed = observedSymbol();
-        var afterSymbols = all.map(observedSymbol);
+        var observed = observedSymbol(chart);
+        var afterSymbols = all.map(function(candidate) { return observedSymbol(candidate); });
         var siblingDrift = (effectAfterSymbols || []).some(function(value, paneIndex) {
           return paneIndex !== ${idx} && value !== beforeSymbols[paneIndex];
         }) || afterSymbols.some(function(value, paneIndex) {
@@ -1091,9 +1095,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       return {
         success: false,
         error: 'Pane symbol readback did not reach requested symbol.',
-        symbol: observedSymbol(),
+        symbol: observedSymbol(chart),
         before_symbols: beforeSymbols,
-        after_symbols: all.map(observedSymbol),
+        after_symbols: all.map(function(candidate) { return observedSymbol(candidate); }),
       };
     })()
   `);
