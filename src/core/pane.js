@@ -917,8 +917,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
 
   // Chart symbol synchronization can be enabled in the saved workspace. The
   // public chart.setSymbol() path therefore changes every linked pane even
-  // after focusing one pane. Use TradingView's explicit chart-list setter and
-  // fail closed when that scoped internal capability is unavailable.
+  // after focusing one pane. Use the exact chart model setter, which avoids
+  // the collection-level symbol observable and keeps this mutation scoped.
   const result = await (_deps?.evaluateAsync ?? evaluateAsync)(`
     (async function() {
       var collection = window.TradingViewApi._chartWidgetCollection;
@@ -941,30 +941,16 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
           ? normalized === expected
           : normalized === expected || normalized.endsWith(':' + expected);
       }
-      if (!chart || !collection || typeof collection._setSymbolImpl !== 'function') {
+      var model = chart && typeof chart.model === 'function' ? chart.model() : null;
+      var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
+      if (!chart || !collection || !model || !series || typeof model.setSymbol !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
-      var symbolLock = collection._symbolLock;
-      var internalSymbolLock = collection._internalSymbolLock;
-      if (!symbolLock || !internalSymbolLock
-        || typeof symbolLock.value !== 'function'
-        || typeof internalSymbolLock.value !== 'function'
-        || !Object.prototype.hasOwnProperty.call(symbolLock, '_value')
-        || !Object.prototype.hasOwnProperty.call(internalSymbolLock, '_value')) {
-        return { success: false, error: 'Scoped pane symbol synchronization control is unavailable.' };
-      }
       var beforeSymbols = all.map(observedSymbol);
-      var previousSymbolLock = symbolLock.value();
-      var previousInternalSymbolLock = internalSymbolLock.value();
-      symbolLock._value = false;
-      internalSymbolLock._value = false;
       try {
-        await collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
+        model.setSymbol(series, ${safeString(symbol)});
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
-      } finally {
-        internalSymbolLock._value = previousInternalSymbolLock;
-        symbolLock._value = previousSymbolLock;
       }
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
