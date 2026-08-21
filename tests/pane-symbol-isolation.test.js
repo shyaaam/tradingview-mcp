@@ -27,6 +27,7 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.match(expressions[0], /entry\.watcher\._listeners = entry\.listeners/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', true\)/u);
     assert.match(expressions[0], /linking\.muteGroup\('all', false\)/u);
+    assert.match(expressions[0], /if \(groupsChanged && !effectInvoked\)/u);
     assert.match(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
     assert.match(expressions[0], /group\.property\.setValue\(group\.value\)/u);
     assert.match(expressions[0], /mainSeries\(\)/u);

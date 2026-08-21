@@ -984,6 +984,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       var groupsChanged = false;
       var watchersDetached = false;
       var linkingMuted = false;
+      var effectInvoked = false;
       var effectAfterSymbols = null;
       try {
         linking.muteGroup('all', true);
@@ -999,6 +1000,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         symbolWatchers.forEach(function(entry) {
           entry.watcher._listeners = [];
         });
+        effectInvoked = true;
         await series.setSymbolParams({ symbol: ${safeString(symbol)} });
         effectAfterSymbols = all.map(observedSymbol);
       } catch (error) {
@@ -1009,7 +1011,10 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
             entry.watcher._listeners = entry.listeners;
           });
         }
-        if (groupsChanged) {
+        // Keep unique groups after an invoked effect. Restoring the original
+        // shared group would re-link panes when mute is released and undo the
+        // scoped resident-lane mutation. Restore only on pre-effect failure.
+        if (groupsChanged && !effectInvoked) {
           try {
             groups.forEach(function(group) {
               group.property.setValue(group.value);
