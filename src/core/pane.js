@@ -993,8 +993,8 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
             var groupIndex = candidate.linkingGroupIndex().value();
             var group = linking._linkingGroups.get(groupIndex);
             var watchedSymbol = group && group.watchedSymbol;
-            if (!watchedSymbol || typeof watchedSymbol.setValueSilently !== 'function') return false;
-            watchedSymbol.setValueSilently(beforeSymbols[paneIndex]);
+            if (!watchedSymbol || !Object.prototype.hasOwnProperty.call(watchedSymbol, '_value')) return false;
+            watchedSymbol._value = beforeSymbols[paneIndex];
             return true;
           } catch (e) {
             return false;
