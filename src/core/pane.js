@@ -916,9 +916,9 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
   await new Promise(r => setTimeout(r, 300));
 
   // Chart symbol synchronization can be enabled in the saved workspace. The
-  // public chart/model/series setters therefore change every linked pane even
-  // after focusing one pane. Use silent target-series state plus its local
-  // reload path, avoiding watched-value listeners that perform linking.
+  // public chart/model/series setters can change every linked pane even after
+  // focusing one pane. Temporarily isolate target chart in a fresh linking
+  // group, perform normal series mutation, then restore original membership.
   const result = await (_deps?.evaluateAsync ?? evaluateAsync)(`
     (async function() {
       var collection = window.TradingViewApi._chartWidgetCollection;
@@ -943,35 +943,47 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       }
       var model = chart && typeof chart.model === 'function' ? chart.model() : null;
       var series = model && typeof model.mainSeries === 'function' ? model.mainSeries() : null;
-      var symbolProperty = series && typeof series.properties === 'function'
-        ? series.properties().childs().symbol
-        : null;
-      if (!chart || !collection || !model || !series || !symbolProperty
-        || typeof symbolProperty.setValueSilently !== 'function'
-        || typeof series._applySymbolParamsChanges !== 'function'
-        || !chart._symbolWV || !Object.prototype.hasOwnProperty.call(chart._symbolWV, '_value')) {
+      if (!chart || !collection || !model || !series || typeof series.setSymbolParams !== 'function') {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
-      var symbolListeners = chart._symbolWV._listeners;
-      if (!Array.isArray(symbolListeners)) {
-        return { success: false, error: 'Scoped pane symbol mutation listeners are unavailable.' };
+      var targetGroup = chart && typeof chart.linkingGroupIndex === 'function'
+        ? chart.linkingGroupIndex()
+        : null;
+      if (!targetGroup || typeof targetGroup.value !== 'function' || typeof targetGroup.setValue !== 'function') {
+        return { success: false, error: 'Scoped pane symbol linking isolation is unavailable.' };
       }
+      var originalGroup = targetGroup.value();
+      var numericGroups = all.map(function(candidate) {
+        try {
+          var value = candidate.linkingGroupIndex().value();
+          return typeof value === 'number' && Number.isFinite(value) ? value : null;
+        } catch (e) { return null; }
+      }).filter(function(value) { return value !== null; });
+      var isolationGroup = numericGroups.length > 0
+        ? Math.max.apply(null, numericGroups) + 1
+        : 0;
+      var groupChanged = false;
       try {
-        chart._symbolWV._listeners = [];
-        symbolProperty.setValueSilently(${safeString(symbol)});
-        chart._symbolWV._value = ${safeString(symbol)};
-        await series._applySymbolParamsChanges({
-          symbolChanged: true,
-          intervalChanged: false,
-          currencyChanged: false,
-          unitChanged: false,
-          metricChanged: false,
-        });
+        targetGroup.setValue(isolationGroup);
+        groupChanged = true;
+        if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
+          collection._updateLinkingGroupCharts();
+        }
+        await series.setSymbolParams({ symbol: ${safeString(symbol)} });
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       } finally {
-        chart._symbolWV._listeners = symbolListeners;
+        if (groupChanged) {
+          try {
+            targetGroup.setValue(originalGroup);
+            if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
+              collection._updateLinkingGroupCharts();
+            }
+          } catch (error) {
+            return { success: false, error: 'Scoped pane symbol linking-group restoration failed.' };
+          }
+        }
       }
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
