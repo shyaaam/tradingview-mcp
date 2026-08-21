@@ -21,6 +21,8 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.equal(expressions.length, 1);
     assert.match(expressions[0], /symbolProperty\.setValueSilently\(/u);
     assert.match(expressions[0], /chart\._symbolWV\._value/u);
+    assert.match(expressions[0], /chart\._symbolWV\._listeners = \[\]/u);
+    assert.match(expressions[0], /chart\._symbolWV\._listeners = symbolListeners/u);
     assert.match(expressions[0], /series\._applySymbolParamsChanges\(/u);
     assert.match(expressions[0], /mainSeries\(\)/u);
     assert.doesNotMatch(expressions[0], /model\.setSymbol\(/u);
