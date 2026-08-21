@@ -7,6 +7,7 @@ import {
 } from '../src/core/observer-session.js';
 import {
   captureCandle,
+  capturePaneTelemetryOhlcv,
   captureTelemetryOhlcv,
   identity,
 } from '../src/core/observer-evidence.js';
@@ -166,6 +167,98 @@ test('bounded telemetry OHLCV extraction fails closed on invalid count and bindi
   setObserverSession(session);
   await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 501 }), /between 1 and 500/);
   await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 2, _deps: { evaluateBound: async () => ({ error: 'Bound chart symbol or timeframe does not match the requested extraction.' }) } }), /does not match/);
+});
+
+test('exact pane telemetry binds pane directly without active-widget, focus, or mutation paths', async () => {
+  setObserverSession(session);
+  const expressions = [];
+  const result = await capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 3,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    count: 2,
+    _deps: {
+      listTabs: async () => ({
+        success: true,
+        tab_count: 1,
+        tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
+      }),
+      evaluateBound: async (expression) => {
+        expressions.push(expression);
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        return {
+          pane_index: 3,
+          pane_count: 8,
+          symbol: 'BITSTAMP:BTCUSDT',
+          timeframe: '60',
+          candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+          studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
+        };
+      },
+      now: () => new Date('2026-07-17T10:00:01Z'),
+    },
+  });
+
+  assert.deepEqual(result, {
+    success: true,
+    extraction_version: 'observer-pane-telemetry-ohlcv-v1',
+    profile_id: 'profile-exact',
+    chart_target_id: 'target-exact',
+    chart_id: 'chart-exact',
+    layout_id: '8',
+    tab_index: 0,
+    pane_index: 3,
+    pane_count: 8,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    requested_count: 2,
+    captured_at: '2026-07-17T10:00:01.000Z',
+    candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+    study_telemetry_state: 'available',
+    study_telemetry_reason: null,
+    studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
+  });
+  assert.match(expressions[1], /cwc\.getAll\(\)/);
+  assert.match(expressions[1], /all\[paneIndex\]/);
+  assert.doesNotMatch(expressions[1], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+});
+
+test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {
+  setObserverSession(session);
+  const input = {
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 3,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    count: 1,
+  };
+  await assert.rejects(
+    capturePaneTelemetryOhlcv({ ...input, expected_chart_id: 'wrong-chart', _deps: { listTabs: async () => ({ success: true, tabs: [] }) } }),
+    /exact profile\/chart authority/,
+  );
+  await assert.rejects(
+    capturePaneTelemetryOhlcv({ ...input, _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '4' } : {},
+    } }),
+    /layout does not match authority/,
+  );
+  await assert.rejects(
+    capturePaneTelemetryOhlcv({ ...input, _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '8' } : { error: 'Exact requested pane is missing or ambiguous.' },
+    } }),
+    /missing or ambiguous/,
+  );
 });
 
 test('identity registration rejects unexpected arguments', async () => {

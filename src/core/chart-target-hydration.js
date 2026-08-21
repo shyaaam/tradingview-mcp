@@ -1,6 +1,7 @@
 import CDP from 'chrome-remote-interface';
 import { bindObserverSession, invalidateObserverSession } from '../connection.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
+import { resolveManagerCdpUrl } from './manager-cdp.js';
 
 const SAVED_CHART_PATH = /^\/chart\/([A-Za-z0-9_-]+)\/?$/u;
 
@@ -95,8 +96,8 @@ async function ensureProfileRunning(managerBaseUrl, profileId, profile) {
     : await fetchJson(new URL(`profiles/${encodeURIComponent(profileId)}/launch`, `${managerBaseUrl}/`).toString(), { method: 'POST' });
   const value = launch.cdp_url || launch.cdp_endpoint || launch.cdpUrl
     || profile.cdp_url || profile.cdp_endpoint || profile.cdpUrl
-    || `${managerBaseUrl}/profiles/${encodeURIComponent(profileId)}/cdp`;
-  return new URL(value, `${managerBaseUrl}/`).toString().replace(/\/$/, '');
+    || undefined;
+  return resolveManagerCdpUrl(managerBaseUrl, profileId, value);
 }
 
 async function createTarget({ browserWebSocketUrl, chartUrl }) {

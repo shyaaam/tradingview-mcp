@@ -21,6 +21,11 @@ export function registerHealthTools(server, dependencies = {}) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'tv_observer_attach_existing_read_only', 'Attach to one exact existing TradingView target without launching, navigating, hydrating, focusing, or mutating', async ({ profile_id, chart_target_id }) => {
+    try { return jsonResult(await observer.attachExistingReadOnly({ profile_id, chart_target_id })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('tv_discover', 'Report which known TradingView API paths are available and their methods', {}, async () => {
     try { return jsonResult(await core.discover()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

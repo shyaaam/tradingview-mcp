@@ -20,6 +20,10 @@ import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
 import { registerChartTargetHydrationTool } from './tools/chart-target-hydration.js';
+import { registerChartTargetHydrationV2Tool } from './tools/chart-target-hydration-v2.js';
+import { registerChartRuntimeReadinessTools } from './tools/chart-runtime-readiness.js';
+import { registerChartRuntimeTargetLifecycleTools } from './tools/chart-runtime-target-lifecycle.js';
+import { registerChartRuntimeContentSnapshotTools } from './tools/chart-runtime-content-snapshot.js';
 import { buildObserverContract, SERVER_NAME, SERVER_VERSION } from './release/identity.js';
 import { installStdioLifecycle } from './release/lifecycle.js';
 import { disconnectStrict } from './connection.js';
@@ -99,6 +103,10 @@ registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 registerChartTargetHydrationTool(server);
+registerChartTargetHydrationV2Tool(server);
+registerChartRuntimeReadinessTools(server);
+registerChartRuntimeTargetLifecycleTools(server);
+registerChartRuntimeContentSnapshotTools(server);
 
 const contract = buildObserverContract();
 const startupEvent = {

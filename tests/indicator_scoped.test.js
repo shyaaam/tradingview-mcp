@@ -3,26 +3,67 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyScopedPlanItem, updateScopedSettings } from '../src/core/indicators.js';
+import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
 
-function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) {
+function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false } = {}) {
   const state = {
-    studies: studies.map(study => ({ id: study.id, name: study.name, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
-    switchedTabs: [], focusedPanes: [], created: [],
+    studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
+    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], canonicalPriceStudy,
   };
   return {
     state,
     deps: {
       async switchTab({ index }) { if (failSwitch) throw new Error('tab target ambiguous'); state.switchedTabs.push(index); return { success: true, action: 'switched', index }; },
       async focusPane({ index }) { if (failFocus) throw new Error('pane target ambiguous'); state.focusedPanes.push(index); return { success: true, focused_index: index, total: 8 }; },
+      async indicatorSignatures() {
+        return {
+          panes: Array.from({ length: 8 }, (_, index) => ({
+            index,
+            signature: 'a'.repeat(64),
+            indicators: state.studies.map((study) => ({
+              indicator_id: study.indicatorId,
+              entity_id: study.id,
+              indicator_name: study.name,
+              is_price_study: study.isPriceStudy,
+              settings: {},
+            })),
+          })),
+        };
+      },
       async evaluate(expression) {
+        state.evaluateCalls.push(expression);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
-          const found = state.studies.find(study => study.name.toLowerCase() === name);
+          const matching = state.studies.filter(study => study.name.toLowerCase() === name);
+          if (matching.length > 1) return { error: `scoped indicator mutation found duplicate matching studies: ${name}` };
+          const found = matching[0];
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
         }
-        if (expression.includes('chart.createStudy')) {
-          const name = expression.match(/chart.createStudy\("([^"]+)"/)?.[1] || 'Unknown';
+        if (expression.includes('chart.createStudy(')) {
+          const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1] || '';
+          const id = `study-${state.studies.length + 1}`;
+          const indicatorId = name === 'Relative Strength Index' ? 'STD;RSI' : `id:${name}`;
+          const settingsMatch = expression.match(/var rawSettings = ([\s\S]*?);\s+var inputs/);
+          const rawSettings = settingsMatch ? JSON.parse(settingsMatch[1]) : {};
+          const inputs = Object.entries(rawSettings).map(([key, value]) => ({
+            id: key,
+            value: value && typeof value === 'object' && !Array.isArray(value)
+              && Object.prototype.hasOwnProperty.call(value, 'v')
+              && Object.keys(value).every((field) => field === 'f' || field === 't' || field === 'v')
+              ? value.v
+              : value,
+          }));
+          state.studies.push({ id, indicatorId, name, isPriceStudy: false, inputs });
+          state.created.push({ id, indicatorId, name, inputs });
+          return { id, name, inputs };
+        }
+        if (expression.includes('insertStudyWithParams')) {
+          if (state.canonicalPriceStudy && !expression.includes('forceOverlay: canonicalMeta.is_price_study === true')) {
+            throw new Error('price-study insertion omitted forceOverlay');
+          }
+          const name = expression.includes('Private No-Input Study')
+            ? 'Private No-Input Study'
+            : 'Relative Strength Index';
           const id = `study-${state.studies.length + 1}`;
           const inputs = [{ id: 'length', value: 14 }];
           state.studies.push({ id, name, inputs }); state.created.push({ id, name, inputs });
@@ -35,6 +76,13 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false } = {}) 
           const previous = Object.fromEntries(study.inputs.map(input => [input.id, input.value]));
           study.inputs = study.inputs.map(input => ({ ...input, value: 50 }));
           return { id, previous, inputs: study.inputs, values: study.values };
+        }
+        if (expression.includes('removeEntity')) {
+          const id = expression.match(/getStudyById\("([^"]+)"\)/)?.[1];
+          const index = state.studies.findIndex((study) => study.id === id);
+          if (index < 0) return { error: `Study not found: ${id}` };
+          state.studies.splice(index, 1);
+          return { id, removed: true };
         }
         throw new Error(`unexpected evaluate expression: ${expression.slice(0, 80)}`);
       },
@@ -49,6 +97,92 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.success, true);
     assert.deepEqual(result.previous_settings, {});
     assert.deepEqual(result.new_settings, { length: 14 });
+  });
+
+  it('allows scoped apply with empty settings for studies without exposed inputs', async () => {
+    const { deps } = makeDeps();
+    const result = await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Private No-Input Study', expected_settings: {}, _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.post_mutation_indicator.indicator_name, 'Private No-Input Study');
+  });
+
+  it('uses canonical pane metadata for scoped Pine study insertion', async () => {
+    const { deps, state } = makeDeps();
+    await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps });
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('canonicalMatches')));
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('insertStudyWithParams')));
+    assert.equal(state.created.length, 1);
+  });
+
+  it('uses forceOverlay for a canonical price-study insertion', async () => {
+    const { deps, state } = makeDeps({ canonicalPriceStudy: true });
+    let authorizedScope;
+    deps.verifyMutationAuthority = async (scope) => { authorizedScope = scope; };
+    await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 4, pane_index: 2, indicator_name: 'Relative Strength Index', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_settings: {}, action: 'apply_indicator', _deps: deps });
+    assert.equal(state.canonicalPriceStudy, true);
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('forceOverlay: canonicalMeta.is_price_study === true')));
+    assert.deepEqual(authorizedScope, {
+      profile_id: 'profile-a',
+      tab_index: 4,
+      pane_index: 2,
+      indicator_name: 'Relative Strength Index',
+      expected_chart_target_id: 'target-1',
+      expected_chart_id: 'chart-1',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+    });
+    assert.deepEqual(state.switchedTabs, [4]);
+    assert.deepEqual(state.focusedPanes, [2]);
+    assert.equal(state.created.length, 1);
+  });
+
+  it('applies an approved blueprint indicator on a blank chart without a surviving canonical source', async () => {
+    const { deps, state } = makeDeps();
+    const result = await applyScopedBlueprintIndicator({
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      indicator_id: 'STD;RSI',
+      indicator_name: 'Relative Strength Index',
+      expected_is_price_study: false,
+      expected_chart_target_id: 'target-1',
+      expected_chart_id: 'chart-1',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+      expected_post_pane_signature: 'a'.repeat(64),
+      expected_settings: { length: { f: true, t: 'integer', v: 14 } },
+      _deps: deps,
+    });
+    assert.equal(result.success, true);
+    assert.equal(result.blueprint_apply_version, 'indicator-apply-blueprint-scoped-v1');
+    assert.equal(result.indicator_id, 'STD;RSI');
+    assert.equal(result.post_mutation_signature, 'a'.repeat(64));
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('chart.createStudy(')));
+    assert.ok(!state.evaluateCalls.some((expression) => expression.includes('canonicalMatches') && expression.includes('chart.createStudy(')));
+    assert.equal(state.created.length, 1);
+    assert.deepEqual(state.created[0].inputs, [{ id: 'length', value: 14 }]);
+  });
+
+  it('fails closed when blueprint createStudy resolves a different stable indicator ID', async () => {
+    const { deps } = makeDeps();
+    await assert.rejects(() => applyScopedBlueprintIndicator({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 0,
+      indicator_id: 'expected-other-id', indicator_name: 'Relative Strength Index', expected_is_price_study: false,
+      expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), expected_post_pane_signature: 'a'.repeat(64), expected_settings: { length: 14 },
+      _deps: deps,
+    }), /stable ID does not match approved blueprint/);
+  });
+
+  it('fails closed when blueprint post-pane signature differs from the approved recovery step', async () => {
+    const { deps } = makeDeps();
+    await assert.rejects(() => applyScopedBlueprintIndicator({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 0,
+      indicator_id: 'STD;RSI', indicator_name: 'Relative Strength Index', expected_is_price_study: false,
+      expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), expected_post_pane_signature: 'b'.repeat(64), expected_settings: { length: 14 },
+      _deps: deps,
+    }), /post-mutation pane signature does not match approved recovery step/);
   });
 
   it('updates indicator settings and returns previous/new scoped evidence', async () => {
@@ -79,9 +213,24 @@ describe('scoped indicator plan primitives', () => {
       new_settings: 'study did not expose input values or displayed values',
     });
   });
+  it('includes underlying property restoration when public input values are empty', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'study-cvd', name: 'CVD', inputs: [] }] });
+    await updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 1, indicator_name: 'CVD', expected_settings: { in_11: 4278190208 }, _deps: deps });
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('underlyingStudy') && expression.includes('inputProperties')));
+  });
 
   it('blocks missing profile scope', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: '', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /profile_id is required/);
+  });
+  it('requires reviewed target and pane authority for direct production calls', async () => {
+    await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 } }), /expected_chart_target_id is required/);
+  });
+  it('rejects duplicate same-name studies instead of selecting first match', async () => {
+    const { deps } = makeDeps({ studies: [
+      { id: 'study-rsi-1', name: 'RSI', inputs: [{ id: 'length', value: 14 }] },
+      { id: 'study-rsi-2', name: 'RSI', inputs: [{ id: 'length', value: 14 }] },
+    ] });
+    await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 50 }, _deps: deps }), /duplicate matching studies/);
   });
   it('blocks ambiguous tab target selection', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps({ failSwitch: true }).deps }), /tab target ambiguous/);
@@ -94,5 +243,15 @@ describe('scoped indicator plan primitives', () => {
   });
   it('blocks update when target indicator is missing', async () => {
     await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps().deps }), /indicator not found for update/);
+  });
+  it('removes one exact scoped indicator and proves post-mutation absence', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'study-rsi', name: 'RSI', inputs: [{ id: 'length', value: 14 }] }] });
+    const result = await removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_entity_id: 'study-rsi', _deps: deps });
+    assert.equal(result.action, 'remove_indicator');
+    assert.equal(result.post_mutation_indicator, null);
+    assert.equal(state.studies.length, 0);
+  });
+  it('rejects scoped removal without exact entity identity', async () => {
+    await assert.rejects(() => removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: {}, _deps: makeDeps().deps }), /expected_entity_id/);
   });
 });

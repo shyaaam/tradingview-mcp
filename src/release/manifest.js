@@ -10,17 +10,37 @@ const CAPABILITY_NAMES = [
   'tv_observer_contract',
   'tv_health_check',
   'tv_observer_prepare',
+  'tv_observer_attach_existing_read_only',
+  'chart_runtime_readiness_probe_v1',
+  'chart_runtime_wait_ready_v1',
+  'chart_runtime_target_lifecycle_trace_v1',
+  'chart_runtime_content_snapshot_v1',
+  'chart_runtime_content_snapshot_v2',
   'tv_observer_hydrate_chart_target',
+  'tv_observer_hydrate_chart_target_v2',
   'tv_observer_identity',
+  'chart_saved_layout_identity',
   'tv_observer_capture_candle',
   'tv_observer_capture_screenshot',
   'tv_observer_capture_telemetry_ohlcv',
+  'tv_observer_capture_pane_telemetry_ohlcv',
   'tab_list',
   'tab_new',
   'tab_switch',
   'pane_list',
+  'pane_indicator_signatures',
+  'pane_indicator_mutation_inventory',
+  'indicator_apply_scoped',
+  'indicator_update_settings_scoped',
+  'indicator_remove_scoped',
   'pane_probe_layout_capability',
+  'pane_set_layout_scoped_v1',
+  'indicator_apply_blueprint_scoped',
   'chart_get_state',
+  'chart_save_existing_capability_probe',
+  'chart_save_existing_capability_probe_v2',
+  'chart_save_existing_scoped',
+  'chart_save_existing_scoped_v2',
   'chart_set_symbol',
   'chart_set_timeframe',
 ];
@@ -82,7 +102,8 @@ function removeRuntimeDefaults(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => key !== 'additionalProperties')
+      .filter(([key, entry]) => key !== 'additionalProperties'
+        || (entry !== null && typeof entry === 'object'))
       .map(([key, entry]) => [key, removeRuntimeDefaults(entry)]),
   );
 }

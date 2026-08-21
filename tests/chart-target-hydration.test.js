@@ -11,7 +11,7 @@ const savedChartId = 'AbCd12';
 const authorityId = `chart-target-authority-v1:${'a'.repeat(64)}`;
 const authorityHash = 'b'.repeat(64);
 
-function startFakeManager({ initialTarget = null, loginAfterCreate = false } = {}) {
+function startFakeManager({ initialTarget = null, loginAfterCreate = false, relativeCdpUrl = false } = {}) {
   let target = initialTarget;
   let createCount = 0;
   const server = http.createServer((request, response) => {
@@ -20,11 +20,14 @@ function startFakeManager({ initialTarget = null, loginAfterCreate = false } = {
       response.end(JSON.stringify(value));
     };
     if (request.url === '/api/profiles') {
-      return body([{ id: profileId, status: 'running', cdp_url: `http://127.0.0.1:${server.address().port}/cdp` }]);
+      const cdpUrl = relativeCdpUrl
+        ? `/api/profiles/${profileId}/cdp/`
+        : `http://127.0.0.1:${server.address().port}/cdp`;
+      return body([{ id: profileId, status: 'running', cdp_url: cdpUrl }]);
     }
-    if (request.url === '/cdp/json/version') return body({ Browser: 'fake', webSocketDebuggerUrl: 'ws://fake-browser' });
-    if (request.url === '/cdp/json/list') return body(target ? [target] : []);
-    if (request.url?.startsWith('/cdp/json/new?')) {
+    if (request.url?.endsWith('/cdp/json/version')) return body({ Browser: 'fake', webSocketDebuggerUrl: 'ws://fake-browser' });
+    if (request.url?.endsWith('/cdp/json/list')) return body(target ? [target] : []);
+    if (request.url?.includes('/cdp/json/new?')) {
       createCount += 1;
       target = loginAfterCreate
         ? { id: 'target-login', type: 'page', url: 'https://www.tradingview.com/accounts/signin/' }
@@ -132,6 +135,17 @@ test('creates missing exact target once and replays without navigation', async (
     else process.env.CLOAK_BROWSER_BASE_URL = previousBaseUrl;
     await new Promise((resolve) => fake.server.close(resolve));
   }
+});
+
+test('resolves relative Manager CDP endpoint during hydration', async () => {
+  const { fake, result } = await runHydration({
+    relativeCdpUrl: true,
+    initialTarget: { id: 'target-relative', type: 'page', url: 'https://www.tradingview.com/chart/AbCd12/' },
+  });
+  assert.equal(result.state, 'existing-identical');
+  assert.equal(result.navigation_performed, false);
+  assert.equal(result.target_id, 'target-relative');
+  assert.equal(fake.createCount, 0);
 });
 
 test('fails closed when missing target resolves to login', async () => {

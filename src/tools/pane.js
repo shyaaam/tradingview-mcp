@@ -9,6 +9,16 @@ export function registerPaneTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'pane_indicator_signatures', 'Read canonical indicator identity and normalized settings for every chart pane without focusing or mutating panes', async () => {
+    try { return jsonResult(await core.indicatorSignatures()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'pane_indicator_mutation_inventory', 'Read per-pane study identity and exact getAllStudies mutation visibility without focusing or mutating panes', async () => {
+    try { return jsonResult(await core.mutationIdentityInventory()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   registerObserverTool(server, 'pane_probe_layout_capability', 'Probe one exact TradingView pane layout capability and restore the prior layout', async ({ pane_count, timeout_ms, poll_interval_ms, stable_polls, validate_focus }) => {
     try {
       return jsonResult(await core.probeLayoutCapability({
@@ -20,6 +30,24 @@ export function registerPaneTools(server) {
       }));
     } catch (err) {
       return jsonResult({ success: false, error: err.message }, true);
+    }
+  });
+
+  registerObserverTool(server, 'pane_set_layout_scoped_v1', 'Set one exact existing chart layout with profile, target, account, saved-layout, and pane-count fences', async (input) => {
+    try {
+      return jsonResult(await core.setLayoutScoped(input));
+    } catch (err) {
+      const layoutInvoked = err?.layoutInvoked === true;
+      return jsonResult({
+        success: false,
+        profile_id: input?.profile_id || null,
+        chart_target_id: input?.chart_target_id || null,
+        layout_invoked: layoutInvoked,
+        mutations_performed: layoutInvoked,
+        effect_phase: err?.phase || 'pre-layout-authority',
+        effect_state: err?.effectState || 'blocked',
+        error: err instanceof Error ? err.message : 'Scoped pane layout mutation failed.',
+      }, true);
     }
   });
 
