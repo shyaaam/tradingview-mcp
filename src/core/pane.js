@@ -968,6 +968,10 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       if (symbolWatchers.some(function(entry) { return entry === null; })) {
         return { success: false, error: 'Scoped pane symbol watcher isolation is unavailable.' };
       }
+      var linking = window.TradingViewApi && window.TradingViewApi.linking;
+      if (!linking || typeof linking.muteGroup !== 'function') {
+        return { success: false, error: 'Scoped pane symbol link mute is unavailable.' };
+      }
       var numericGroups = all.map(function(candidate) {
         try {
           var value = candidate.linkingGroupIndex().value();
@@ -979,8 +983,11 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         : 0;
       var groupsChanged = false;
       var watchersDetached = false;
+      var linkingMuted = false;
       var effectAfterSymbols = null;
       try {
+        linking.muteGroup('all', true);
+        linkingMuted = true;
         groupsChanged = true;
         groups.forEach(function(group, paneIndex) {
           group.property.setValue(isolationGroup + paneIndex);
@@ -1012,6 +1019,13 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
             }
           } catch (error) {
             return { success: false, error: 'Scoped pane symbol linking-group restoration failed.' };
+          }
+        }
+        if (linkingMuted) {
+          try {
+            linking.muteGroup('all', false);
+          } catch (error) {
+            return { success: false, error: 'Scoped pane symbol link unmute failed.' };
           }
         }
       }
