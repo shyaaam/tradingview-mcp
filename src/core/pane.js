@@ -945,7 +945,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         return { success: false, error: 'Scoped pane symbol mutation is unavailable.' };
       }
       var beforeSymbols = all.map(observedSymbol);
-      collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
+      await collection._setSymbolImpl(${safeString(symbol)}, undefined, chart, [chart]);
       while (Date.now() <= deadline) {
         var observed = observedSymbol();
         var afterSymbols = all.map(observedSymbol);
