@@ -959,6 +959,15 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       if (groups.some(function(group) { return group === null; })) {
         return { success: false, error: 'Scoped pane symbol linking isolation is unavailable.' };
       }
+      var symbolWatchers = all.map(function(candidate) {
+        var watcher = candidate && candidate._symbolWV;
+        return watcher && Array.isArray(watcher._listeners)
+          ? { watcher: watcher, listeners: watcher._listeners }
+          : null;
+      });
+      if (symbolWatchers.some(function(entry) { return entry === null; })) {
+        return { success: false, error: 'Scoped pane symbol watcher isolation is unavailable.' };
+      }
       var numericGroups = all.map(function(candidate) {
         try {
           var value = candidate.linkingGroupIndex().value();
@@ -969,6 +978,7 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         ? Math.max.apply(null, numericGroups) + 1
         : 0;
       var groupsChanged = false;
+      var watchersDetached = false;
       var effectAfterSymbols = null;
       try {
         groupsChanged = true;
@@ -978,11 +988,20 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
         if (collection && typeof collection._updateLinkingGroupCharts === 'function') {
           collection._updateLinkingGroupCharts();
         }
+        watchersDetached = true;
+        symbolWatchers.forEach(function(entry) {
+          entry.watcher._listeners = [];
+        });
         await series.setSymbolParams({ symbol: ${safeString(symbol)} });
         effectAfterSymbols = all.map(observedSymbol);
       } catch (error) {
         return { success: false, error: error && error.message ? String(error.message) : 'Scoped pane symbol mutation failed.' };
       } finally {
+        if (watchersDetached) {
+          symbolWatchers.forEach(function(entry) {
+            entry.watcher._listeners = entry.listeners;
+          });
+        }
         if (groupsChanged) {
           try {
             groups.forEach(function(group) {

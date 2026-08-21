@@ -22,6 +22,9 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.match(expressions[0], /linkingGroupIndex\(\)/u);
     assert.match(expressions[0], /groups\.forEach\(function\(group, paneIndex\)/u);
     assert.match(expressions[0], /group\.property\.setValue\(isolationGroup \+ paneIndex\)/u);
+    assert.match(expressions[0], /symbolWatchers\.forEach\(function\(entry\)/u);
+    assert.match(expressions[0], /entry\.watcher\._listeners = \[\]/u);
+    assert.match(expressions[0], /entry\.watcher\._listeners = entry\.listeners/u);
     assert.match(expressions[0], /series\.setSymbolParams\(\{ symbol:/u);
     assert.match(expressions[0], /group\.property\.setValue\(group\.value\)/u);
     assert.match(expressions[0], /mainSeries\(\)/u);
