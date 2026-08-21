@@ -33,6 +33,13 @@ describe('pane_set_symbol scoped mutation', () => {
     assert.match(expressions[0], /linking\.muteGroup\('all', true\)/u);
     assert.match(expressions[0], /synchronizeLinkingGroupSymbols\(\)/u);
     assert.match(expressions[0], /watchedSymbol\._value = beforeSymbols\[paneIndex\]/u);
+    const synchronizationComment = expressions[0].indexOf("// Refresh/rebind");
+    const refreshedIsolation = expressions[0].lastIndexOf("refreshLinkingGroups();", synchronizationComment);
+    const synchronized = expressions[0].indexOf("synchronizeLinkingGroupSymbols())", synchronizationComment);
+    const detached = expressions[0].indexOf("watchersDetached = true", synchronized);
+    assert.ok(refreshedIsolation >= 0);
+    assert.ok(synchronized > refreshedIsolation);
+    assert.ok(detached > synchronized);
     assert.match(expressions[0], /linking\.muteGroup\('all', false\)/u);
     assert.match(expressions[0], /linking\._updateLinkingGroups\(\)/u);
     assert.match(expressions[0], /refreshLinkingGroups\(\)/u);

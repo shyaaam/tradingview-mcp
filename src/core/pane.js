@@ -1024,14 +1024,18 @@ export async function setSymbol({ index, symbol, _deps } = {}) {
       try {
         linking.muteGroup('all', true);
         linkingMuted = true;
-        if (!synchronizeLinkingGroupSymbols()) {
-          return { success: false, error: 'Scoped pane symbol linking state synchronization is unavailable.' };
-        }
         groupsChanged = true;
         groups.forEach(function(group, paneIndex) {
           group.property.setValue(isolationGroup + paneIndex);
         });
         refreshLinkingGroups();
+        // Refresh/rebind can repopulate each group's watcher from the stale
+        // global linking observable. Synchronize after refresh, immediately
+        // before the isolated effect, so unrelated panes retain their actual
+        // pre-effect symbols.
+        if (!synchronizeLinkingGroupSymbols()) {
+          return { success: false, error: 'Scoped pane symbol linking state synchronization is unavailable.' };
+        }
         watchersDetached = true;
         symbolWatchers.forEach(function(entry) {
           entry.watcher._listeners = [];
