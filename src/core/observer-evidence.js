@@ -197,13 +197,12 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
   const evaluate = _deps?.evaluateBound || _deps?.evaluate || evaluateBound;
   const layout = await evaluate(`
     (function() {
-      var cwc = window.TradingViewApi && window.TradingViewApi._chartWidgetCollection;
-      var layout = cwc && cwc._layoutType;
-      if (layout && typeof layout.value === 'function') layout = layout.value();
-      return { layout_id: layout == null ? '' : String(layout) };
+      ${LEGACY_LAYOUT_IDENTITY_HELPER}
+      var identity = deriveLegacyLayoutId(window.TradingViewApi);
+      return { layout_id: identity.layout_id || '', error: identity.error || null };
     })()
   `);
-  if (!layout || layout.layout_id !== scope.expected_layout_id) {
+  if (!layout || layout.error || layout.layout_id !== scope.expected_layout_id) {
     throw new Error('exact pane observer layout does not match authority');
   }
 
