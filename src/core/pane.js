@@ -113,11 +113,11 @@ export class ScopedPaneLayoutEffectError extends Error {
 export async function list() {
   const result = await evaluate(`
     (function() {
+      ${LEGACY_LAYOUT_IDENTITY_HELPER}
       var cwc = ${CWC};
-      var layoutType = cwc._layoutType;
-      if (typeof layoutType === 'object' && layoutType && typeof layoutType.value === 'function') layoutType = layoutType.value();
       var count = cwc.inlineChartsCount;
       if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
+      var layoutIdentity = deriveLegacyLayoutId(window.TradingViewApi);
 
       var all = cwc.getAll();
       var visibleCount = Number(count);
@@ -142,7 +142,7 @@ export async function list() {
         } catch(e) {}
       }
 
-      return { layout: layoutType, chart_count: count, active_index: activeIndex, panes: panes };
+      return { layout: layoutIdentity.layout_id || '', chart_count: count, active_index: activeIndex, panes: panes };
     })()
   `);
 

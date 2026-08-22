@@ -75,6 +75,12 @@ test('browser layout helper matches shared legacy derivation semantics', () => {
     collection: api._chartWidgetCollection,
     active: { _layoutId: { value: () => 4 } },
   })));
+
+  const staleEightPaneApi = {
+    _chartWidgetCollection: { _layoutId: 's', inlineChartsCount: 8, getAll: () => Array.from({ length: 8 }, () => ({})) },
+    _activeChartWidgetWV: { value: () => ({ _layoutId: 's' }) },
+  };
+  assert.equal(JSON.stringify(browserDerive(staleEightPaneApi)), JSON.stringify({ layout_id: '8' }));
 });
 
 test('scoped existing-chart save requires exact target and uses existing save only', async () => {

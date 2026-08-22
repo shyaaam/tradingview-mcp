@@ -215,6 +215,17 @@ test('legacy layout helper is authoritative and scoped indicator code does not u
   assert.doesNotMatch(source, /_layoutType/);
 });
 
+test('legacy layout helper infers uniquely identifiable pane counts when TradingView leaves stale layout identity', () => {
+  const widgets = Array.from({ length: 8 }, () => ({}));
+  assert.deepEqual(
+    deriveLegacyLayoutIdFromSources({
+      collection: { _layoutId: 's', inlineChartsCount: 8, getAll: () => widgets },
+      active: { _layoutId: 's' },
+    }),
+    { layout_id: '8' },
+  );
+});
+
 test('manifest admits scoped topology mutation exactly once with chart_mutation classification', () => {
   const entries = observerCapabilityManifest.capabilities.filter(({ name }) => name === 'pane_set_layout_scoped_v1');
   assert.equal(entries.length, 1);
