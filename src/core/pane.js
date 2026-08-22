@@ -40,6 +40,27 @@ export const LAYOUT_NAMES = {
   '16': '16 charts',
 };
 
+const LAYOUT_COUNTS = Object.freeze({
+  s: 1,
+  '2h': 2,
+  '2v': 2,
+  '2-1': 3,
+  '1-2': 3,
+  '3h': 3,
+  '3v': 3,
+  '3s': 3,
+  '4': 4,
+  '4h': 4,
+  '4v': 4,
+  '4s': 4,
+  '6': 6,
+  '8': 8,
+  '10': 10,
+  '12': 12,
+  '14': 14,
+  '16': 16,
+});
+
 const SCOPED_LAYOUT_STATE_EXPRESSION = `
   (function() {
     function read(value) {
@@ -485,7 +506,7 @@ function canonicalJson(value) {
  * Set the chart layout grid.
  * @param {string} layout - Layout code: s, 2h, 2v, 2-1, 1-2, 3h, 3v, 4, 6, 8, etc.
  */
-export async function setLayout({ layout }) {
+export async function setLayout({ layout }, { _deps = {} } = {}) {
   const code = layout.toLowerCase().replace(/\s+/g, '');
 
   // Map friendly names to codes
@@ -502,10 +523,19 @@ export async function setLayout({ layout }) {
     throw new Error(`Unknown layout "${layout}". Available layouts:\n${available}`);
   }
 
-  await evaluateAsync(`${CWC}.setLayout(${safeString(resolved)})`);
-  await new Promise(r => setTimeout(r, 500));
+  const evaluateAsyncFn = _deps.evaluateAsync || evaluateAsync;
+  const listFn = _deps.list || list;
+  const sleep = _deps.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 
-  const state = await list();
+  await evaluateAsyncFn(`${CWC}.setLayout(${safeString(resolved)})`);
+  await sleep(500);
+
+  const state = await listFn();
+  if (String(state.layout) !== resolved || Number(state.chart_count) !== LAYOUT_COUNTS[resolved]) {
+    throw new Error(
+      `TradingView rejected layout "${resolved}"; observed layout "${String(state.layout)}" with ${String(state.chart_count)} chart(s).`,
+    );
+  }
   return {
     success: true,
     layout: resolved,

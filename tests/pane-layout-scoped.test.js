@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { setLayoutScoped, ScopedPaneLayoutEffectError } from '../src/core/pane.js';
+import { setLayout, setLayoutScoped, ScopedPaneLayoutEffectError } from '../src/core/pane.js';
 import { deriveLegacyLayoutIdFromSources } from '../src/core/layout-identity.js';
 import { observerCapabilityManifest } from '../src/release/manifest.js';
 
@@ -21,6 +21,39 @@ const INPUT = {
 };
 
 const CHART_URL = 'https://www.tradingview.com/chart/SJ0J0zgb/';
+
+test('plain layout mutation fails closed when TradingView silently falls back', async () => {
+  const calls = [];
+  await assert.rejects(
+    () => setLayout({ layout: '8' }, {
+      _deps: {
+        evaluateAsync: async (expression) => { calls.push(expression); },
+        sleep: async () => undefined,
+        list: async () => ({ layout: 's', chart_count: 1, panes: [] }),
+      },
+    }),
+    /TradingView rejected layout "8"; observed layout "s" with 1 chart\(s\)\./,
+  );
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /setLayout\("8"\)/);
+});
+
+test('plain layout mutation accepts exact observed layout and pane count', async () => {
+  const result = await setLayout({ layout: '2x2' }, {
+    _deps: {
+      evaluateAsync: async () => undefined,
+      sleep: async () => undefined,
+      list: async () => ({ layout: '4', chart_count: 4, panes: [] }),
+    },
+  });
+  assert.deepEqual(result, {
+    success: true,
+    layout: '4',
+    layout_name: '2x2 grid',
+    chart_count: 4,
+    panes: [],
+  });
+});
 
 function makeFixture({ state = {}, postStates = [], applyLayout = true } = {}) {
   let clock = 0;
