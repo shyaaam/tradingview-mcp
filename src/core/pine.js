@@ -786,13 +786,11 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
 
   let action;
   if (matches.length === 1) {
-    const editorReady = await ensurePineEditorOpen();
-    if (!editorReady) throw new Error('Could not open Pine Editor.');
     const existing = matches[0];
-    await openScript({ name: normalizedName });
     const loaded = await readSavedScriptSource(existing);
     if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
     if (!pineSourcesEquivalent(loaded.source, source)) {
+      await openScript({ name: normalizedName });
       const set = await evaluate(`
         (function() {
           var m = ${FIND_MONACO};
