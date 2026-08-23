@@ -803,8 +803,11 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
   let chartStudyId = null;
   if (addToChart) {
     if (paneIndex !== undefined) await focusPane({ index: paneIndex });
-    await smartCompile();
-    const chartStudies = await readChartStudiesByName(normalizedName);
+    let chartStudies = await readChartStudiesByName(normalizedName);
+    if (chartStudies.length === 0) {
+      await smartCompile();
+      chartStudies = await readChartStudiesByName(normalizedName);
+    }
     if (chartStudies.length !== 1 || !chartStudies[0].id) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
     }
