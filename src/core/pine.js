@@ -821,9 +821,9 @@ export function chartStudyBindsSavedScript(study, savedScriptId) {
   ].includes(indicatorId);
 }
 
-export function chartStudyIsSavedPineScript(study) {
+export function chartStudyIsOwnedPineScript(study) {
   const indicatorId = String(study?.indicator_id || '');
-  return /^(?:Script\$)?(?:USER|PRIV|PUB);/u.test(indicatorId);
+  return /^(?:Script\$)?(?:USER|PRIV);/u.test(indicatorId);
 }
 
 export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
@@ -879,7 +879,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     }
     const boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
     const conflictingSavedStudies = chartStudies.filter((study) => (
-      chartStudyIsSavedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
+      chartStudyIsOwnedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
     ));
     if (boundStudies.length > 1) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: multiple chart studies bound to saved script ${normalizedName}`);

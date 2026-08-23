@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chartStudyBindsSavedScript, chartStudyIsSavedPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
+import { chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -26,11 +26,12 @@ test('pine named-upsert accepts only exact saved-script chart bindings', () => {
   assert.equal(chartStudyBindsSavedScript({ indicator_id: '' }, 'script-1'), false);
 });
 
-test('pine named-upsert identifies saved-script conflicts separately from built-in duplicates', () => {
-  assert.equal(chartStudyIsSavedPineScript({ indicator_id: 'Script$USER;script-1@tv-scripting' }), true);
-  assert.equal(chartStudyIsSavedPineScript({ indicator_id: 'USER;script-1' }), true);
-  assert.equal(chartStudyIsSavedPineScript({ indicator_id: 'STD;Pivot Points Standard' }), false);
-  assert.equal(chartStudyIsSavedPineScript({ indicator_id: '' }), false);
+test('pine named-upsert identifies owned-script conflicts separately from public duplicates', () => {
+  assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'Script$USER;script-1@tv-scripting' }), true);
+  assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'PRIV;script-1' }), true);
+  assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'Script$PUB;script-1@tv-scripting' }), false);
+  assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'STD;Pivot Points Standard' }), false);
+  assert.equal(chartStudyIsOwnedPineScript({ indicator_id: '' }), false);
 });
 
 test('pine named-upsert treats TradingView newline normalization as equivalent', () => {
