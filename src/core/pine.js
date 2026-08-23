@@ -809,6 +809,15 @@ async function readChartStudiesByName(name) {
   `);
 }
 
+async function readChartStudiesAfterNamedCreate(name) {
+  let chartStudies = await readChartStudiesByName(name);
+  for (let attempt = 0; attempt < 4 && Array.isArray(chartStudies) && chartStudies.length === 0; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    chartStudies = await readChartStudiesByName(name);
+  }
+  return chartStudies;
+}
+
 export function chartStudyBindsSavedScript(study, savedScriptId) {
   const indicatorId = String(study?.indicator_id || '');
   const normalizedId = String(savedScriptId || '').replace(/^(?:USER|PRIV|PUB);/u, '');
@@ -898,11 +907,13 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
   let sourceBound = false;
   if (addToChart) {
     if (paneIndex !== undefined) await focusPane({ index: paneIndex });
-    let chartStudies = await readChartStudiesByName(normalizedName);
+    let chartStudies = action === 'created'
+      ? await readChartStudiesAfterNamedCreate(normalizedName)
+      : await readChartStudiesByName(normalizedName);
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    const boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    let boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
     const conflictingSavedStudies = chartStudies.filter((study) => (
       chartStudyIsOwnedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
     ));
@@ -920,6 +931,17 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     }
     if (otherConflicts.length > 0) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is not repo-owned Pine`);
+    }
+    if (action === 'updated' && boundStudies.length === 1) {
+      if (!boundStudies[0].id) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: updated chart study ${normalizedName} has no entity identity`);
+      }
+      await removeChartStudy(boundStudies[0].id);
+      chartStudies = await readChartStudiesByName(normalizedName);
+      if (chartStudies?.error) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+      }
+      boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
     }
     for (const duplicate of publicDuplicates) {
       if (!duplicate.id) throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: public duplicate ${normalizedName} has no entity identity`);
