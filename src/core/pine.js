@@ -813,6 +813,11 @@ export function chartStudyBindsSavedScript(study, savedScriptId) {
   ].includes(indicatorId);
 }
 
+export function chartStudyIsSavedPineScript(study) {
+  const indicatorId = String(study?.indicator_id || '');
+  return /^(?:Script\$)?(?:USER|PRIV|PUB);/u.test(indicatorId);
+}
+
 export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
   const normalizedName = normalizePineScriptName(name);
   const sourceHash = pineSourceSha256(source);
@@ -864,24 +869,29 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    if (chartStudies.length > 1) {
-      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected at most one chart study ${normalizedName}`);
+    const boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    const conflictingSavedStudies = chartStudies.filter((study) => (
+      chartStudyIsSavedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
+    ));
+    if (boundStudies.length > 1) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: multiple chart studies bound to saved script ${normalizedName}`);
     }
-    if (chartStudies.length === 1 && !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart)) {
+    if (conflictingSavedStudies.length > 0) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is bound to a different saved script`);
     }
-    if (chartStudies.length === 0) {
+    if (boundStudies.length === 0) {
       await addSavedPineScriptToChart(exact[0].scriptIdPart);
       chartStudies = await readChartStudiesByName(normalizedName);
     }
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    if (chartStudies.length !== 1 || !chartStudies[0].id || !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart)) {
+    const finalBoundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    if (finalBoundStudies.length !== 1 || !finalBoundStudies[0].id) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
     }
-    chartStudyId = chartStudies[0].id;
-    chartIndicatorId = chartStudies[0].indicator_id;
+    chartStudyId = finalBoundStudies[0].id;
+    chartIndicatorId = finalBoundStudies[0].indicator_id;
     sourceBound = true;
   }
 
