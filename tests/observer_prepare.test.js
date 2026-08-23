@@ -194,6 +194,30 @@ test('observer preparation launches exact stopped profile without fallback', asy
   assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
 });
 
+test('observer restart is idempotent when exact profile is already stopped', async () => {
+  const calls = [];
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    calls.push({ url, method: init.method || 'GET' });
+    if (url === `${BASE_URL}/profiles`) return response([{ id: PROFILE_ID, status: 'stopped' }]);
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+      return response({ status: 'running', cdp_url: `${BASE_URL}/profiles/${PROFILE_ID}/cdp` });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'chart-1', type: 'page', url: 'https://www.tradingview.com/chart/abc' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+
+  const result = await prepare({ profile_id: PROFILE_ID, restart: true });
+  assert.equal(result.profile_id, PROFILE_ID);
+  assert.equal(calls.some((call) => call.url.endsWith(`/profiles/${PROFILE_ID}/stop`)), false);
+  assert.equal(calls.some((call) => call.url.endsWith(`/profiles/${PROFILE_ID}/launch`)), true);
+});
+
 function response(value) {
   return new Response(JSON.stringify(value), {
     status: 200,
