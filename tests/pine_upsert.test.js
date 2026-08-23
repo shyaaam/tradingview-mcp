@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chartStudyBindsSavedScript, normalizePineScriptName, pineSourceSha256 } from '../src/core/pine.js';
+import { chartStudyBindsSavedScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -23,4 +23,10 @@ test('pine named-upsert accepts only exact saved-script chart bindings', () => {
   assert.equal(chartStudyBindsSavedScript({ indicator_id: 'Script$PUB;script-1@tv-scripting' }, 'script-1'), true);
   assert.equal(chartStudyBindsSavedScript({ indicator_id: 'script-2' }, 'script-1'), false);
   assert.equal(chartStudyBindsSavedScript({ indicator_id: '' }, 'script-1'), false);
+});
+
+test('pine named-upsert treats TradingView newline normalization as equivalent', () => {
+  const source = '//@version=6\nindicator("Repo BOS")\nplot(close)';
+  assert.equal(pineSourcesEquivalent(source, source.replaceAll('\n', '\r\n')), true);
+  assert.equal(pineSourcesEquivalent(source, `${source}\nplot(open)`), false);
 });

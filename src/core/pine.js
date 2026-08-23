@@ -52,6 +52,11 @@ export function pineSourceSha256(source) {
   return createHash('sha256').update(source, 'utf8').digest('hex');
 }
 
+export function pineSourcesEquivalent(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  return left.replace(/\r\n?/gu, '\n') === right.replace(/\r\n?/gu, '\n');
+}
+
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
@@ -673,61 +678,62 @@ function exactSavedScriptMatches(scripts, name) {
   return [...byId.values()];
 }
 
-async function createNewPineDocument() {
-  const clicked = await evaluate(`
-    (function() {
-      var root = document.querySelector('.pine-editor-container')
-        || document.querySelector('[class*="pine-editor"]')
-        || document.querySelector('[class*="layout__area--bottom"]');
-      if (!root) return false;
-      var candidates = root.querySelectorAll('button, [role="button"]');
-      for (var i = 0; i < candidates.length; i++) {
-        var text = (candidates[i].textContent || '').trim();
-        if (/^new(?: script)?$/i.test(text) && candidates[i].offsetParent !== null) {
-          candidates[i].click();
-          return true;
-        }
+async function saveNewPineScriptNamed({ name, source }) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var api = window.TradingViewApi;
+      if (!api || typeof api.pineLibApi !== 'function') {
+        return { error: 'PINE_NAMED_CREATE_UNAVAILABLE: TradingViewApi.pineLibApi is unavailable' };
       }
-      return false;
+      try {
+        var pine = await api.pineLibApi();
+        if (!pine || typeof pine.saveNew !== 'function') {
+          return { error: 'PINE_NAMED_CREATE_UNAVAILABLE: TradingViewApi.pineLibApi.saveNew is unavailable' };
+        }
+        var saved = await pine.saveNew({
+          scriptSource: ${JSON.stringify(source)},
+          scriptName: ${JSON.stringify(name)},
+        });
+        if (typeof saved === 'string') return { error: 'PINE_NAMED_CREATE_FAILED: ' + saved };
+        var compileErrors = saved && saved.compileErrors && saved.compileErrors.errors;
+        if (saved && saved.success === false) {
+          return { error: 'PINE_NAMED_CREATE_COMPILE_FAILED', compile_errors: compileErrors || [] };
+        }
+        if (Array.isArray(compileErrors) && compileErrors.length > 0) {
+          return { error: 'PINE_NAMED_CREATE_COMPILE_FAILED', compile_errors: compileErrors };
+        }
+        return { success: true, saved: saved || null };
+      } catch (error) {
+        return { error: 'PINE_NAMED_CREATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
     })()
   `);
-  if (!clicked) throw new Error('PINE_NAMED_CREATE_UNAVAILABLE: exact Pine New action not found');
-  await new Promise(resolve => setTimeout(resolve, 500));
+  if (result?.error) {
+    const details = result.compile_errors ? `: ${JSON.stringify(result.compile_errors)}` : '';
+    throw new Error(`${result.error}${details}`);
+  }
+  if (result?.success !== true) throw new Error('PINE_NAMED_CREATE_FAILED: saveNew returned no success result');
+  return result.saved;
 }
 
-async function saveNewPineDocumentNamed(name) {
-  const client = await getClient();
-  await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
-  await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
-  await new Promise(resolve => setTimeout(resolve, 500));
-  const saved = await evaluate(`
-    (function() {
-      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
-      for (var i = 0; i < dialogs.length; i++) {
-        var dialog = dialogs[i];
-        if (!dialog || dialog.offsetParent === null) continue;
-        var input = dialog.querySelector('input[type="text"], input:not([type])');
-        var button = null;
-        var buttons = dialog.querySelectorAll('button, [role="button"]');
-        for (var j = 0; j < buttons.length; j++) {
-          if ((buttons[j].textContent || '').trim() === 'Save' && buttons[j].offsetParent !== null) {
-            button = buttons[j];
-            break;
-          }
-        }
-        if (!input || !button) continue;
-        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        setter.call(input, ${JSON.stringify(name)});
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        button.click();
-        return true;
+async function addSavedPineScriptToChart(savedScriptId) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.createStudy !== 'function') {
+        return { error: 'PINE_NAMED_UPSERT_CHART_CREATE_UNAVAILABLE: Pine chart createStudy API is unavailable' };
       }
-      return false;
+      try {
+        await chart.createStudy({ type: 'pine', pineId: ${JSON.stringify(savedScriptId)}, version: 'last' });
+        return { success: true };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPSERT_CHART_CREATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
     })()
   `);
-  if (!saved) throw new Error('PINE_NAMED_CREATE_UNAVAILABLE: exact Pine save-name dialog not found');
-  await new Promise(resolve => setTimeout(resolve, 800));
+  if (result?.error) throw new Error(result.error);
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_CREATE_FAILED: createStudy returned no success result');
+  await new Promise(resolve => setTimeout(resolve, 500));
 }
 
 async function readChartStudiesByName(name) {
@@ -783,7 +789,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     await openScript({ name: normalizedName });
     const loaded = await readSavedScriptSource(existing);
     if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
-    if (loaded.source !== source) {
+    if (!pineSourcesEquivalent(loaded.source, source)) {
       const set = await evaluate(`
         (function() {
           var m = ${FIND_MONACO};
@@ -799,9 +805,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
       action = 'unchanged';
     }
   } else {
-    await createNewPineDocument();
-    await setSource({ source });
-    await saveNewPineDocumentNamed(normalizedName);
+    await saveNewPineScriptNamed({ name: normalizedName, source });
     action = 'created';
   }
 
@@ -812,7 +816,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
   }
   const saved = await readSavedScriptSource(exact[0]);
-  if (saved?.source !== source) {
+  if (!pineSourcesEquivalent(saved?.source, source)) {
     throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
   }
 
@@ -825,8 +829,15 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    if (chartStudies.length === 0 || (chartStudies.length === 1 && !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart))) {
-      await smartCompile();
+    if (chartStudies.length > 1) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected at most one chart study ${normalizedName}`);
+    }
+    if (chartStudies.length === 1 && !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart)) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is bound to a different saved script`);
+    }
+    if (chartStudies.length === 0) {
+      if (action === 'created') await addSavedPineScriptToChart(exact[0].scriptIdPart);
+      else await smartCompile();
       chartStudies = await readChartStudiesByName(normalizedName);
     }
     if (chartStudies?.error) {
