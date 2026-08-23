@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizePineScriptName, pineSourceSha256 } from '../src/core/pine.js';
+import { chartStudyBindsSavedScript, normalizePineScriptName, pineSourceSha256 } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -15,4 +15,12 @@ test('pine named-upsert rejects ambiguous names', () => {
   assert.throws(() => normalizePineScriptName(''), /must be non-empty/u);
   assert.throws(() => normalizePineScriptName('bad\nname'), /forbidden/u);
   assert.throws(() => pineSourceSha256(''), /source must be non-empty/u);
+});
+
+test('pine named-upsert accepts only exact saved-script chart bindings', () => {
+  assert.equal(chartStudyBindsSavedScript({ indicator_id: 'script-1' }, 'script-1'), true);
+  assert.equal(chartStudyBindsSavedScript({ indicator_id: 'Script$PRIV;script-1@tv-scripting' }, 'script-1'), true);
+  assert.equal(chartStudyBindsSavedScript({ indicator_id: 'Script$PUB;script-1@tv-scripting' }, 'script-1'), true);
+  assert.equal(chartStudyBindsSavedScript({ indicator_id: 'script-2' }, 'script-1'), false);
+  assert.equal(chartStudyBindsSavedScript({ indicator_id: '' }, 'script-1'), false);
 });

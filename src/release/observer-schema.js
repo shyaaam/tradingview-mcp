@@ -1113,9 +1113,11 @@ export const observerToolDefinitions = Object.freeze({
       name: z.string().min(1),
       saved_script_id: z.string().min(1),
       chart_study_id: z.string().min(1).nullable(),
+      chart_indicator_id: z.string().min(1).nullable(),
       source_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       added_to_chart: z.boolean(),
       pane_index: z.number().int().nonnegative().nullable(),
+      source_bound: z.boolean(),
     },
   },
 });

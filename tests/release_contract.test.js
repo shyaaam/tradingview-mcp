@@ -884,9 +884,11 @@ test('observer result fixtures satisfy registered output schemas', () => {
       name: 'Repo BOS',
       saved_script_id: 'script-1',
       chart_study_id: null,
+      chart_indicator_id: null,
       source_sha256: 'a'.repeat(64),
       added_to_chart: false,
       pane_index: null,
+      source_bound: false,
     },
   };
 
