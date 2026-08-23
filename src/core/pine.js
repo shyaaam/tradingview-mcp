@@ -716,6 +716,46 @@ async function saveNewPineScriptNamed({ name, source }) {
   return result.saved;
 }
 
+async function saveExistingPineScriptNamed({ name, scriptIdPart, source }) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var api = window.TradingViewApi;
+      if (!api || typeof api.pineLibApi !== 'function') {
+        return { error: 'PINE_NAMED_UPDATE_UNAVAILABLE: TradingViewApi.pineLibApi is unavailable' };
+      }
+      try {
+        var pine = await api.pineLibApi();
+        if (!pine || typeof pine.saveNext !== 'function') {
+          return { error: 'PINE_NAMED_UPDATE_UNAVAILABLE: TradingViewApi.pineLibApi.saveNext is unavailable' };
+        }
+        var saved = await pine.saveNext({
+          scriptIdPart: ${JSON.stringify(scriptIdPart)},
+          scriptSource: ${JSON.stringify(source)},
+          isLegacyScript: false,
+          scriptName: ${JSON.stringify(name)},
+        });
+        if (typeof saved === 'string') return { error: 'PINE_NAMED_UPDATE_FAILED: ' + saved };
+        var compileErrors = saved && saved.compileErrors && saved.compileErrors.errors;
+        if (saved && saved.success === false) {
+          return { error: 'PINE_NAMED_UPDATE_COMPILE_FAILED', compile_errors: compileErrors || [] };
+        }
+        if (Array.isArray(compileErrors) && compileErrors.length > 0) {
+          return { error: 'PINE_NAMED_UPDATE_COMPILE_FAILED', compile_errors: compileErrors };
+        }
+        return { success: true, saved: saved || null };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPDATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) {
+    const details = result.compile_errors ? `: ${JSON.stringify(result.compile_errors)}` : '';
+    throw new Error(`${result.error}${details}`);
+  }
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPDATE_FAILED: saveNext returned no success result');
+  return result.saved;
+}
+
 async function addSavedPineScriptToChart(savedScriptId) {
   const result = await evaluateAsync(`
     (async function() {
@@ -790,17 +830,11 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     const loaded = await readSavedScriptSource(existing);
     if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
     if (!pineSourcesEquivalent(loaded.source, source)) {
-      await openScript({ name: normalizedName });
-      const set = await evaluate(`
-        (function() {
-          var m = ${FIND_MONACO};
-          if (!m) return false;
-          m.editor.setValue(${JSON.stringify(source)});
-          return true;
-        })()
-      `);
-      if (!set) throw new Error('PINE_NAMED_UPSERT_EDITOR_UNAVAILABLE');
-      await save();
+      await saveExistingPineScriptNamed({
+        name: normalizedName,
+        scriptIdPart: existing.scriptIdPart,
+        source,
+      });
       action = 'updated';
     } else {
       action = 'unchanged';
@@ -837,8 +871,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is bound to a different saved script`);
     }
     if (chartStudies.length === 0) {
-      if (action === 'created') await addSavedPineScriptToChart(exact[0].scriptIdPart);
-      else await smartCompile();
+      await addSavedPineScriptToChart(exact[0].scriptIdPart);
       chartStudies = await readChartStudiesByName(normalizedName);
     }
     if (chartStudies?.error) {
