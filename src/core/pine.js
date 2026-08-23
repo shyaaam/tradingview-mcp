@@ -826,6 +826,31 @@ export function chartStudyIsOwnedPineScript(study) {
   return /^(?:Script\$)?(?:USER|PRIV);/u.test(indicatorId);
 }
 
+export function chartStudyIsPublicPineScript(study) {
+  const indicatorId = String(study?.indicator_id || '');
+  return /^(?:Script\$)?PUB;/u.test(indicatorId);
+}
+
+async function removeChartStudy(entityId) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.removeEntity !== 'function') {
+        return { error: 'PINE_NAMED_UPSERT_CHART_REMOVE_UNAVAILABLE: chart removeEntity API is unavailable' };
+      }
+      try {
+        chart.removeEntity(${JSON.stringify(entityId)});
+        return { success: true };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPSERT_CHART_REMOVE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_REMOVE_FAILED: removeEntity returned no success result');
+  await new Promise(resolve => setTimeout(resolve, 500));
+}
+
 export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
   const normalizedName = normalizePineScriptName(name);
   const sourceHash = pineSourceSha256(source);
@@ -881,11 +906,30 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     const conflictingSavedStudies = chartStudies.filter((study) => (
       chartStudyIsOwnedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
     ));
+    const publicDuplicates = chartStudies.filter((study) => chartStudyIsPublicPineScript(study));
+    const otherConflicts = chartStudies.filter((study) => (
+      !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
+      && !chartStudyIsOwnedPineScript(study)
+      && !chartStudyIsPublicPineScript(study)
+    ));
     if (boundStudies.length > 1) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: multiple chart studies bound to saved script ${normalizedName}`);
     }
     if (conflictingSavedStudies.length > 0) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is bound to a different saved script`);
+    }
+    if (otherConflicts.length > 0) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is not repo-owned Pine`);
+    }
+    for (const duplicate of publicDuplicates) {
+      if (!duplicate.id) throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: public duplicate ${normalizedName} has no entity identity`);
+      await removeChartStudy(duplicate.id);
+    }
+    if (publicDuplicates.length > 0) {
+      chartStudies = await readChartStudiesByName(normalizedName);
+      if (chartStudies?.error) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+      }
     }
     if (boundStudies.length === 0) {
       await addSavedPineScriptToChart(exact[0].scriptIdPart);
@@ -895,7 +939,7 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
     const finalBoundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
-    if (finalBoundStudies.length !== 1 || !finalBoundStudies[0].id) {
+    if (finalBoundStudies.length !== 1 || chartStudies.length !== 1 || !finalBoundStudies[0].id) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
     }
     chartStudyId = finalBoundStudies[0].id;

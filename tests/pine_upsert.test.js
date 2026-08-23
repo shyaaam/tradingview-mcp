@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
+import { chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, chartStudyIsPublicPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -32,6 +32,9 @@ test('pine named-upsert identifies owned-script conflicts separately from public
   assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'Script$PUB;script-1@tv-scripting' }), false);
   assert.equal(chartStudyIsOwnedPineScript({ indicator_id: 'STD;Pivot Points Standard' }), false);
   assert.equal(chartStudyIsOwnedPineScript({ indicator_id: '' }), false);
+  assert.equal(chartStudyIsPublicPineScript({ indicator_id: 'Script$PUB;script-1@tv-scripting' }), true);
+  assert.equal(chartStudyIsPublicPineScript({ indicator_id: 'PUB;script-1' }), true);
+  assert.equal(chartStudyIsPublicPineScript({ indicator_id: 'Script$USER;script-1@tv-scripting' }), false);
 });
 
 test('pine named-upsert treats TradingView newline normalization as equivalent', () => {
