@@ -4,6 +4,8 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { createHash } from 'node:crypto';
+import { focus as focusPane } from './pane.js';
 
 // ── Monaco finder (injected into TV page) ──
 const FIND_MONACO = `
@@ -34,6 +36,21 @@ const FIND_MONACO = `
     return null;
   })()
 `;
+const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+
+export function normalizePineScriptName(name) {
+  if (typeof name !== 'string') throw new Error('Pine script name must be a string');
+  const normalized = name.trim();
+  if (!normalized) throw new Error('Pine script name must be non-empty');
+  if (normalized.length > 200) throw new Error('Pine script name is too long');
+  if (/[\r\n\u0000]/u.test(normalized)) throw new Error('Pine script name contains forbidden characters');
+  return normalized;
+}
+
+export function pineSourceSha256(source) {
+  if (typeof source !== 'string' || source.length === 0) throw new Error('Pine source must be non-empty');
+  return createHash('sha256').update(source, 'utf8').digest('hex');
+}
 
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
@@ -615,5 +632,193 @@ export async function listScripts() {
     count: scripts?.scripts?.length || 0,
     source: 'internal_api',
     error: scripts?.error,
+  };
+}
+
+async function readSavedScripts() {
+  return evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (!Array.isArray(data)) return { scripts: [], error: 'Unexpected response from pine-facade' };
+        return { scripts: data };
+      })
+      .catch(function(error) { return { scripts: [], error: error.message }; })
+  `);
+}
+
+async function readSavedScriptSource(script) {
+  return evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/get/'
+      + ${JSON.stringify(script.scriptIdPart)} + '/' + ${JSON.stringify(script.version || 1)},
+      { credentials: 'include' })
+      .then(function(response) { return response.json(); })
+      .then(function(data) { return { source: data.source || '' }; })
+      .catch(function(error) { return { source: '', error: error.message }; })
+  `);
+}
+
+function exactSavedScriptMatches(scripts, name) {
+  const normalized = name.toLocaleLowerCase('en-US');
+  const byId = new Map();
+  for (const script of scripts || []) {
+    if (!script || typeof script !== 'object') continue;
+    const scriptName = String(script.scriptName || '').trim();
+    const scriptTitle = String(script.scriptTitle || '').trim();
+    if (scriptName.toLocaleLowerCase('en-US') !== normalized
+      && scriptTitle.toLocaleLowerCase('en-US') !== normalized) continue;
+    const id = String(script.scriptIdPart || `${scriptName}\u0000${scriptTitle}`);
+    byId.set(id, script);
+  }
+  return [...byId.values()];
+}
+
+async function createNewPineDocument() {
+  const clicked = await evaluate(`
+    (function() {
+      var root = document.querySelector('.pine-editor-container')
+        || document.querySelector('[class*="pine-editor"]')
+        || document.querySelector('[class*="layout__area--bottom"]');
+      if (!root) return false;
+      var candidates = root.querySelectorAll('button, [role="button"]');
+      for (var i = 0; i < candidates.length; i++) {
+        var text = (candidates[i].textContent || '').trim();
+        if (/^new(?: script)?$/i.test(text) && candidates[i].offsetParent !== null) {
+          candidates[i].click();
+          return true;
+        }
+      }
+      return false;
+    })()
+  `);
+  if (!clicked) throw new Error('PINE_NAMED_CREATE_UNAVAILABLE: exact Pine New action not found');
+  await new Promise(resolve => setTimeout(resolve, 500));
+}
+
+async function saveNewPineDocumentNamed(name) {
+  const client = await getClient();
+  await client.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
+  await client.Input.dispatchKeyEvent({ type: 'keyUp', key: 's', code: 'KeyS' });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const saved = await evaluate(`
+    (function() {
+      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
+      for (var i = 0; i < dialogs.length; i++) {
+        var dialog = dialogs[i];
+        if (!dialog || dialog.offsetParent === null) continue;
+        var input = dialog.querySelector('input[type="text"], input:not([type])');
+        var button = null;
+        var buttons = dialog.querySelectorAll('button, [role="button"]');
+        for (var j = 0; j < buttons.length; j++) {
+          if ((buttons[j].textContent || '').trim() === 'Save' && buttons[j].offsetParent !== null) {
+            button = buttons[j];
+            break;
+          }
+        }
+        if (!input || !button) continue;
+        var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify(name)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        button.click();
+        return true;
+      }
+      return false;
+    })()
+  `);
+  if (!saved) throw new Error('PINE_NAMED_CREATE_UNAVAILABLE: exact Pine save-name dialog not found');
+  await new Promise(resolve => setTimeout(resolve, 800));
+}
+
+async function readChartStudiesByName(name) {
+  return evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      var studies = chart && typeof chart.getAllStudies === 'function' ? chart.getAllStudies() : [];
+      var matches = [];
+      for (var i = 0; i < studies.length; i++) {
+        var item = studies[i] || {};
+        var itemName = String(item.name || item.title || '').trim();
+        if (itemName.toLocaleLowerCase() === ${JSON.stringify(name.toLocaleLowerCase('en-US'))}) {
+          matches.push({ id: String(item.id || ''), name: itemName });
+        }
+      }
+      return matches;
+    })()
+  `);
+}
+
+export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
+  const normalizedName = normalizePineScriptName(name);
+  const sourceHash = pineSourceSha256(source);
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
+
+  const listed = await readSavedScripts();
+  if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
+  const matches = exactSavedScriptMatches(listed.scripts, normalizedName);
+  if (matches.length > 1) {
+    throw new Error(`PINE_NAMED_UPSERT_AMBIGUOUS: ${normalizedName}`);
+  }
+
+  let action;
+  if (matches.length === 1) {
+    const existing = matches[0];
+    await openScript({ name: normalizedName });
+    const loaded = await readSavedScriptSource(existing);
+    if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
+    if (loaded.source !== source) {
+      const set = await evaluate(`
+        (function() {
+          var m = ${FIND_MONACO};
+          if (!m) return false;
+          m.editor.setValue(${JSON.stringify(source)});
+          return true;
+        })()
+      `);
+      if (!set) throw new Error('PINE_NAMED_UPSERT_EDITOR_UNAVAILABLE');
+      await save();
+      action = 'updated';
+    } else {
+      action = 'unchanged';
+    }
+  } else {
+    await createNewPineDocument();
+    await setSource({ source });
+    await saveNewPineDocumentNamed(normalizedName);
+    action = 'created';
+  }
+
+  const after = await readSavedScripts();
+  if (after?.error) throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: ${after.error}`);
+  const exact = exactSavedScriptMatches(after.scripts, normalizedName);
+  if (exact.length !== 1) {
+    throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
+  }
+  const saved = await readSavedScriptSource(exact[0]);
+  if (saved?.source !== source) {
+    throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
+  }
+
+  let chartStudyId = null;
+  if (addToChart) {
+    if (paneIndex !== undefined) await focusPane({ index: paneIndex });
+    await smartCompile();
+    const chartStudies = await readChartStudiesByName(normalizedName);
+    if (chartStudies.length !== 1 || !chartStudies[0].id) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
+    }
+    chartStudyId = chartStudies[0].id;
+  }
+
+  return {
+    success: true,
+    action,
+    name: normalizedName,
+    saved_script_id: exact[0].scriptIdPart,
+    chart_study_id: chartStudyId,
+    source_sha256: sourceHash,
+    added_to_chart: addToChart,
+    pane_index: paneIndex ?? null,
   };
 }

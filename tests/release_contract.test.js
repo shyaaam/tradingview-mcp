@@ -30,6 +30,7 @@ import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-run
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
 import { registerObserverScreenshotTool } from '../src/tools/observer-screenshot.js';
 import { registerIndicatorTools } from '../src/tools/indicators.js';
+import { registerPineTools } from '../src/tools/pine.js';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json');
@@ -103,6 +104,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
+    'pine_upsert_named',
   ]);
   assert.equal(names.includes('data_get_ohlcv'), false);
   assert.equal(names.includes('capture_screenshot'), false);
@@ -117,6 +119,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+    pine_upsert_named: classifications.pine_upsert_named,
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
@@ -126,6 +129,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    pine_upsert_named: 'chart_mutation',
   });
 
   for (const capability of observerCapabilityManifest.capabilities) {
@@ -153,6 +157,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartRuntimeContentSnapshotTools(fakeServer);
   registerObserverScreenshotTool(fakeServer);
   registerIndicatorTools(fakeServer);
+  registerPineTools(fakeServer);
 
   for (const capability of observerCapabilityManifest.capabilities) {
     assert.equal(registered.has(capability.name), true, `missing MCP tool: ${capability.name}`);
@@ -873,6 +878,16 @@ test('observer result fixtures satisfy registered output schemas', () => {
     },
     chart_set_symbol: { success: true, symbol: 'AAPL', chart_ready: true },
     chart_set_timeframe: { success: true, timeframe: '60', chart_ready: true },
+    pine_upsert_named: {
+      success: true,
+      action: 'unchanged',
+      name: 'Repo BOS',
+      saved_script_id: 'script-1',
+      chart_study_id: null,
+      source_sha256: 'a'.repeat(64),
+      added_to_chart: false,
+      pane_index: null,
+    },
   };
 
   for (const capability of observerCapabilityManifest.capabilities) {
