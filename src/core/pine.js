@@ -773,8 +773,6 @@ export function chartStudyBindsSavedScript(study, savedScriptId) {
 export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
   const normalizedName = normalizePineScriptName(name);
   const sourceHash = pineSourceSha256(source);
-  const editorReady = await ensurePineEditorOpen();
-  if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   const listed = await readSavedScripts();
   if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
@@ -785,6 +783,8 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
 
   let action;
   if (matches.length === 1) {
+    const editorReady = await ensurePineEditorOpen();
+    if (!editorReady) throw new Error('Could not open Pine Editor.');
     const existing = matches[0];
     await openScript({ name: normalizedName });
     const loaded = await readSavedScriptSource(existing);
