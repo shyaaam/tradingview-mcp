@@ -734,10 +734,8 @@ async function readChartStudiesByName(name) {
   return evaluate(`
     (function() {
       var chart = ${CHART_API};
-      var widget = chart && chart._chartWidget;
-      var model = widget && typeof widget.model === 'function' ? widget.model() : null;
-      var chartModel = model && typeof model.model === 'function' ? model.model() : null;
-      var studies = chartModel && typeof chartModel.dataSources === 'function' ? chartModel.dataSources() : [];
+      var studies = chart && typeof chart.getAllStudies === 'function' ? chart.getAllStudies() : null;
+      if (!Array.isArray(studies)) return { error: 'focused pane study readback unavailable' };
       var matches = [];
       for (var i = 0; i < studies.length; i++) {
         var item = studies[i] || {};
@@ -824,9 +822,15 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
   if (addToChart) {
     if (paneIndex !== undefined) await focusPane({ index: paneIndex });
     let chartStudies = await readChartStudiesByName(normalizedName);
+    if (chartStudies?.error) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+    }
     if (chartStudies.length === 0 || (chartStudies.length === 1 && !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart))) {
       await smartCompile();
       chartStudies = await readChartStudiesByName(normalizedName);
+    }
+    if (chartStudies?.error) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
     if (chartStudies.length !== 1 || !chartStudies[0].id || !chartStudyBindsSavedScript(chartStudies[0], exact[0].scriptIdPart)) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
