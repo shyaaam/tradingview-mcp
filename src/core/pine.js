@@ -780,7 +780,14 @@ async function readChartStudiesByName(name) {
   return evaluate(`
     (function() {
       var chart = ${CHART_API};
-      var studies = chart && typeof chart.getAllStudies === 'function' ? chart.getAllStudies() : null;
+      var chartModel = null;
+      try {
+        var model = chart && typeof chart.model === 'function' ? chart.model() : null;
+        chartModel = model && typeof model.model === 'function' ? model.model() : null;
+      } catch (e) {}
+      var studies = chartModel && typeof chartModel.dataSources === 'function'
+        ? chartModel.dataSources()
+        : null;
       if (!Array.isArray(studies)) return { error: 'focused pane study readback unavailable' };
       var matches = [];
       for (var i = 0; i < studies.length; i++) {
