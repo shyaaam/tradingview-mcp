@@ -763,10 +763,13 @@ async function readChartStudiesByName(name) {
 
 export function chartStudyBindsSavedScript(study, savedScriptId) {
   const indicatorId = String(study?.indicator_id || '');
+  const normalizedId = String(savedScriptId || '').replace(/^(?:USER|PRIV|PUB);/u, '');
   return [
     savedScriptId,
-    `Script$PUB;${savedScriptId}@tv-scripting`,
-    `Script$PRIV;${savedScriptId}@tv-scripting`,
+    normalizedId,
+    `Script$USER;${normalizedId}@tv-scripting`,
+    `Script$PUB;${normalizedId}@tv-scripting`,
+    `Script$PRIV;${normalizedId}@tv-scripting`,
   ].includes(indicatorId);
 }
 
