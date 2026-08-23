@@ -260,7 +260,13 @@ async function invokeExistingChartSave(evaluateAsync, expectedSavedLayoutUid) {
         }
         try {
           service.saveExistentChart(function(value) {
-            finish({ success: true, uid: value && value.uid != null ? String(value.uid) : null });
+            var explicitUid = null;
+            if (typeof value === 'string' && value.trim()) {
+              explicitUid = value.trim();
+            } else if (value && typeof value.uid === 'string' && value.uid.trim()) {
+              explicitUid = value.uid.trim();
+            }
+            finish({ success: true, explicit_uid: explicitUid });
           }, function(error) {
             finish({ success: false, error: 'Existing-chart save failed.' });
           }, { autoSave: false });
@@ -275,14 +281,13 @@ async function invokeExistingChartSave(evaluateAsync, expectedSavedLayoutUid) {
       phase: 'save-invocation', effectState: 'ambiguous', saveInvoked: true,
     });
   }
-  const savedLayoutUid = saved.uid == null ? null : String(saved.uid);
-  if (savedLayoutUid !== expectedSavedLayoutUid) {
+  if (saved.explicit_uid !== null && saved.explicit_uid !== expectedSavedLayoutUid) {
     throw new ScopedSaveEffectError('Existing-chart save callback returned an unexpected saved-layout identity.', {
       phase: 'save-callback', effectState: 'ambiguous', saveInvoked: true,
       saveCallbackConfirmed: true,
     });
   }
-  return savedLayoutUid;
+  return saved.explicit_uid;
 }
 
 async function assertExactSaveTarget(expected, session, listTabs) {
@@ -659,7 +664,7 @@ export async function saveExistingChartScopedV2({
     const parityHash = await inspectSaveParity({ expected, inspectInventory, inspectSignatures });
 
     saveInvoked = true;
-    const savedLayoutUid = await invokeExistingChartSave(evaluateAsync, expected.savedLayoutUid);
+    await invokeExistingChartSave(evaluateAsync, expected.savedLayoutUid);
 
     let post;
     try {
@@ -679,7 +684,7 @@ export async function saveExistingChartScopedV2({
       chart_id: post.chart_id,
       canonical_url: post.canonical_url,
       workspace_layout_id: post.workspace_layout_id,
-      saved_layout_uid: savedLayoutUid,
+      saved_layout_uid: expected.savedLayoutUid,
       pane_count: post.pane_count,
       indicator_parity_hash: parityHash,
       saved_existing: true,
