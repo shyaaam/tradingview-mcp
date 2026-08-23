@@ -782,7 +782,8 @@ async function readChartStudiesByName(name) {
       var chart = ${CHART_API};
       var chartModel = null;
       try {
-        var model = chart && typeof chart.model === 'function' ? chart.model() : null;
+        var widget = chart && chart._chartWidget ? chart._chartWidget : null;
+        var model = widget && typeof widget.model === 'function' ? widget.model() : null;
         chartModel = model && typeof model.model === 'function' ? model.model() : null;
       } catch (e) {}
       var studies = chartModel && typeof chartModel.dataSources === 'function'
