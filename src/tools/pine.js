@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { jsonResult } from './_format.js';
 import * as core from '../core/pine.js';
+import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerPineTools(server) {
   server.tool('pine_get_source', 'Get current Pine Script source code from the editor', {}, async () => {
@@ -56,6 +57,11 @@ export function registerPineTools(server) {
 
   server.tool('pine_list_scripts', 'List saved Pine Scripts', {}, async () => {
     try { return jsonResult(await core.listScripts()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'pine_upsert_named', 'Create or update one exact saved Pine Script by name, with source-hash and optional chart readback', async ({ name, source, add_to_chart: addToChart = false, pane_index: paneIndex }) => {
+    try { return jsonResult(await core.upsertNamed({ name, source, addToChart, paneIndex })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

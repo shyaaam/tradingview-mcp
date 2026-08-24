@@ -194,7 +194,7 @@ test('observer preparation launches exact stopped profile without fallback', asy
   assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
 });
 
-test('observer restart launches stopped profile without calling stop on an already stopped profile', async () => {
+test('observer restart is idempotent when exact profile is already stopped', async () => {
   const calls = [];
   global.fetch = async (input, init = {}) => {
     const url = String(input);
@@ -213,6 +213,7 @@ test('observer restart launches stopped profile without calling stop on an alrea
   };
 
   const result = await prepare({ profile_id: PROFILE_ID, restart: true });
+  assert.equal(result.profile_id, PROFILE_ID);
   assert.equal(result.restart_requested, true);
   assert.equal(calls.some((call) => call.url.endsWith('/stop')), false);
   assert.equal(calls.some((call) => call.url.endsWith(`/profiles/${PROFILE_ID}/launch`)), true);

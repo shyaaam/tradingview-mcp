@@ -4,6 +4,8 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { createHash } from 'node:crypto';
+import { focus as focusPane } from './pane.js';
 
 // ── Monaco finder (injected into TV page) ──
 const FIND_MONACO = `
@@ -34,6 +36,26 @@ const FIND_MONACO = `
     return null;
   })()
 `;
+const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+
+export function normalizePineScriptName(name) {
+  if (typeof name !== 'string') throw new Error('Pine script name must be a string');
+  const normalized = name.trim();
+  if (!normalized) throw new Error('Pine script name must be non-empty');
+  if (normalized.length > 200) throw new Error('Pine script name is too long');
+  if (/[\r\n\u0000]/u.test(normalized)) throw new Error('Pine script name contains forbidden characters');
+  return normalized;
+}
+
+export function pineSourceSha256(source) {
+  if (typeof source !== 'string' || source.length === 0) throw new Error('Pine source must be non-empty');
+  return createHash('sha256').update(source, 'utf8').digest('hex');
+}
+
+export function pineSourcesEquivalent(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  return left.replace(/\r\n?/gu, '\n') === right.replace(/\r\n?/gu, '\n');
+}
 
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
@@ -615,5 +637,348 @@ export async function listScripts() {
     count: scripts?.scripts?.length || 0,
     source: 'internal_api',
     error: scripts?.error,
+  };
+}
+
+async function readSavedScripts() {
+  return evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
+      .then(function(response) { return response.json(); })
+      .then(function(data) {
+        if (!Array.isArray(data)) return { scripts: [], error: 'Unexpected response from pine-facade' };
+        return { scripts: data };
+      })
+      .catch(function(error) { return { scripts: [], error: error.message }; })
+  `);
+}
+
+async function readSavedScriptSource(script) {
+  return evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/get/'
+      + ${JSON.stringify(script.scriptIdPart)} + '/' + ${JSON.stringify(script.version || 1)},
+      { credentials: 'include' })
+      .then(function(response) { return response.json(); })
+      .then(function(data) { return { source: data.source || '' }; })
+      .catch(function(error) { return { source: '', error: error.message }; })
+  `);
+}
+
+function exactSavedScriptMatches(scripts, name) {
+  const normalized = name.toLocaleLowerCase('en-US');
+  const byId = new Map();
+  for (const script of scripts || []) {
+    if (!script || typeof script !== 'object') continue;
+    const scriptName = String(script.scriptName || '').trim();
+    const scriptTitle = String(script.scriptTitle || '').trim();
+    if (scriptName.toLocaleLowerCase('en-US') !== normalized
+      && scriptTitle.toLocaleLowerCase('en-US') !== normalized) continue;
+    const id = String(script.scriptIdPart || `${scriptName}\u0000${scriptTitle}`);
+    byId.set(id, script);
+  }
+  return [...byId.values()];
+}
+
+async function saveNewPineScriptNamed({ name, source }) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var api = window.TradingViewApi;
+      if (!api || typeof api.pineLibApi !== 'function') {
+        return { error: 'PINE_NAMED_CREATE_UNAVAILABLE: TradingViewApi.pineLibApi is unavailable' };
+      }
+      try {
+        var pine = await api.pineLibApi();
+        if (!pine || typeof pine.saveNew !== 'function') {
+          return { error: 'PINE_NAMED_CREATE_UNAVAILABLE: TradingViewApi.pineLibApi.saveNew is unavailable' };
+        }
+        var saved = await pine.saveNew({
+          scriptSource: ${JSON.stringify(source)},
+          scriptName: ${JSON.stringify(name)},
+        });
+        if (typeof saved === 'string') return { error: 'PINE_NAMED_CREATE_FAILED: ' + saved };
+        var compileErrors = saved && saved.compileErrors && saved.compileErrors.errors;
+        if (saved && saved.success === false) {
+          return { error: 'PINE_NAMED_CREATE_COMPILE_FAILED', compile_errors: compileErrors || [] };
+        }
+        if (Array.isArray(compileErrors) && compileErrors.length > 0) {
+          return { error: 'PINE_NAMED_CREATE_COMPILE_FAILED', compile_errors: compileErrors };
+        }
+        return { success: true, saved: saved || null };
+      } catch (error) {
+        return { error: 'PINE_NAMED_CREATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) {
+    const details = result.compile_errors ? `: ${JSON.stringify(result.compile_errors)}` : '';
+    throw new Error(`${result.error}${details}`);
+  }
+  if (result?.success !== true) throw new Error('PINE_NAMED_CREATE_FAILED: saveNew returned no success result');
+  return result.saved;
+}
+
+async function saveExistingPineScriptNamed({ name, scriptIdPart, source }) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var api = window.TradingViewApi;
+      if (!api || typeof api.pineLibApi !== 'function') {
+        return { error: 'PINE_NAMED_UPDATE_UNAVAILABLE: TradingViewApi.pineLibApi is unavailable' };
+      }
+      try {
+        var pine = await api.pineLibApi();
+        if (!pine || typeof pine.saveNext !== 'function') {
+          return { error: 'PINE_NAMED_UPDATE_UNAVAILABLE: TradingViewApi.pineLibApi.saveNext is unavailable' };
+        }
+        var saved = await pine.saveNext({
+          scriptIdPart: ${JSON.stringify(scriptIdPart)},
+          scriptSource: ${JSON.stringify(source)},
+          isLegacyScript: false,
+          scriptName: ${JSON.stringify(name)},
+        });
+        if (typeof saved === 'string') return { error: 'PINE_NAMED_UPDATE_FAILED: ' + saved };
+        var compileErrors = saved && saved.compileErrors && saved.compileErrors.errors;
+        if (saved && saved.success === false) {
+          return { error: 'PINE_NAMED_UPDATE_COMPILE_FAILED', compile_errors: compileErrors || [] };
+        }
+        if (Array.isArray(compileErrors) && compileErrors.length > 0) {
+          return { error: 'PINE_NAMED_UPDATE_COMPILE_FAILED', compile_errors: compileErrors };
+        }
+        return { success: true, saved: saved || null };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPDATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) {
+    const details = result.compile_errors ? `: ${JSON.stringify(result.compile_errors)}` : '';
+    throw new Error(`${result.error}${details}`);
+  }
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPDATE_FAILED: saveNext returned no success result');
+  return result.saved;
+}
+
+async function addSavedPineScriptToChart(savedScriptId) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.createStudy !== 'function') {
+        return { error: 'PINE_NAMED_UPSERT_CHART_CREATE_UNAVAILABLE: Pine chart createStudy API is unavailable' };
+      }
+      try {
+        await chart.createStudy({ type: 'pine', pineId: ${JSON.stringify(savedScriptId)}, version: 'last' });
+        return { success: true };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPSERT_CHART_CREATE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_CREATE_FAILED: createStudy returned no success result');
+  await new Promise(resolve => setTimeout(resolve, 500));
+}
+
+async function readChartStudiesByName(name) {
+  return evaluate(`
+    (function() {
+      var chart = ${CHART_API};
+      var chartModel = null;
+      try {
+        var widget = chart && chart._chartWidget ? chart._chartWidget : null;
+        var model = widget && typeof widget.model === 'function' ? widget.model() : null;
+        chartModel = model && typeof model.model === 'function' ? model.model() : null;
+      } catch (e) {}
+      var studies = chartModel && typeof chartModel.dataSources === 'function'
+        ? chartModel.dataSources()
+        : null;
+      if (!Array.isArray(studies)) return { error: 'focused pane study readback unavailable' };
+      var matches = [];
+      for (var i = 0; i < studies.length; i++) {
+        var item = studies[i] || {};
+        var meta = typeof item.metaInfo === 'function' ? item.metaInfo() : null;
+        var itemName = String(meta && (meta.description || meta.shortDescription || meta.id) || '').trim();
+        if (itemName.toLocaleLowerCase() === ${JSON.stringify(name.toLocaleLowerCase('en-US'))}) {
+          var entityId = '';
+          try {
+            if (typeof item.id === 'function') entityId = String(item.id() || '').trim();
+            if (!entityId && item._id !== undefined) entityId = String(item._id || '').trim();
+          } catch (e) {}
+          matches.push({ id: entityId, name: itemName, indicator_id: String(meta && meta.id || '') });
+        }
+      }
+      return matches;
+    })()
+  `);
+}
+
+async function readChartStudiesAfterNamedCreate(name) {
+  let chartStudies = await readChartStudiesByName(name);
+  for (let attempt = 0; attempt < 4 && Array.isArray(chartStudies) && chartStudies.length === 0; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    chartStudies = await readChartStudiesByName(name);
+  }
+  return chartStudies;
+}
+
+export function chartStudyBindsSavedScript(study, savedScriptId) {
+  const indicatorId = String(study?.indicator_id || '');
+  const normalizedId = String(savedScriptId || '').replace(/^(?:USER|PRIV|PUB);/u, '');
+  return [
+    savedScriptId,
+    normalizedId,
+    `Script$USER;${normalizedId}@tv-scripting`,
+    `Script$PUB;${normalizedId}@tv-scripting`,
+    `Script$PRIV;${normalizedId}@tv-scripting`,
+  ].includes(indicatorId);
+}
+
+export function chartStudyIsOwnedPineScript(study) {
+  const indicatorId = String(study?.indicator_id || '');
+  return /^(?:Script\$)?(?:USER|PRIV);/u.test(indicatorId);
+}
+
+export function chartStudyIsPublicPineScript(study) {
+  const indicatorId = String(study?.indicator_id || '');
+  return /^(?:Script\$)?PUB;/u.test(indicatorId);
+}
+
+async function removeChartStudy(entityId) {
+  const result = await evaluateAsync(`
+    (async function() {
+      var chart = ${CHART_API};
+      if (!chart || typeof chart.removeEntity !== 'function') {
+        return { error: 'PINE_NAMED_UPSERT_CHART_REMOVE_UNAVAILABLE: chart removeEntity API is unavailable' };
+      }
+      try {
+        chart.removeEntity(${JSON.stringify(entityId)});
+        return { success: true };
+      } catch (error) {
+        return { error: 'PINE_NAMED_UPSERT_CHART_REMOVE_FAILED: ' + (error && error.message ? error.message : String(error)) };
+      }
+    })()
+  `);
+  if (result?.error) throw new Error(result.error);
+  if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_REMOVE_FAILED: removeEntity returned no success result');
+  await new Promise(resolve => setTimeout(resolve, 500));
+}
+
+export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
+  const normalizedName = normalizePineScriptName(name);
+  const sourceHash = pineSourceSha256(source);
+
+  const listed = await readSavedScripts();
+  if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
+  const matches = exactSavedScriptMatches(listed.scripts, normalizedName);
+  if (matches.length > 1) {
+    throw new Error(`PINE_NAMED_UPSERT_AMBIGUOUS: ${normalizedName}`);
+  }
+
+  let action;
+  if (matches.length === 1) {
+    const existing = matches[0];
+    const loaded = await readSavedScriptSource(existing);
+    if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
+    if (!pineSourcesEquivalent(loaded.source, source)) {
+      await saveExistingPineScriptNamed({
+        name: normalizedName,
+        scriptIdPart: existing.scriptIdPart,
+        source,
+      });
+      action = 'updated';
+    } else {
+      action = 'unchanged';
+    }
+  } else {
+    await saveNewPineScriptNamed({ name: normalizedName, source });
+    action = 'created';
+  }
+
+  const after = await readSavedScripts();
+  if (after?.error) throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: ${after.error}`);
+  const exact = exactSavedScriptMatches(after.scripts, normalizedName);
+  if (exact.length !== 1) {
+    throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
+  }
+  const saved = await readSavedScriptSource(exact[0]);
+  if (!pineSourcesEquivalent(saved?.source, source)) {
+    throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
+  }
+
+  let chartStudyId = null;
+  let chartIndicatorId = null;
+  let sourceBound = false;
+  if (addToChart) {
+    if (paneIndex !== undefined) await focusPane({ index: paneIndex });
+    let chartStudies = action === 'created'
+      ? await readChartStudiesAfterNamedCreate(normalizedName)
+      : await readChartStudiesByName(normalizedName);
+    if (chartStudies?.error) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+    }
+    let boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    const conflictingSavedStudies = chartStudies.filter((study) => (
+      chartStudyIsOwnedPineScript(study) && !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
+    ));
+    const publicDuplicates = chartStudies.filter((study) => chartStudyIsPublicPineScript(study));
+    const otherConflicts = chartStudies.filter((study) => (
+      !chartStudyBindsSavedScript(study, exact[0].scriptIdPart)
+      && !chartStudyIsOwnedPineScript(study)
+      && !chartStudyIsPublicPineScript(study)
+    ));
+    if (boundStudies.length > 1) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: multiple chart studies bound to saved script ${normalizedName}`);
+    }
+    if (conflictingSavedStudies.length > 0) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is bound to a different saved script`);
+    }
+    if (otherConflicts.length > 0) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: existing chart study ${normalizedName} is not repo-owned Pine`);
+    }
+    if (action === 'updated' && boundStudies.length === 1) {
+      if (!boundStudies[0].id) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: updated chart study ${normalizedName} has no entity identity`);
+      }
+      await removeChartStudy(boundStudies[0].id);
+      chartStudies = await readChartStudiesByName(normalizedName);
+      if (chartStudies?.error) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+      }
+      boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    }
+    for (const duplicate of publicDuplicates) {
+      if (!duplicate.id) throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: public duplicate ${normalizedName} has no entity identity`);
+      await removeChartStudy(duplicate.id);
+    }
+    if (publicDuplicates.length > 0) {
+      chartStudies = await readChartStudiesByName(normalizedName);
+      if (chartStudies?.error) {
+        throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+      }
+    }
+    if (boundStudies.length === 0) {
+      await addSavedPineScriptToChart(exact[0].scriptIdPart);
+      chartStudies = await readChartStudiesByName(normalizedName);
+    }
+    if (chartStudies?.error) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
+    }
+    const finalBoundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, exact[0].scriptIdPart));
+    if (finalBoundStudies.length !== 1 || chartStudies.length !== 1 || !finalBoundStudies[0].id) {
+      throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: expected one chart study ${normalizedName}`);
+    }
+    chartStudyId = finalBoundStudies[0].id;
+    chartIndicatorId = finalBoundStudies[0].indicator_id;
+    sourceBound = true;
+  }
+
+  return {
+    success: true,
+    action,
+    name: normalizedName,
+    saved_script_id: exact[0].scriptIdPart,
+    chart_study_id: chartStudyId,
+    chart_indicator_id: chartIndicatorId,
+    source_sha256: sourceHash,
+    added_to_chart: addToChart,
+    pane_index: paneIndex ?? null,
+    source_bound: sourceBound,
   };
 }

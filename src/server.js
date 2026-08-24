@@ -63,7 +63,7 @@ Changing the chart:
 - indicator_apply_scoped / indicator_update_settings_scoped → apply/update studies on an explicit profile/tab/pane and return scoped evidence
 
 Pine Script development:
-- pine_set_source → inject code, pine_smart_compile → compile + check errors
+- pine_set_source → inject code, pine_smart_compile → compile + check errors, pine_upsert_named → exact repository-controlled saved-script upsert
 - pine_get_errors → read errors, pine_get_console → read log output
 - WARNING: pine_get_source can return 200KB+ for complex scripts — avoid unless editing
 

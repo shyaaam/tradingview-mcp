@@ -43,6 +43,7 @@ const CAPABILITY_NAMES = [
   'chart_save_existing_scoped_v2',
   'chart_set_symbol',
   'chart_set_timeframe',
+  'pine_upsert_named',
 ];
 if (new Set(CAPABILITY_NAMES).size !== CAPABILITY_NAMES.length) {
   throw new Error('Observer capability manifest contains duplicate names.');
