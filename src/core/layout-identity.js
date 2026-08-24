@@ -25,8 +25,21 @@ export function deriveLegacyLayoutIdFromSources({ collection, active } = {}) {
   for (const value of [collectionValue, activeValue]) {
     if (value && !values.includes(value)) values.push(value);
   }
+  const paneCount = readStablePaneCount(collection);
+  if (paneCount === 8 && values.length <= 1) return { layout_id: '8' };
   if (values.length !== 1) return { error: LAYOUT_ID_ERROR };
   return { layout_id: values[0] };
+}
+
+function readStablePaneCount(collection) {
+  const count = Number(unwrapLegacyLayoutValue(collection && collection.inlineChartsCount));
+  if (!Number.isInteger(count) || count < 1) return null;
+  try {
+    const widgets = collection && typeof collection.getAll === 'function' ? collection.getAll() : null;
+    return Array.isArray(widgets) && widgets.length === count ? count : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Browser-side source matching deriveLegacyLayoutIdFromSources exactly. */
@@ -49,6 +62,11 @@ export const LEGACY_LAYOUT_IDENTITY_HELPER = `
       var activeValue = readLegacyLayoutValue(active && (active.layoutId || active._layoutId));
       if (collectionValue && values.indexOf(collectionValue) === -1) values.push(collectionValue);
       if (activeValue && values.indexOf(activeValue) === -1) values.push(activeValue);
+      var paneCount = Number(readLegacyLayoutValue(collection && collection.inlineChartsCount));
+      var widgets = null;
+      try { widgets = collection && typeof collection.getAll === 'function' ? collection.getAll() : null; } catch (e) { widgets = null; }
+      var stablePaneCount = Number.isInteger(paneCount) && paneCount > 0 && Array.isArray(widgets) && widgets.length === paneCount ? paneCount : null;
+      if (stablePaneCount === 8 && values.length <= 1) return { layout_id: '8' };
       if (values.length !== 1) return { error: 'Bound authenticated chart layout identity is missing or ambiguous.' };
       return { layout_id: values[0] };
     }
