@@ -642,8 +642,8 @@ export async function listScripts() {
   };
 }
 
-async function readSavedScripts() {
-  return evaluateAsync(`
+async function readSavedScripts(_deps) {
+  return (_deps?.evaluateAsync || evaluateAsync)(`
     fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
       .then(function(response) { return response.json(); })
       .then(function(data) {
@@ -654,8 +654,8 @@ async function readSavedScripts() {
   `);
 }
 
-async function readSavedScriptSource(script) {
-  return evaluateAsync(`
+async function readSavedScriptSource(script, _deps) {
+  return (_deps?.evaluateAsync || evaluateAsync)(`
     fetch('https://pine-facade.tradingview.com/pine-facade/get/'
       + ${JSON.stringify(script.scriptIdPart)} + '/' + ${JSON.stringify(script.version || 1)},
       { credentials: 'include' })
@@ -665,10 +665,10 @@ async function readSavedScriptSource(script) {
   `);
 }
 
-async function ensureSavedPineScriptNamed({ name, source }) {
+async function ensureSavedPineScriptNamed({ name, source, _deps }) {
   const normalizedName = normalizePineScriptName(name);
   const sourceHash = pineSourceSha256(source);
-  const listed = await readSavedScripts();
+  const listed = await readSavedScripts(_deps);
   if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
   const matches = exactSavedScriptMatches(listed.scripts, normalizedName);
   if (matches.length > 1) {
@@ -678,30 +678,31 @@ async function ensureSavedPineScriptNamed({ name, source }) {
   let action;
   if (matches.length === 1) {
     const existing = matches[0];
-    const loaded = await readSavedScriptSource(existing);
+    const loaded = await readSavedScriptSource(existing, _deps);
     if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
     if (!pineSourcesEquivalent(loaded.source, source)) {
       await saveExistingPineScriptNamed({
         name: normalizedName,
         scriptIdPart: existing.scriptIdPart,
         source,
+        _deps,
       });
       action = 'updated';
     } else {
       action = 'unchanged';
     }
   } else {
-    await saveNewPineScriptNamed({ name: normalizedName, source });
+    await saveNewPineScriptNamed({ name: normalizedName, source, _deps });
     action = 'created';
   }
 
-  const after = await readSavedScripts();
+  const after = await readSavedScripts(_deps);
   if (after?.error) throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: ${after.error}`);
   const exact = exactSavedScriptMatches(after.scripts, normalizedName);
   if (exact.length !== 1) {
     throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
   }
-  const saved = await readSavedScriptSource(exact[0]);
+  const saved = await readSavedScriptSource(exact[0], _deps);
   if (!pineSourcesEquivalent(saved?.source, source)) {
     throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
   }
@@ -723,8 +724,8 @@ function exactSavedScriptMatches(scripts, name) {
   return [...byId.values()];
 }
 
-async function saveNewPineScriptNamed({ name, source }) {
-  const result = await evaluateAsync(`
+async function saveNewPineScriptNamed({ name, source, _deps }) {
+  const result = await (_deps?.evaluateAsync || evaluateAsync)(`
     (async function() {
       var api = window.TradingViewApi;
       if (!api || typeof api.pineLibApi !== 'function') {
@@ -761,8 +762,8 @@ async function saveNewPineScriptNamed({ name, source }) {
   return result.saved;
 }
 
-async function saveExistingPineScriptNamed({ name, scriptIdPart, source }) {
-  const result = await evaluateAsync(`
+async function saveExistingPineScriptNamed({ name, scriptIdPart, source, _deps }) {
+  const result = await (_deps?.evaluateAsync || evaluateAsync)(`
     (async function() {
       var api = window.TradingViewApi;
       if (!api || typeof api.pineLibApi !== 'function') {
@@ -801,8 +802,8 @@ async function saveExistingPineScriptNamed({ name, scriptIdPart, source }) {
   return result.saved;
 }
 
-async function addSavedPineScriptToChart(savedScriptId) {
-  const result = await evaluateAsync(`
+async function addSavedPineScriptToChart(savedScriptId, _deps) {
+  const result = await (_deps?.evaluateAsync || evaluateAsync)(`
     (async function() {
       var chart = ${CHART_API};
       if (!chart || typeof chart.createStudy !== 'function') {
@@ -818,11 +819,11 @@ async function addSavedPineScriptToChart(savedScriptId) {
   `);
   if (result?.error) throw new Error(result.error);
   if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_CREATE_FAILED: createStudy returned no success result');
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await (_deps?.sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms))))(500);
 }
 
-async function readChartStudiesByName(name) {
-  return evaluate(`
+async function readChartStudiesByName(name, _deps) {
+  return (_deps?.evaluate || evaluate)(`
     (function() {
       var chart = ${CHART_API};
       var chartModel = null;
@@ -854,11 +855,11 @@ async function readChartStudiesByName(name) {
   `);
 }
 
-async function readChartStudiesAfterNamedCreate(name) {
-  let chartStudies = await readChartStudiesByName(name);
+async function readChartStudiesAfterNamedCreate(name, _deps) {
+  let chartStudies = await readChartStudiesByName(name, _deps);
   for (let attempt = 0; attempt < 4 && Array.isArray(chartStudies) && chartStudies.length === 0; attempt += 1) {
-    await new Promise(resolve => setTimeout(resolve, 250));
-    chartStudies = await readChartStudiesByName(name);
+    await (_deps?.sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms))))(250);
+    chartStudies = await readChartStudiesByName(name, _deps);
   }
   return chartStudies;
 }
@@ -875,6 +876,13 @@ export function chartStudyBindsSavedScript(study, savedScriptId) {
   ].includes(indicatorId);
 }
 
+export function chartStudyBindsOwnedSavedScript(study, savedScriptId) {
+  const indicatorId = String(study?.indicator_id || '');
+  if (!/^(?:USER|PRIV);/u.test(String(savedScriptId || ''))
+    || !/^(?:Script\$)?(?:USER|PRIV);/u.test(indicatorId)) return false;
+  return chartStudyBindsSavedScript(study, savedScriptId);
+}
+
 export function chartStudyIsOwnedPineScript(study) {
   const indicatorId = String(study?.indicator_id || '');
   return /^(?:Script\$)?(?:USER|PRIV);/u.test(indicatorId);
@@ -885,8 +893,8 @@ export function chartStudyIsPublicPineScript(study) {
   return /^(?:Script\$)?PUB;/u.test(indicatorId);
 }
 
-async function removeChartStudy(entityId) {
-  const result = await evaluateAsync(`
+async function removeChartStudy(entityId, _deps) {
+  const result = await (_deps?.evaluateAsync || evaluateAsync)(`
     (async function() {
       var chart = ${CHART_API};
       if (!chart || typeof chart.removeEntity !== 'function') {
@@ -902,20 +910,20 @@ async function removeChartStudy(entityId) {
   `);
   if (result?.error) throw new Error(result.error);
   if (result?.success !== true) throw new Error('PINE_NAMED_UPSERT_CHART_REMOVE_FAILED: removeEntity returned no success result');
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await (_deps?.sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms))))(500);
 }
 
-export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
-  const { action, exact, sourceHash, normalizedName } = await ensureSavedPineScriptNamed({ name, source });
+export async function upsertNamed({ name, source, addToChart = false, paneIndex, _deps }) {
+  const { action, exact, sourceHash, normalizedName } = await ensureSavedPineScriptNamed({ name, source, _deps });
 
   let chartStudyId = null;
   let chartIndicatorId = null;
   let sourceBound = false;
   if (addToChart) {
-    if (paneIndex !== undefined) await focusPane({ index: paneIndex });
+    if (paneIndex !== undefined) await (_deps?.focusPane || focusPane)({ index: paneIndex });
     let chartStudies = action === 'created'
-      ? await readChartStudiesAfterNamedCreate(normalizedName)
-      : await readChartStudiesByName(normalizedName);
+      ? await readChartStudiesAfterNamedCreate(normalizedName, _deps)
+      : await readChartStudiesByName(normalizedName, _deps);
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
@@ -942,8 +950,8 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
       if (!boundStudies[0].id) {
         throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: updated chart study ${normalizedName} has no entity identity`);
       }
-      await removeChartStudy(boundStudies[0].id);
-      chartStudies = await readChartStudiesByName(normalizedName);
+      await removeChartStudy(boundStudies[0].id, _deps);
+      chartStudies = await readChartStudiesByName(normalizedName, _deps);
       if (chartStudies?.error) {
         throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
       }
@@ -951,17 +959,17 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     }
     for (const duplicate of publicDuplicates) {
       if (!duplicate.id) throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: public duplicate ${normalizedName} has no entity identity`);
-      await removeChartStudy(duplicate.id);
+      await removeChartStudy(duplicate.id, _deps);
     }
     if (publicDuplicates.length > 0) {
-      chartStudies = await readChartStudiesByName(normalizedName);
+      chartStudies = await readChartStudiesByName(normalizedName, _deps);
       if (chartStudies?.error) {
         throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
       }
     }
     if (boundStudies.length === 0) {
-      await addSavedPineScriptToChart(exact[0].scriptIdPart);
-      chartStudies = await readChartStudiesByName(normalizedName);
+      await addSavedPineScriptToChart(exact[0].scriptIdPart, _deps);
+      chartStudies = await readChartStudiesByName(normalizedName, _deps);
     }
     if (chartStudies?.error) {
       throw new Error(`PINE_NAMED_UPSERT_CHART_READBACK_FAILED: ${chartStudies.error}`);
@@ -1013,48 +1021,51 @@ export async function applyScopedSavedPine({
   }, { action: 'apply_indicator', _deps });
   const focusResult = await (_deps?.switchTab || switchTab)({ index: scope.tab_index });
   const paneFocusResult = await (_deps?.focusPane || focusPane)({ index: scope.pane_index });
-  const ensured = await ensureSavedPineScriptNamed({ name: scope.indicator_name, source });
+  const ensured = await ensureSavedPineScriptNamed({ name: scope.indicator_name, source, _deps });
+  if (!/^(?:USER|PRIV);/u.test(String(ensured.exact.scriptIdPart || ''))) {
+    throw new Error(`PINE_APPLY_SCOPED_SAVED_SCRIPT_NOT_OWNED: ${ensured.normalizedName}`);
+  }
 
   await verifyScopedMutationAuthority({
     ...scope,
     expected_pane_signature: scope.expected_pane_signature,
   }, { action: 'apply_indicator', _deps });
 
-  let chartStudies = await readChartStudiesByName(ensured.normalizedName);
+  let chartStudies = await readChartStudiesByName(ensured.normalizedName, _deps);
   if (chartStudies?.error) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
   }
-  let boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+  let boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
   if (boundStudies.length > 1) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: multiple exact saved-script bindings for ${ensured.normalizedName}`);
   }
-  if (chartStudies.some((study) => !chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart))) {
+  if (chartStudies.some((study) => !chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart))) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: existing chart study ${ensured.normalizedName} is not exact saved Pine`);
   }
   if (ensured.action === 'updated' && boundStudies.length === 1) {
     if (!boundStudies[0].id) {
       throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: exact saved study ${ensured.normalizedName} has no entity identity`);
     }
-    await removeChartStudy(boundStudies[0].id);
-    chartStudies = await readChartStudiesByName(ensured.normalizedName);
+    await removeChartStudy(boundStudies[0].id, _deps);
+    chartStudies = await readChartStudiesByName(ensured.normalizedName, _deps);
     if (chartStudies?.error) {
       throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+    boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
   }
   const action = boundStudies.length === 1 ? 'unchanged' : 'created';
   if (boundStudies.length === 0) {
-    await addSavedPineScriptToChart(ensured.exact.scriptIdPart);
-    chartStudies = await readChartStudiesAfterNamedCreate(ensured.normalizedName);
+    await addSavedPineScriptToChart(ensured.exact.scriptIdPart, _deps);
+    chartStudies = await readChartStudiesAfterNamedCreate(ensured.normalizedName, _deps);
     if (chartStudies?.error) {
       throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
-    boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+    boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
   }
   if (boundStudies.length !== 1 || chartStudies.length !== 1 || !boundStudies[0].id) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: expected one exact saved Pine study ${ensured.normalizedName}`);
   }
-  const postInventory = await indicatorSignatures({ _deps });
+  const postInventory = await (_deps?.indicatorSignatures || indicatorSignatures)({ _deps });
   const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
   if (!postPane) throw new Error(`PINE_APPLY_SCOPED_POST_READBACK_FAILED: pane ${scope.pane_index} unavailable`);
   const postIndicator = postPane.indicators.find((indicator) => indicator.indicator_name.toLocaleLowerCase('en-US') === ensured.normalizedName.toLocaleLowerCase('en-US'));
