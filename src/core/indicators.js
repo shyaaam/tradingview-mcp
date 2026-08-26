@@ -625,6 +625,12 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   if (action === 'apply_indicator' && matching.length > 1) throw new Error('scoped indicator add refuses duplicate matching studies');
 }
 
+export async function verifyScopedMutationAuthority(args, { action = 'apply_indicator', _deps } = {}) {
+  const scope = _requireScopedRequest(args, _deps !== undefined);
+  await _resolve(_deps).verifyMutationAuthority(scope, { action, _deps });
+  return scope;
+}
+
 export async function applyScopedBlueprintIndicator(args) {
   const scope = _requireBlueprintScopedRequest(args, args?._deps !== undefined);
   const expectedSettings = _parseObject(args.expected_settings, 'expected_settings', { allowEmpty: true });

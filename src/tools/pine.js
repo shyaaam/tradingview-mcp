@@ -65,6 +65,22 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'pine_apply_scoped', 'Apply exact repository-controlled saved Pine to one fenced tab/pane and verify source-bound chart identity', async ({ profile_id, tab_index, pane_index, name, source, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature }) => {
+    try {
+      return jsonResult(await core.applyScopedSavedPine({
+        profile_id,
+        tab_index,
+        pane_index,
+        name,
+        source,
+        expected_chart_target_id,
+        expected_chart_id,
+        expected_layout_id,
+        expected_pane_signature,
+      }));
+    } catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('pine_analyze', 'Run static analysis on Pine Script code WITHOUT compiling — catches array out-of-bounds, unguarded array.first()/last(), bad loop bounds, and implicit bool casts. Works offline, no TradingView connection needed.', {
     source: z.string().describe('Pine Script source code to analyze'),
   }, async ({ source }) => {
