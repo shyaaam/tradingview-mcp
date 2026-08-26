@@ -61,6 +61,7 @@ Changing the chart:
 - chart_scroll_to_date → jump to a date (ISO format)
 - indicator_set_inputs → change indicator settings (length, source, etc.)
 - indicator_apply_scoped / indicator_update_settings_scoped → apply/update studies on an explicit profile/tab/pane and return scoped evidence
+- pine_apply_scoped → apply exact repository-controlled saved Pine on an explicit profile/tab/pane and verify exact source binding
 
 Pine Script development:
 - pine_set_source → inject code, pine_smart_compile → compile + check errors, pine_upsert_named → exact repository-controlled saved-script upsert

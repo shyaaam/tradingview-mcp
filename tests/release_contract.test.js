@@ -104,6 +104,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
+    'pine_apply_scoped',
     'pine_upsert_named',
   ]);
   assert.equal(names.includes('data_get_ohlcv'), false);
@@ -119,6 +120,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+    pine_apply_scoped: classifications.pine_apply_scoped,
     pine_upsert_named: classifications.pine_upsert_named,
   }, {
     pane_indicator_signatures: 'read_only',
@@ -129,6 +131,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    pine_apply_scoped: 'chart_mutation',
     pine_upsert_named: 'chart_mutation',
   });
 
@@ -889,6 +892,30 @@ test('observer result fixtures satisfy registered output schemas', () => {
       added_to_chart: false,
       pane_index: null,
       source_bound: false,
+    },
+    pine_apply_scoped: {
+      success: true,
+      scoped_pine_apply_version: 'pine-apply-scoped-v1',
+      profile_id: 'profile-a',
+      tab_index: 0,
+      pane_index: 0,
+      chart_target_id: 'target-a',
+      chart_id: 'chart-a',
+      layout_id: '8',
+      name: 'Repo BOS',
+      action: 'created',
+      saved_script_action: 'unchanged',
+      saved_script_id: 'script-1',
+      chart_study_id: 'study-1',
+      chart_indicator_id: 'Script$USER;script-1@tv-scripting',
+      source_sha256: 'a'.repeat(64),
+      source_bound: true,
+      pre_mutation_signature: 'a'.repeat(64),
+      post_mutation_signature: 'b'.repeat(64),
+      post_mutation_indicator: {},
+      post_mutation_indicator_count: 1,
+      focus: {},
+      message: 'scoped saved Pine source applied and exact chart binding verified',
     },
   };
 

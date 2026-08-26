@@ -5,7 +5,9 @@
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 import { createHash } from 'node:crypto';
-import { focus as focusPane } from './pane.js';
+import { focus as focusPane, indicatorSignatures } from './pane.js';
+import { switchTab } from './tab.js';
+import { verifyScopedMutationAuthority } from './indicators.js';
 
 // ── Monaco finder (injected into TV page) ──
 const FIND_MONACO = `
@@ -663,6 +665,49 @@ async function readSavedScriptSource(script) {
   `);
 }
 
+async function ensureSavedPineScriptNamed({ name, source }) {
+  const normalizedName = normalizePineScriptName(name);
+  const sourceHash = pineSourceSha256(source);
+  const listed = await readSavedScripts();
+  if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
+  const matches = exactSavedScriptMatches(listed.scripts, normalizedName);
+  if (matches.length > 1) {
+    throw new Error(`PINE_NAMED_UPSERT_AMBIGUOUS: ${normalizedName}`);
+  }
+
+  let action;
+  if (matches.length === 1) {
+    const existing = matches[0];
+    const loaded = await readSavedScriptSource(existing);
+    if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
+    if (!pineSourcesEquivalent(loaded.source, source)) {
+      await saveExistingPineScriptNamed({
+        name: normalizedName,
+        scriptIdPart: existing.scriptIdPart,
+        source,
+      });
+      action = 'updated';
+    } else {
+      action = 'unchanged';
+    }
+  } else {
+    await saveNewPineScriptNamed({ name: normalizedName, source });
+    action = 'created';
+  }
+
+  const after = await readSavedScripts();
+  if (after?.error) throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: ${after.error}`);
+  const exact = exactSavedScriptMatches(after.scripts, normalizedName);
+  if (exact.length !== 1) {
+    throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
+  }
+  const saved = await readSavedScriptSource(exact[0]);
+  if (!pineSourcesEquivalent(saved?.source, source)) {
+    throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
+  }
+  return { action, exact: exact[0], sourceHash, normalizedName };
+}
+
 function exactSavedScriptMatches(scripts, name) {
   const normalized = name.toLocaleLowerCase('en-US');
   const byId = new Map();
@@ -861,46 +906,7 @@ async function removeChartStudy(entityId) {
 }
 
 export async function upsertNamed({ name, source, addToChart = false, paneIndex }) {
-  const normalizedName = normalizePineScriptName(name);
-  const sourceHash = pineSourceSha256(source);
-
-  const listed = await readSavedScripts();
-  if (listed?.error) throw new Error(`PINE_NAMED_UPSERT_LIST_FAILED: ${listed.error}`);
-  const matches = exactSavedScriptMatches(listed.scripts, normalizedName);
-  if (matches.length > 1) {
-    throw new Error(`PINE_NAMED_UPSERT_AMBIGUOUS: ${normalizedName}`);
-  }
-
-  let action;
-  if (matches.length === 1) {
-    const existing = matches[0];
-    const loaded = await readSavedScriptSource(existing);
-    if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
-    if (!pineSourcesEquivalent(loaded.source, source)) {
-      await saveExistingPineScriptNamed({
-        name: normalizedName,
-        scriptIdPart: existing.scriptIdPart,
-        source,
-      });
-      action = 'updated';
-    } else {
-      action = 'unchanged';
-    }
-  } else {
-    await saveNewPineScriptNamed({ name: normalizedName, source });
-    action = 'created';
-  }
-
-  const after = await readSavedScripts();
-  if (after?.error) throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: ${after.error}`);
-  const exact = exactSavedScriptMatches(after.scripts, normalizedName);
-  if (exact.length !== 1) {
-    throw new Error(`PINE_NAMED_UPSERT_READBACK_FAILED: expected one exact saved script, found ${exact.length}`);
-  }
-  const saved = await readSavedScriptSource(exact[0]);
-  if (!pineSourcesEquivalent(saved?.source, source)) {
-    throw new Error(`PINE_NAMED_UPSERT_SOURCE_MISMATCH: ${normalizedName}`);
-  }
+  const { action, exact, sourceHash, normalizedName } = await ensureSavedPineScriptNamed({ name, source });
 
   let chartStudyId = null;
   let chartIndicatorId = null;
@@ -980,5 +986,103 @@ export async function upsertNamed({ name, source, addToChart = false, paneIndex 
     added_to_chart: addToChart,
     pane_index: paneIndex ?? null,
     source_bound: sourceBound,
+  };
+}
+
+export async function applyScopedSavedPine({
+  profile_id,
+  tab_index,
+  pane_index,
+  name,
+  source,
+  expected_chart_target_id,
+  expected_chart_id,
+  expected_layout_id,
+  expected_pane_signature,
+  _deps,
+}) {
+  const scope = await verifyScopedMutationAuthority({
+    profile_id,
+    tab_index,
+    pane_index,
+    indicator_name: name,
+    expected_chart_target_id,
+    expected_chart_id,
+    expected_layout_id,
+    expected_pane_signature,
+  }, { action: 'apply_indicator', _deps });
+  const focusResult = await (_deps?.switchTab || switchTab)({ index: scope.tab_index });
+  const paneFocusResult = await (_deps?.focusPane || focusPane)({ index: scope.pane_index });
+  const ensured = await ensureSavedPineScriptNamed({ name: scope.indicator_name, source });
+
+  await verifyScopedMutationAuthority({
+    ...scope,
+    expected_pane_signature: scope.expected_pane_signature,
+  }, { action: 'apply_indicator', _deps });
+
+  let chartStudies = await readChartStudiesByName(ensured.normalizedName);
+  if (chartStudies?.error) {
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
+  }
+  let boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+  if (boundStudies.length > 1) {
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: multiple exact saved-script bindings for ${ensured.normalizedName}`);
+  }
+  if (chartStudies.some((study) => !chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart))) {
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: existing chart study ${ensured.normalizedName} is not exact saved Pine`);
+  }
+  if (ensured.action === 'updated' && boundStudies.length === 1) {
+    if (!boundStudies[0].id) {
+      throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: exact saved study ${ensured.normalizedName} has no entity identity`);
+    }
+    await removeChartStudy(boundStudies[0].id);
+    chartStudies = await readChartStudiesByName(ensured.normalizedName);
+    if (chartStudies?.error) {
+      throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
+    }
+    boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+  }
+  const action = boundStudies.length === 1 ? 'unchanged' : 'created';
+  if (boundStudies.length === 0) {
+    await addSavedPineScriptToChart(ensured.exact.scriptIdPart);
+    chartStudies = await readChartStudiesAfterNamedCreate(ensured.normalizedName);
+    if (chartStudies?.error) {
+      throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
+    }
+    boundStudies = chartStudies.filter((study) => chartStudyBindsSavedScript(study, ensured.exact.scriptIdPart));
+  }
+  if (boundStudies.length !== 1 || chartStudies.length !== 1 || !boundStudies[0].id) {
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: expected one exact saved Pine study ${ensured.normalizedName}`);
+  }
+  const postInventory = await indicatorSignatures({ _deps });
+  const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
+  if (!postPane) throw new Error(`PINE_APPLY_SCOPED_POST_READBACK_FAILED: pane ${scope.pane_index} unavailable`);
+  const postIndicator = postPane.indicators.find((indicator) => indicator.indicator_name.toLocaleLowerCase('en-US') === ensured.normalizedName.toLocaleLowerCase('en-US'));
+  if (!postIndicator || postIndicator.entity_id !== boundStudies[0].id || postIndicator.indicator_id !== boundStudies[0].indicator_id) {
+    throw new Error(`PINE_APPLY_SCOPED_POST_READBACK_FAILED: exact chart study identity mismatch for ${ensured.normalizedName}`);
+  }
+  return {
+    success: true,
+    scoped_pine_apply_version: 'pine-apply-scoped-v1',
+    profile_id: scope.profile_id,
+    tab_index: scope.tab_index,
+    pane_index: scope.pane_index,
+    chart_target_id: scope.expected_chart_target_id,
+    chart_id: scope.expected_chart_id,
+    layout_id: scope.expected_layout_id,
+    name: ensured.normalizedName,
+    action,
+    saved_script_action: ensured.action,
+    saved_script_id: ensured.exact.scriptIdPart,
+    chart_study_id: boundStudies[0].id,
+    chart_indicator_id: boundStudies[0].indicator_id,
+    source_sha256: ensured.sourceHash,
+    source_bound: true,
+    pre_mutation_signature: scope.expected_pane_signature,
+    post_mutation_signature: postPane.signature,
+    post_mutation_indicator: postIndicator,
+    post_mutation_indicator_count: postPane.indicators.length,
+    focus: { tab: focusResult, pane: paneFocusResult },
+    message: 'scoped saved Pine source applied and exact chart binding verified',
   };
 }

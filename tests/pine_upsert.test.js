@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, chartStudyIsPublicPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
+import { applyScopedSavedPine, chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, chartStudyIsPublicPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -41,4 +41,17 @@ test('pine named-upsert treats TradingView newline normalization as equivalent',
   const source = '//@version=6\nindicator("Repo BOS")\nplot(close)';
   assert.equal(pineSourcesEquivalent(source, source.replaceAll('\n', '\r\n')), true);
   assert.equal(pineSourcesEquivalent(source, `${source}\nplot(open)`), false);
+});
+
+test('scoped saved-Pine apply fails closed before source access without identity fences', async () => {
+  await assert.rejects(
+    applyScopedSavedPine({
+      profile_id: 'profile-1',
+      tab_index: 0,
+      pane_index: 1,
+      name: 'Repo VMC',
+      source: '//@version=6\nindicator("Repo VMC")',
+    }),
+    /expected_chart_target_id is required/u,
+  );
 });
