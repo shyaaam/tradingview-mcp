@@ -64,12 +64,13 @@ test('scoped saved-Pine apply fails closed before source access without identity
   );
 });
 
-function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc' } = {}) {
+function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc', postInventorySequence = [] } = {}) {
   const source = '//@version=6\nindicator("Repo VMC")\nplot(close)';
   const state = {
     chartStudies: chartStudies.map((study) => ({ ...study })),
     evaluateCalls: [],
     evaluateAsyncCalls: [],
+    indicatorSignatureCalls: 0,
     switchedTabs: [],
     focusedPanes: [],
     authorityScopes: [],
@@ -105,6 +106,9 @@ function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc'
       throw new Error(`unexpected evaluate expression: ${expression.slice(0, 80)}`);
     },
     async indicatorSignatures() {
+      const sequenceIndex = Math.min(state.indicatorSignatureCalls, postInventorySequence.length - 1);
+      state.indicatorSignatureCalls += 1;
+      if (postInventorySequence.length > 0) return postInventorySequence[sequenceIndex];
       return {
         panes: Array.from({ length: 8 }, (_, index) => ({
           index,
@@ -121,6 +125,22 @@ function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc'
     },
   };
   return { source, state, deps };
+}
+
+function postInventoryWithStudy({ entityId, indicatorId = 'Script$USER;repo-vmc@tv-scripting' }) {
+  return {
+    panes: Array.from({ length: 8 }, (_, index) => ({
+      index,
+      signature: index === 2 ? 'b'.repeat(64) : 'a'.repeat(64),
+      indicators: index === 2 ? [{
+        indicator_id: indicatorId,
+        entity_id: entityId,
+        indicator_name: 'Repo VMC',
+        is_price_study: false,
+        settings: {},
+      }] : [],
+    })),
+  };
 }
 
 test('scoped saved-Pine apply creates exact owned binding with injected browser dependencies', async () => {
@@ -147,6 +167,52 @@ test('scoped saved-Pine apply creates exact owned binding with injected browser 
   assert.deepEqual(fixture.state.focusedPanes, [2]);
   assert.equal(fixture.state.authorityScopes.length, 2);
   assert.ok(fixture.state.evaluateAsyncCalls.some((expression) => expression.includes("chart.createStudy({ type: 'pine'")));
+});
+
+test('scoped saved-Pine apply waits for settled exact post-readback identity', async () => {
+  const fixture = scopedApplyFixture({
+    postInventorySequence: [
+      postInventoryWithStudy({ entityId: 'stale-study' }),
+      postInventoryWithStudy({ entityId: 'study-repo-vmc' }),
+    ],
+  });
+  const result = await applyScopedSavedPine({
+    profile_id: 'profile-a',
+    tab_index: 1,
+    pane_index: 2,
+    name: 'Repo VMC',
+    source: fixture.source,
+    expected_chart_target_id: 'target-a',
+    expected_chart_id: 'chart-a',
+    expected_layout_id: '8',
+    expected_pane_signature: 'a'.repeat(64),
+    _deps: fixture.deps,
+  });
+
+  assert.equal(result.action, 'created');
+  assert.equal(fixture.state.indicatorSignatureCalls, 2);
+});
+
+test('scoped saved-Pine apply keeps persistent post-readback identity mismatch fail-closed', async () => {
+  const fixture = scopedApplyFixture({
+    postInventorySequence: [postInventoryWithStudy({ entityId: 'wrong-study' })],
+  });
+  await assert.rejects(
+    applyScopedSavedPine({
+      profile_id: 'profile-a',
+      tab_index: 1,
+      pane_index: 2,
+      name: 'Repo VMC',
+      source: fixture.source,
+      expected_chart_target_id: 'target-a',
+      expected_chart_id: 'chart-a',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+      _deps: fixture.deps,
+    }),
+    /PINE_APPLY_SCOPED_POST_READBACK_FAILED: exact chart study identity mismatch/u,
+  );
+  assert.equal(fixture.state.indicatorSignatureCalls, 4);
 });
 
 test('scoped saved-Pine apply rejects public chart binding before telemetry readback', async () => {
