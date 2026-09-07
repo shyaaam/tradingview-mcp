@@ -864,6 +864,27 @@ async function readChartStudiesAfterNamedCreate(name, _deps) {
   return chartStudies;
 }
 
+async function readSettledScopedPostReadback({ name, paneIndex, expectedStudy, _deps }) {
+  const sleep = _deps?.sleep || ((ms) => new Promise(resolve => setTimeout(resolve, ms)));
+  let lastError = `PINE_APPLY_SCOPED_POST_READBACK_FAILED: pane ${paneIndex} unavailable`;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const postInventory = await (_deps?.indicatorSignatures || indicatorSignatures)({ _deps });
+    const postPane = postInventory.panes.find((pane) => pane.index === paneIndex);
+    if (postPane) {
+      const postIndicator = postPane.indicators.find((indicator) =>
+        indicator.indicator_name.toLocaleLowerCase('en-US') === name.toLocaleLowerCase('en-US'));
+      if (postIndicator
+        && postIndicator.entity_id === expectedStudy.id
+        && postIndicator.indicator_id === expectedStudy.indicator_id) {
+        return { postInventory, postPane, postIndicator };
+      }
+      lastError = `PINE_APPLY_SCOPED_POST_READBACK_FAILED: exact chart study identity mismatch for ${name}`;
+    }
+    if (attempt < 3) await sleep(250);
+  }
+  throw new Error(lastError);
+}
+
 export function chartStudyBindsSavedScript(study, savedScriptId) {
   const indicatorId = String(study?.indicator_id || '');
   const normalizedId = String(savedScriptId || '').replace(/^(?:USER|PRIV|PUB);/u, '');
@@ -1065,13 +1086,12 @@ export async function applyScopedSavedPine({
   if (boundStudies.length !== 1 || chartStudies.length !== 1 || !boundStudies[0].id) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: expected one exact saved Pine study ${ensured.normalizedName}`);
   }
-  const postInventory = await (_deps?.indicatorSignatures || indicatorSignatures)({ _deps });
-  const postPane = postInventory.panes.find((pane) => pane.index === scope.pane_index);
-  if (!postPane) throw new Error(`PINE_APPLY_SCOPED_POST_READBACK_FAILED: pane ${scope.pane_index} unavailable`);
-  const postIndicator = postPane.indicators.find((indicator) => indicator.indicator_name.toLocaleLowerCase('en-US') === ensured.normalizedName.toLocaleLowerCase('en-US'));
-  if (!postIndicator || postIndicator.entity_id !== boundStudies[0].id || postIndicator.indicator_id !== boundStudies[0].indicator_id) {
-    throw new Error(`PINE_APPLY_SCOPED_POST_READBACK_FAILED: exact chart study identity mismatch for ${ensured.normalizedName}`);
-  }
+  const { postInventory, postPane, postIndicator } = await readSettledScopedPostReadback({
+    name: ensured.normalizedName,
+    paneIndex: scope.pane_index,
+    expectedStudy: boundStudies[0],
+    _deps,
+  });
   return {
     success: true,
     scoped_pine_apply_version: 'pine-apply-scoped-v1',
