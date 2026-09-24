@@ -288,6 +288,47 @@ export const paneIndicatorMutationInventoryOutput = {
   })),
 };
 
+export const paneIndicatorFocusedMutationInventoryOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-focused-mutation-inventory-v1'),
+  profile_id: z.string().min(1),
+  tab_index: z.number().int().nonnegative(),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  layout_id: z.literal('8'),
+  pane_count: z.literal(8),
+  canonical_pane_index: z.literal(0),
+  panes: z.array(z.object({
+    index: z.number().int().min(0).max(7),
+    indicators: z.array(z.object({
+      indicator_id: z.string().min(1),
+      entity_id: z.string().min(1),
+      indicator_name: z.string().min(1),
+      is_price_study: z.boolean(),
+      settings: jsonObject,
+      get_study_by_id_resolves: z.boolean(),
+      present_in_get_all_studies: z.boolean(),
+      mutation_visible: z.boolean(),
+    })),
+    symbol: z.string(),
+    resolution: z.union([z.string(), z.number(), z.null()]),
+  })).length(1),
+  pane_study_state_mutation_performed: z.literal(false),
+  pane_study_fingerprint_before_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  pane_study_fingerprint_after_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  focus: z.object({
+    initial_active_index: z.number().int().min(0).max(7),
+    requested_pane_index: z.number().int().min(0).max(7),
+    focused_pane_indexes: z.array(z.number().int().min(0).max(7)),
+    restored_active_index: z.number().int().min(0).max(7),
+    pane_restore_confirmed: z.literal(true),
+    browser_tab_switch_performed: z.literal(false),
+    target_tab_index: z.number().int().nonnegative(),
+    target_id_before: z.string().min(1),
+    target_id_after: z.string().min(1),
+  }),
+};
+
 export const chartStateOutput = {
   success: z.literal(true),
   symbol: z.string(),
@@ -813,8 +854,21 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'read_only',
     inputSchema: {
       pane_index: z.number().int().min(0).max(15).optional(),
+      expected_active_pane_index: z.number().int().min(0).max(15).optional(),
     },
     outputSchema: paneIndicatorMutationInventoryOutput,
+  },
+  pane_indicator_focused_mutation_inventory: {
+    classification: 'browser_focus_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      tab_index: z.coerce.number().int().min(0).max(255),
+      pane_index: z.coerce.number().int().min(0).max(7),
+      expected_chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_layout_id: z.literal('8'),
+    },
+    outputSchema: paneIndicatorFocusedMutationInventoryOutput,
   },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',

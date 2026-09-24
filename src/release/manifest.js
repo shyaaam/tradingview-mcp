@@ -30,6 +30,7 @@ const CAPABILITY_NAMES = [
   'pane_list',
   'pane_indicator_signatures',
   'pane_indicator_mutation_inventory',
+  'pane_indicator_focused_mutation_inventory',
   'indicator_apply_scoped',
   'indicator_update_settings_scoped',
   'indicator_remove_scoped',

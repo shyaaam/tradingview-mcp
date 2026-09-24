@@ -91,6 +91,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'pane_list',
     'pane_indicator_signatures',
     'pane_indicator_mutation_inventory',
+    'pane_indicator_focused_mutation_inventory',
     'indicator_apply_scoped',
     'indicator_update_settings_scoped',
     'indicator_remove_scoped',
@@ -117,9 +118,13 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   assert.equal(mutationInventory.inputSchema.properties.pane_index.minimum, 0);
   assert.equal(mutationInventory.inputSchema.properties.pane_index.maximum, 15);
   assert.equal(mutationInventory.inputSchema.required?.includes('pane_index') ?? false, false);
+  assert.equal(mutationInventory.inputSchema.properties.expected_active_pane_index.minimum, 0);
+  assert.equal(mutationInventory.inputSchema.properties.expected_active_pane_index.maximum, 15);
+  assert.equal(mutationInventory.inputSchema.required?.includes('expected_active_pane_index') ?? false, false);
   assert.deepEqual({
     pane_indicator_signatures: classifications.pane_indicator_signatures,
     pane_indicator_mutation_inventory: classifications.pane_indicator_mutation_inventory,
+    pane_indicator_focused_mutation_inventory: classifications.pane_indicator_focused_mutation_inventory,
     indicator_apply_scoped: classifications.indicator_apply_scoped,
     indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
     indicator_remove_scoped: classifications.indicator_remove_scoped,
@@ -131,6 +136,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
+    pane_indicator_focused_mutation_inventory: 'browser_focus_mutation',
     indicator_apply_scoped: 'chart_mutation',
     indicator_update_settings_scoped: 'chart_mutation',
     indicator_remove_scoped: 'chart_mutation',
@@ -692,6 +698,46 @@ test('observer result fixtures satisfy registered output schemas', () => {
           mutation_visible: true,
         }],
       }],
+    },
+    pane_indicator_focused_mutation_inventory: {
+      success: true,
+      schema_version: 'pane-indicator-focused-mutation-inventory-v1',
+      profile_id: 'profile-a',
+      tab_index: 2,
+      chart_target_id: 'chart-1',
+      chart_id: 'x',
+      layout_id: '8',
+      pane_count: 8,
+      canonical_pane_index: 0,
+      panes: [{
+        index: 1,
+        indicators: [{
+          indicator_id: 'ESD$TV_VOLUME',
+          entity_id: 'study-volume-1',
+          indicator_name: 'Volume',
+          is_price_study: false,
+          settings: {},
+          get_study_by_id_resolves: true,
+          present_in_get_all_studies: true,
+          mutation_visible: true,
+        }],
+        symbol: 'AAPL',
+        resolution: '60',
+      }],
+      pane_study_state_mutation_performed: false,
+      pane_study_fingerprint_before_sha256: 'a'.repeat(64),
+      pane_study_fingerprint_after_sha256: 'a'.repeat(64),
+      focus: {
+        initial_active_index: 0,
+        requested_pane_index: 1,
+        focused_pane_indexes: [1],
+        restored_active_index: 0,
+        pane_restore_confirmed: true,
+        browser_tab_switch_performed: false,
+        target_tab_index: 2,
+        target_id_before: 'chart-1',
+        target_id_after: 'chart-1',
+      },
     },
     pane_probe_layout_capability: {
       success: true,

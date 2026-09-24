@@ -36,7 +36,8 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
         state.evaluateOptions.push(options);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
-          const matching = state.studies.filter(study => study.name.toLowerCase() === name);
+          const matching = state.studies.filter(study => (study.pane_index === undefined || study.pane_index === state.activePane)
+            && study.name.toLowerCase() === name);
           if (matching.length > 1) return { error: `scoped indicator mutation found duplicate matching studies: ${name}` };
           const found = matching[0];
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
@@ -325,6 +326,22 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.action, 'remove_indicator');
     assert.equal(result.post_mutation_indicator, null);
     assert.equal(state.studies.length, 0);
+  });
+  it('removes exact study from pane 1 after focusing pane 1', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'volume-pane-1', name: 'Volume', pane_index: 1 }] });
+    const result = await removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 1, indicator_name: 'Volume', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_entity_id: 'volume-pane-1', _deps: deps });
+    assert.equal(result.action, 'remove_indicator');
+    assert.deepEqual(state.focusedPanes, [1]);
+    assert.equal(state.studies.length, 0);
+  });
+  it('does not remove pane 1 study when reviewed entity identity differs', async () => {
+    const { deps, state } = makeDeps({ studies: [{ id: 'volume-pane-1', name: 'Volume', pane_index: 1 }] });
+    await assert.rejects(
+      () => removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 1, indicator_name: 'Volume', expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8', expected_pane_signature: 'a'.repeat(64), expected_entity_id: 'wrong-volume-id', _deps: deps }),
+      /entity ID does not match reviewed entity/,
+    );
+    assert.equal(state.studies.length, 1);
+    assert.equal(state.evaluateCalls.some((expression) => expression.includes('removeEntity')), false);
   });
   it('rejects scoped removal without exact entity identity', async () => {
     await assert.rejects(() => removeScopedIndicator({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: {}, _deps: makeDeps().deps }), /expected_entity_id/);
