@@ -5,22 +5,23 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
 
-function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false } = {}) {
+function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
     switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], canonicalPriceStudy,
+    canonicalSourceCount, fallbackNameOverride, fallbackPaneOffset, byNameCreateCalls: 0, activePane: null,
   };
   return {
     state,
     deps: {
       async switchTab({ index }) { if (failSwitch) throw new Error('tab target ambiguous'); state.switchedTabs.push(index); return { success: true, action: 'switched', index }; },
-      async focusPane({ index }) { if (failFocus) throw new Error('pane target ambiguous'); state.focusedPanes.push(index); return { success: true, focused_index: index, total: 8 }; },
+      async focusPane({ index }) { if (failFocus) throw new Error('pane target ambiguous'); state.focusedPanes.push(index); state.activePane = index; return { success: true, focused_index: index, total: 8 }; },
       async indicatorSignatures() {
         return {
           panes: Array.from({ length: 8 }, (_, index) => ({
             index,
             signature: 'a'.repeat(64),
-            indicators: state.studies.map((study) => ({
+            indicators: state.studies.filter((study) => study.pane_index === undefined || study.pane_index === index).map((study) => ({
               indicator_id: study.indicatorId,
               entity_id: study.id,
               indicator_name: study.name,
@@ -39,7 +40,37 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
           const found = matching[0];
           return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
         }
-        if (expression.includes('chart.createStudy(')) {
+        if (expression.includes('var canonicalMatches')) {
+          const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1]
+            || expression.match(/scoped indicator add found multiple canonical pane indicators: ' \+ "([^"]+)"/)?.[1]
+            || '';
+          if (state.canonicalSourceCount > 1) {
+            return { error: `scoped indicator add found multiple canonical pane indicators: ${name}` };
+          }
+          if (state.canonicalSourceCount === 0) {
+            state.byNameCreateCalls += 1;
+            const createdName = state.fallbackNameOverride || name;
+            const id = `study-${state.studies.length + 1}`;
+            const settingsMatch = expression.match(/var expectedSettings = ([\s\S]*?);\s+var canonicalMeta/);
+            const rawSettings = settingsMatch ? JSON.parse(settingsMatch[1]) : {};
+            const inputs = Object.entries(rawSettings).map(([key, value]) => ({
+              id: key,
+              value: value && typeof value === 'object' && !Array.isArray(value)
+                && Object.prototype.hasOwnProperty.call(value, 'v')
+                && Object.keys(value).every((field) => field === 'f' || field === 't' || field === 'v')
+                ? value.v
+                : value,
+            }));
+            const study = { id, indicatorId: `id:${createdName}`, name: createdName, isPriceStudy: false, inputs, pane_index: state.activePane + state.fallbackPaneOffset };
+            state.studies.push(study);
+            state.created.push({ ...study });
+            if (createdName.toLowerCase() !== name.toLowerCase()) {
+              return { error: 'scoped indicator add resolved an unexpected study name' };
+            }
+            return { id, name: createdName, inputs };
+          }
+        }
+        if (expression.includes('chart.createStudy(') && !expression.includes('var canonicalMatches')) {
           const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1] || '';
           const id = `study-${state.studies.length + 1}`;
           const indicatorId = name === 'Relative Strength Index' ? 'STD;RSI' : `id:${name}`;
@@ -67,6 +98,7 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
           const id = `study-${state.studies.length + 1}`;
           const inputs = [{ id: 'length', value: 14 }];
           state.studies.push({ id, name, inputs }); state.created.push({ id, name, inputs });
+          state.lastApplyMethod = 'canonical';
           return { id, name, inputs };
         }
         if (expression.includes('study.setInputValues')) {
@@ -112,6 +144,46 @@ describe('scoped indicator plan primitives', () => {
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('canonicalMatches')));
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('insertStudyWithParams')));
     assert.equal(state.created.length, 1);
+  });
+
+  it('adds by reviewed name when blank chart has no canonical pane source', async () => {
+    const { deps, state } = makeDeps({ canonicalSourceCount: 0 });
+    const result = await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: { length: 14 }, _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.post_mutation_indicator.indicator_name, 'Relative Strength Index');
+    assert.equal(state.byNameCreateCalls, 1);
+    assert.equal(state.lastApplyMethod, undefined);
+    assert.deepEqual(state.created[0].inputs, [{ id: 'length', value: 14 }]);
+  });
+
+  it('fails closed on multiple canonical pane sources without creating a study', async () => {
+    const { deps, state } = makeDeps({ canonicalSourceCount: 2 });
+    await assert.rejects(
+      () => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps }),
+      /multiple canonical pane indicators/,
+    );
+    assert.equal(state.byNameCreateCalls, 0);
+    assert.equal(state.created.length, 0);
+  });
+
+  it('rejects by-name fallback when TradingView resolves a different study name', async () => {
+    const { deps, state } = makeDeps({ canonicalSourceCount: 0, fallbackNameOverride: 'Unexpected Study' });
+    await assert.rejects(
+      () => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps }),
+      /unexpected study name/,
+    );
+    assert.equal(state.byNameCreateCalls, 1);
+    assert.equal(state.created[0].name, 'Unexpected Study');
+  });
+
+  it('rejects by-name fallback when new study appears in a different pane', async () => {
+    const { deps, state } = makeDeps({ canonicalSourceCount: 0, fallbackPaneOffset: 1 });
+    await assert.rejects(
+      () => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps }),
+      /did not produce exactly one post-mutation/,
+    );
+    assert.equal(state.byNameCreateCalls, 1);
+    assert.equal(state.created[0].pane_index, 3);
   });
 
   it('uses forceOverlay for a canonical price-study insertion', async () => {
