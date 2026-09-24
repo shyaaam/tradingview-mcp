@@ -242,7 +242,7 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
         return { error: String(error && error.message ? error.message : error) };
       });
     })()
-  `);
+  `, { awaitPromise: true });
   if (result?.error) throw new Error(result.error);
   return result;
 }

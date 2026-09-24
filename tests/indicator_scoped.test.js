@@ -8,7 +8,7 @@ import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicat
 function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
-    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], canonicalPriceStudy,
+    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], evaluateOptions: [], canonicalPriceStudy,
     canonicalSourceCount, fallbackNameOverride, fallbackPaneOffset, byNameCreateCalls: 0, activePane: null,
   };
   return {
@@ -31,8 +31,9 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
           })),
         };
       },
-      async evaluate(expression) {
+      async evaluate(expression, options = {}) {
         state.evaluateCalls.push(expression);
+        state.evaluateOptions.push(options);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
           const matching = state.studies.filter(study => study.name.toLowerCase() === name);
@@ -143,6 +144,7 @@ describe('scoped indicator plan primitives', () => {
     await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: {}, _deps: deps });
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('canonicalMatches')));
     assert.ok(state.evaluateCalls.some((expression) => expression.includes('insertStudyWithParams')));
+    assert.ok(state.evaluateOptions.some((options) => options.awaitPromise === true));
     assert.equal(state.created.length, 1);
   });
 
@@ -152,6 +154,7 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.success, true);
     assert.equal(result.post_mutation_indicator.indicator_name, 'Relative Strength Index');
     assert.equal(state.byNameCreateCalls, 1);
+    assert.ok(state.evaluateOptions.some((options) => options.awaitPromise === true));
     assert.equal(state.lastApplyMethod, undefined);
     assert.deepEqual(state.created[0].inputs, [{ id: 'length', value: 14 }]);
   });
