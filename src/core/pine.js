@@ -665,7 +665,7 @@ async function readSavedScriptSource(script, _deps) {
   `);
 }
 
-async function ensureSavedPineScriptNamed({ name, source, _deps }) {
+async function ensureSavedPineScriptNamed({ name, source, allowUpdate = true, _deps }) {
   const normalizedName = normalizePineScriptName(name);
   const sourceHash = pineSourceSha256(source);
   const listed = await readSavedScripts(_deps);
@@ -681,6 +681,7 @@ async function ensureSavedPineScriptNamed({ name, source, _deps }) {
     const loaded = await readSavedScriptSource(existing, _deps);
     if (loaded?.error) throw new Error(`PINE_NAMED_UPSERT_READ_FAILED: ${loaded.error}`);
     if (!pineSourcesEquivalent(loaded.source, source)) {
+      if (!allowUpdate) throw new Error(`PINE_NAMED_SOURCE_MISMATCH: ${normalizedName}`);
       await saveExistingPineScriptNamed({
         name: normalizedName,
         scriptIdPart: existing.scriptIdPart,
@@ -1023,6 +1024,7 @@ export async function applyScopedSavedPine({
   tab_index,
   pane_index,
   name,
+  saved_script_name,
   source,
   expected_chart_target_id,
   expected_chart_id,
@@ -1042,9 +1044,15 @@ export async function applyScopedSavedPine({
   }, { action: 'apply_indicator', _deps });
   const focusResult = await (_deps?.switchTab || switchTab)({ index: scope.tab_index });
   const paneFocusResult = await (_deps?.focusPane || focusPane)({ index: scope.pane_index });
-  const ensured = await ensureSavedPineScriptNamed({ name: scope.indicator_name, source, _deps });
+  const savedScriptName = normalizePineScriptName(saved_script_name);
+  const ensured = await ensureSavedPineScriptNamed({
+    name: savedScriptName,
+    source,
+    allowUpdate: false,
+    _deps,
+  });
   if (!/^(?:USER|PRIV);/u.test(String(ensured.exact.scriptIdPart || ''))) {
-    throw new Error(`PINE_APPLY_SCOPED_SAVED_SCRIPT_NOT_OWNED: ${ensured.normalizedName}`);
+    throw new Error(`PINE_APPLY_SCOPED_SAVED_SCRIPT_NOT_OWNED: ${savedScriptName}`);
   }
 
   await verifyScopedMutationAuthority({
@@ -1052,42 +1060,31 @@ export async function applyScopedSavedPine({
     expected_pane_signature: scope.expected_pane_signature,
   }, { action: 'apply_indicator', _deps });
 
-  let chartStudies = await readChartStudiesByName(ensured.normalizedName, _deps);
+  let chartStudies = await readChartStudiesByName(scope.indicator_name, _deps);
   if (chartStudies?.error) {
     throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
   }
   let boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
   if (boundStudies.length > 1) {
-    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: multiple exact saved-script bindings for ${ensured.normalizedName}`);
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: multiple exact saved-script bindings for ${scope.indicator_name}`);
   }
   if (chartStudies.some((study) => !chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart))) {
-    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: existing chart study ${ensured.normalizedName} is not exact saved Pine`);
-  }
-  if (ensured.action === 'updated' && boundStudies.length === 1) {
-    if (!boundStudies[0].id) {
-      throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: exact saved study ${ensured.normalizedName} has no entity identity`);
-    }
-    await removeChartStudy(boundStudies[0].id, _deps);
-    chartStudies = await readChartStudiesByName(ensured.normalizedName, _deps);
-    if (chartStudies?.error) {
-      throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
-    }
-    boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: existing chart study ${scope.indicator_name} is not exact saved Pine`);
   }
   const action = boundStudies.length === 1 ? 'unchanged' : 'created';
   if (boundStudies.length === 0) {
     await addSavedPineScriptToChart(ensured.exact.scriptIdPart, _deps);
-    chartStudies = await readChartStudiesAfterNamedCreate(ensured.normalizedName, _deps);
+    chartStudies = await readChartStudiesAfterNamedCreate(scope.indicator_name, _deps);
     if (chartStudies?.error) {
       throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: ${chartStudies.error}`);
     }
     boundStudies = chartStudies.filter((study) => chartStudyBindsOwnedSavedScript(study, ensured.exact.scriptIdPart));
   }
   if (boundStudies.length !== 1 || chartStudies.length !== 1 || !boundStudies[0].id) {
-    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: expected one exact saved Pine study ${ensured.normalizedName}`);
+    throw new Error(`PINE_APPLY_SCOPED_CHART_READBACK_FAILED: expected one exact saved Pine study ${scope.indicator_name}`);
   }
   const { postInventory, postPane, postIndicator } = await readSettledScopedPostReadback({
-    name: ensured.normalizedName,
+    name: scope.indicator_name,
     paneIndex: scope.pane_index,
     expectedStudy: boundStudies[0],
     _deps,
@@ -1101,7 +1098,8 @@ export async function applyScopedSavedPine({
     chart_target_id: scope.expected_chart_target_id,
     chart_id: scope.expected_chart_id,
     layout_id: scope.expected_layout_id,
-    name: ensured.normalizedName,
+    name: scope.indicator_name,
+    saved_script_name: ensured.normalizedName,
     action,
     saved_script_action: ensured.action,
     saved_script_id: ensured.exact.scriptIdPart,

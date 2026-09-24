@@ -65,13 +65,14 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  registerObserverTool(server, 'pine_apply_scoped', 'Apply exact repository-controlled saved Pine to one fenced tab/pane and verify source-bound chart identity', async ({ profile_id, tab_index, pane_index, name, source, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature }) => {
+  registerObserverTool(server, 'pine_apply_scoped', 'Apply exact repository-controlled saved Pine to one fenced tab/pane without updating existing saved scripts, then verify source-bound chart identity', async ({ profile_id, tab_index, pane_index, name, saved_script_name, source, expected_chart_target_id, expected_chart_id, expected_layout_id, expected_pane_signature }) => {
     try {
       return jsonResult(await core.applyScopedSavedPine({
         profile_id,
         tab_index,
         pane_index,
         name,
+        saved_script_name,
         source,
         expected_chart_target_id,
         expected_chart_id,

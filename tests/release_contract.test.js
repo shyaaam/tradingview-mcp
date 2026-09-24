@@ -909,6 +909,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
       chart_id: 'chart-a',
       layout_id: '8',
       name: 'Repo BOS',
+      saved_script_name: 'TV Observer V5 - Repo BOS',
       action: 'created',
       saved_script_action: 'unchanged',
       saved_script_id: 'script-1',

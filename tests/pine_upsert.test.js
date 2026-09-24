@@ -64,13 +64,24 @@ test('scoped saved-Pine apply fails closed before source access without identity
   );
 });
 
-function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc', postInventorySequence = [] } = {}) {
+function scopedApplyFixture({
+  chartStudies = [],
+  savedScriptId = 'USER;repo-vmc',
+  savedScripts,
+  savedScriptSources,
+  postInventorySequence = [],
+} = {}) {
   const source = '//@version=6\nindicator("Repo VMC")\nplot(close)';
+  const initialSavedScripts = savedScripts ?? [{ scriptName: 'Repo VMC', scriptIdPart: savedScriptId, version: 1 }];
   const state = {
     chartStudies: chartStudies.map((study) => ({ ...study })),
+    savedScripts: initialSavedScripts.map((script) => ({ ...script })),
+    savedScriptSources: new Map(savedScriptSources ?? [[savedScriptId, source]]),
     evaluateCalls: [],
     evaluateAsyncCalls: [],
     indicatorSignatureCalls: 0,
+    saveNewCalls: 0,
+    saveExistingCalls: 0,
     switchedTabs: [],
     focusedPanes: [],
     authorityScopes: [],
@@ -91,11 +102,37 @@ function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc'
     async evaluateAsync(expression) {
       state.evaluateAsyncCalls.push(expression);
       if (expression.includes('pine-facade/list/?filter=saved')) {
-        return { scripts: [{ scriptName: 'Repo VMC', scriptIdPart: savedScriptId, version: 1 }] };
+        return { scripts: state.savedScripts.map((script) => ({ ...script })) };
       }
-      if (expression.includes('pine-facade/get/')) return { source };
+      if (expression.includes('pine-facade/get/')) {
+        const match = expression.match(/pine-facade\/get\/'\s*\+\s*("(?:\\.|[^"])*")/u);
+        assert.ok(match, 'saved-script source read includes exact script identity');
+        const scriptId = JSON.parse(match[1]);
+        return { source: state.savedScriptSources.get(scriptId) ?? '' };
+      }
+      if (expression.includes('pine.saveNew({')) {
+        state.saveNewCalls += 1;
+        const nameMatch = expression.match(/scriptName: ("(?:\\.|[^"])*")/u);
+        const sourceMatch = expression.match(/scriptSource: ("(?:\\.|[^"])*")/u);
+        assert.ok(nameMatch);
+        assert.ok(sourceMatch);
+        const scriptName = JSON.parse(nameMatch[1]);
+        const savedSource = JSON.parse(sourceMatch[1]);
+        const scriptIdPart = `USER;created-${state.saveNewCalls}`;
+        state.savedScripts.push({ scriptName, scriptIdPart, version: 1 });
+        state.savedScriptSources.set(scriptIdPart, savedSource);
+        return { success: true, saved: { scriptIdPart } };
+      }
+      if (expression.includes('pine.saveNext({')) {
+        state.saveExistingCalls += 1;
+        return { success: true, saved: {} };
+      }
       if (expression.includes("chart.createStudy({ type: 'pine'")) {
-        state.chartStudies = [{ id: 'study-repo-vmc', indicator_id: 'Script$USER;repo-vmc@tv-scripting' }];
+        const match = expression.match(/pineId: ("(?:\\.|[^"])*")/u);
+        assert.ok(match);
+        const scriptIdPart = JSON.parse(match[1]);
+        state.chartStudies = [{ id: 'study-repo-vmc', indicator_id: `Script$${scriptIdPart}@tv-scripting` }];
+        state.currentChartIndicatorId = `Script$${scriptIdPart}@tv-scripting`;
         return { success: true };
       }
       throw new Error(`unexpected evaluateAsync expression: ${expression.slice(0, 80)}`);
@@ -114,7 +151,7 @@ function scopedApplyFixture({ chartStudies = [], savedScriptId = 'USER;repo-vmc'
           index,
           signature: index === 2 ? 'b'.repeat(64) : 'a'.repeat(64),
           indicators: index === 2 ? [{
-            indicator_id: 'Script$USER;repo-vmc@tv-scripting',
+            indicator_id: state.currentChartIndicatorId ?? `Script$${savedScriptId}@tv-scripting`,
             entity_id: 'study-repo-vmc',
             indicator_name: 'Repo VMC',
             is_price_study: false,
@@ -150,6 +187,7 @@ test('scoped saved-Pine apply creates exact owned binding with injected browser 
     tab_index: 1,
     pane_index: 2,
     name: 'Repo VMC',
+    saved_script_name: 'Repo VMC',
     source: fixture.source,
     expected_chart_target_id: 'target-a',
     expected_chart_id: 'chart-a',
@@ -181,6 +219,7 @@ test('scoped saved-Pine apply waits for settled exact post-readback identity', a
     tab_index: 1,
     pane_index: 2,
     name: 'Repo VMC',
+    saved_script_name: 'Repo VMC',
     source: fixture.source,
     expected_chart_target_id: 'target-a',
     expected_chart_id: 'chart-a',
@@ -203,6 +242,7 @@ test('scoped saved-Pine apply keeps persistent post-readback identity mismatch f
       tab_index: 1,
       pane_index: 2,
       name: 'Repo VMC',
+      saved_script_name: 'Repo VMC',
       source: fixture.source,
       expected_chart_target_id: 'target-a',
       expected_chart_id: 'chart-a',
@@ -225,6 +265,7 @@ test('scoped saved-Pine apply rejects public chart binding before telemetry read
       tab_index: 1,
       pane_index: 2,
       name: 'Repo VMC',
+      saved_script_name: 'Repo VMC',
       source: fixture.source,
       expected_chart_target_id: 'target-a',
       expected_chart_id: 'chart-a',
@@ -237,6 +278,65 @@ test('scoped saved-Pine apply rejects public chart binding before telemetry read
   assert.equal(fixture.state.evaluateAsyncCalls.some((expression) => expression.includes("chart.createStudy({ type: 'pine'")), false);
 });
 
+test('scoped apply creates V5-namespaced source without updating legacy display-name script', async () => {
+  const legacySource = '//@version=6\nindicator("Repo VMC - legacy")';
+  const fixture = scopedApplyFixture({
+    savedScripts: [{ scriptName: 'Repo VMC', scriptIdPart: 'USER;legacy-vmc', version: 1 }],
+    savedScriptSources: [['USER;legacy-vmc', legacySource]],
+  });
+  const result = await applyScopedSavedPine({
+    profile_id: 'profile-a',
+    tab_index: 1,
+    pane_index: 2,
+    name: 'Repo VMC',
+    saved_script_name: 'TV Observer V5 - Repo VMC',
+    source: fixture.source,
+    expected_chart_target_id: 'target-a',
+    expected_chart_id: 'chart-a',
+    expected_layout_id: '8',
+    expected_pane_signature: 'a'.repeat(64),
+    _deps: fixture.deps,
+  });
+
+  assert.equal(result.action, 'created');
+  assert.equal(result.saved_script_name, 'TV Observer V5 - Repo VMC');
+  assert.equal(result.saved_script_action, 'created');
+  assert.equal(result.saved_script_id, 'USER;created-1');
+  assert.equal(fixture.state.saveNewCalls, 1);
+  assert.equal(fixture.state.saveExistingCalls, 0);
+  assert.equal(fixture.state.savedScriptSources.get('USER;legacy-vmc'), legacySource);
+  assert.deepEqual(fixture.state.savedScripts.map((script) => script.scriptName), [
+    'Repo VMC',
+    'TV Observer V5 - Repo VMC',
+  ]);
+});
+
+test('scoped apply fails closed rather than updating a mismatched V5 saved script', async () => {
+  const fixture = scopedApplyFixture({
+    savedScripts: [{ scriptName: 'TV Observer V5 - Repo VMC', scriptIdPart: 'USER;v5-vmc', version: 1 }],
+    savedScriptSources: [['USER;v5-vmc', '//@version=6\nindicator("modified")']],
+  });
+  await assert.rejects(
+    applyScopedSavedPine({
+      profile_id: 'profile-a',
+      tab_index: 1,
+      pane_index: 2,
+      name: 'Repo VMC',
+      saved_script_name: 'TV Observer V5 - Repo VMC',
+      source: fixture.source,
+      expected_chart_target_id: 'target-a',
+      expected_chart_id: 'chart-a',
+      expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64),
+      _deps: fixture.deps,
+    }),
+    /PINE_NAMED_SOURCE_MISMATCH: TV Observer V5 - Repo VMC/u,
+  );
+  assert.equal(fixture.state.saveNewCalls, 0);
+  assert.equal(fixture.state.saveExistingCalls, 0);
+  assert.equal(fixture.state.chartStudies.length, 0);
+});
+
 test('scoped saved-Pine apply rejects public saved-script identity', async () => {
   const fixture = scopedApplyFixture({ savedScriptId: 'PUB;repo-vmc' });
   await assert.rejects(
@@ -245,6 +345,7 @@ test('scoped saved-Pine apply rejects public saved-script identity', async () =>
       tab_index: 1,
       pane_index: 2,
       name: 'Repo VMC',
+      saved_script_name: 'Repo VMC',
       source: fixture.source,
       expected_chart_target_id: 'target-a',
       expected_chart_id: 'chart-a',
