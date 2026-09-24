@@ -254,10 +254,14 @@ export async function indicatorSignatures({ _deps } = {}) {
  * pane inventory is returned, including studies absent from getAllStudies.
  * Addressability is evidence, not an omission filter.
  */
-export async function mutationIdentityInventory({ _deps } = {}) {
+export async function mutationIdentityInventory({ paneIndex, _deps } = {}) {
+  if (paneIndex !== undefined && (!Number.isInteger(paneIndex) || paneIndex < 0 || paneIndex > 15)) {
+    throw new Error('TradingView pane mutation identity inventory pane index is incompatible.');
+  }
   const evaluateFn = _deps?.evaluate || evaluate;
   const raw = await evaluateFn(`
     (function() {
+      var requestedPaneIndex = ${paneIndex === undefined ? 'null' : paneIndex};
       var cwc = ${CWC};
       var count = cwc && cwc.inlineChartsCount;
       if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
@@ -265,6 +269,9 @@ export async function mutationIdentityInventory({ _deps } = {}) {
       var all = cwc && typeof cwc.getAll === 'function' ? cwc.getAll() : [];
       if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
         return { error: 'TradingView pane mutation identity inventory is unavailable.' };
+      }
+      if (requestedPaneIndex !== null && requestedPaneIndex >= visibleCount) {
+        return { error: 'TradingView pane mutation identity inventory pane index is out of range.' };
       }
       var activeChart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
         && typeof window.TradingViewApi._activeChartWidgetWV.value === 'function'
@@ -286,7 +293,9 @@ export async function mutationIdentityInventory({ _deps } = {}) {
         publicStudyIds[publicStudyId] = true;
       }
       var panes = [];
-      for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
+      var firstPaneIndex = requestedPaneIndex === null ? 0 : requestedPaneIndex;
+      var paneEndIndex = requestedPaneIndex === null ? visibleCount : requestedPaneIndex + 1;
+      for (var paneIndex = firstPaneIndex; paneIndex < paneEndIndex; paneIndex++) {
         var widget = all[paneIndex];
         var model = widget && typeof widget.model === 'function' ? widget.model() : null;
         var chartModel = model && typeof model.model === 'function' ? model.model() : null;
@@ -345,18 +354,22 @@ export async function mutationIdentityInventory({ _deps } = {}) {
     throw new Error(raw?.error || 'TradingView pane mutation identity inventory is unavailable.');
   }
   const paneCount = Number(raw.pane_count);
-  if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
+  const expectedEntries = paneIndex === undefined ? paneCount : 1;
+  if (!Number.isInteger(paneCount) || paneCount < 1 || paneCount > 16
+    || (paneIndex !== undefined && paneIndex >= paneCount)
+    || !Array.isArray(raw.panes) || raw.panes.length !== expectedEntries) {
     throw new Error('TradingView pane mutation identity inventory is incompatible.');
   }
   const panes = raw.panes.map((pane, index) => {
-    if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
+    const expectedIndex = paneIndex === undefined ? index : paneIndex;
+    if (!pane || Number(pane.index) !== expectedIndex || !Array.isArray(pane.indicators)) {
       throw new Error('TradingView pane mutation identity inventory is incompatible.');
     }
     const indicators = pane.indicators.map((indicator) => normalizeMutationIndicator(indicator));
-    assertUniqueMutationIdentity(indicators, pane.index);
+    assertUniqueMutationIdentity(indicators, expectedIndex);
     indicators.sort((left, right) => canonicalJson(stableMutationIndicator(left)).localeCompare(canonicalJson(stableMutationIndicator(right))));
     return {
-      index,
+      index: expectedIndex,
       indicators,
     };
   });

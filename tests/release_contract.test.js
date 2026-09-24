@@ -111,6 +111,12 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   assert.equal(names.includes('capture_screenshot'), false);
 
   const classifications = Object.fromEntries(observerCapabilityManifest.capabilities.map((capability) => [capability.name, capability.classification]));
+  const mutationInventory = observerCapabilityManifest.capabilities.find(({ name }) => name === 'pane_indicator_mutation_inventory');
+  assert.ok(mutationInventory);
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.type, 'integer');
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.minimum, 0);
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.maximum, 15);
+  assert.equal(mutationInventory.inputSchema.required?.includes('pane_index') ?? false, false);
   assert.deepEqual({
     pane_indicator_signatures: classifications.pane_indicator_signatures,
     pane_indicator_mutation_inventory: classifications.pane_indicator_mutation_inventory,

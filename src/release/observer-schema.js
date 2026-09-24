@@ -811,7 +811,9 @@ export const observerToolDefinitions = Object.freeze({
   },
   pane_indicator_mutation_inventory: {
     classification: 'read_only',
-    inputSchema: emptyInput,
+    inputSchema: {
+      pane_index: z.number().int().min(0).max(15).optional(),
+    },
     outputSchema: paneIndicatorMutationInventoryOutput,
     rejectUnexpectedInput: true,
   },

@@ -120,6 +120,52 @@ test('mutation identity inventory exposes stable, live, and mutation-visible ide
   assert.equal(result.panes[0].indicators[1].mutation_visible, false);
 });
 
+test('mutation identity inventory can return one exact pane without changing all-pane default', async () => {
+  const allPanes = {
+    pane_count: 8,
+    panes: Array.from({ length: 8 }, (_, index) => ({
+      index,
+      indicators: [{
+        indicator_id: `study-${index}`,
+        entity_id: `entity-${index}`,
+        indicator_name: `Study ${index}`,
+        is_price_study: false,
+        settings: { length: 10 + index },
+        get_study_by_id_resolves: true,
+        present_in_get_all_studies: true,
+        mutation_visible: true,
+      }],
+    })),
+  };
+  let expression = '';
+  const selected = await mutationIdentityInventory({
+    paneIndex: 5,
+    _deps: {
+      evaluate: async (value) => {
+        expression = value;
+        return { pane_count: allPanes.pane_count, panes: [allPanes.panes[5]] };
+      },
+    },
+  });
+
+  assert.equal(selected.pane_count, 8);
+  assert.deepEqual(selected.panes.map((pane) => pane.index), [5]);
+  assert.equal(selected.panes[0].indicators[0].settings.length, 15);
+  assert.match(expression, /var requestedPaneIndex = 5/);
+  assert.match(expression, /var firstPaneIndex = requestedPaneIndex === null \? 0 : requestedPaneIndex/);
+  assert.doesNotMatch(expression, /setLayout|setSymbol|setResolution|removeEntity|insertStudy|\.click\(|navigate/);
+});
+
+test('mutation identity inventory rejects an out-of-range pane filter', async () => {
+  await assert.rejects(
+    mutationIdentityInventory({
+      paneIndex: 8,
+      _deps: { evaluate: async () => ({ error: 'TradingView pane mutation identity inventory pane index is out of range.' }) },
+    }),
+    /out of range/,
+  );
+});
+
 test('mutation identity inventory rejects contradictory visibility evidence', async () => {
   await assert.rejects(
     mutationIdentityInventory({
