@@ -815,7 +815,6 @@ export const observerToolDefinitions = Object.freeze({
       pane_index: z.number().int().min(0).max(15).optional(),
     },
     outputSchema: paneIndicatorMutationInventoryOutput,
-    rejectUnexpectedInput: true,
   },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',

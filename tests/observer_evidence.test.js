@@ -275,3 +275,15 @@ test('identity registration rejects unexpected arguments', async () => {
     /accepts no input arguments/,
   );
 });
+
+test('pane mutation inventory registration accepts its declared pane_index argument', async () => {
+  setObserverSession(session);
+  const handlers = new Map();
+  registerObserverTool({
+    registerTool(name, _definition, handler) {
+      handlers.set(name, handler);
+    },
+  }, 'pane_indicator_mutation_inventory', 'pane inventory', async ({ pane_index }) => ({ pane_index }));
+
+  assert.deepEqual(await handlers.get('pane_indicator_mutation_inventory')({ pane_index: 3 }), { pane_index: 3 });
+});
