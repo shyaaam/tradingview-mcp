@@ -3,13 +3,14 @@ import { evaluate } from './connection.js';
 const DEFAULT_TIMEOUT = 10000;
 const POLL_INTERVAL = 200;
 
-export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT) {
+export async function waitForChartReady(expectedSymbol = null, expectedTf = null, timeout = DEFAULT_TIMEOUT, _deps) {
+  const readState = _deps?.evaluate || evaluate;
   const start = Date.now();
   let lastBarCount = -1;
   let stableCount = 0;
 
   while (Date.now() - start < timeout) {
-    const state = await evaluate(`
+    const state = await readState(`
       (function() {
         // Check for loading spinner
         var spinner = document.querySelector('[class*="loader"]')
@@ -24,10 +25,14 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
           barCount = bars.length;
         } catch {}
 
-        // Get current symbol from header
-        var symbolEl = document.querySelector('[data-name="legend-source-title"]')
-          || document.querySelector('[class*="title"] [class*="apply-common-tooltip"]');
-        var currentSymbol = symbolEl ? symbolEl.textContent.trim() : '';
+        // Read canonical chart symbol; legend text is a display label, not symbol identity.
+        var currentSymbol = '';
+        try {
+          var chart = window.TradingViewApi._activeChartWidgetWV.value();
+          currentSymbol = chart && typeof chart.symbol === 'function'
+            ? String(chart.symbol() || '').trim()
+            : '';
+        } catch {}
 
         return { isLoading: !!isLoading, barCount: barCount, currentSymbol: currentSymbol };
       })()
@@ -46,7 +51,8 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     }
 
     // Check symbol match if expected
-    if (expectedSymbol && state.currentSymbol && !state.currentSymbol.toUpperCase().includes(expectedSymbol.toUpperCase())) {
+    if (expectedSymbol && (!state.currentSymbol
+      || state.currentSymbol.toUpperCase() !== expectedSymbol.toUpperCase())) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
