@@ -19,7 +19,7 @@ export function registerPaneTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  registerObserverTool(server, 'pane_indicator_focused_mutation_inventory', 'Read pane-local getAllStudies visibility by focusing each pane and restoring the original focus; chart content remains read-only', async (input) => {
+  registerObserverTool(server, 'pane_indicator_focused_mutation_inventory', 'Read pane-local study mutation visibility with browser focus and pane/study integrity checks', async (input) => {
     try { return jsonResult(await core.focusedMutationIdentityInventory(input)); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
