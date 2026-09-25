@@ -82,6 +82,9 @@ function scopedApplyFixture({
     indicatorSignatureCalls: 0,
     saveNewCalls: 0,
     saveExistingCalls: 0,
+    tabTargets: [{ index: 0, id: 'other-target' }, { index: 1, id: 'target-a' }],
+    selectedTargetId: null,
+    activatedTargetIds: [],
     switchedTabs: [],
     focusedPanes: [],
     authorityScopes: [],
@@ -92,7 +95,13 @@ function scopedApplyFixture({
     },
     async switchTab(input) {
       state.switchedTabs.push(input.index);
+      state.selectedTargetId = state.tabTargets[input.index]?.id ?? null;
       return { success: true, action: 'switched', index: input.index };
+    },
+    async activateBoundTarget(input) {
+      state.activatedTargetIds.push(input.expected_chart_target_id);
+      state.selectedTargetId = input.expected_chart_target_id;
+      return { success: true, action: 'activated', tab_id: input.expected_chart_target_id };
     },
     async focusPane(input) {
       state.focusedPanes.push(input.index);
@@ -201,7 +210,9 @@ test('scoped saved-Pine apply creates exact owned binding with injected browser 
   assert.equal(result.saved_script_id, 'USER;repo-vmc');
   assert.equal(result.chart_indicator_id, 'Script$USER;repo-vmc@tv-scripting');
   assert.equal(result.post_mutation_signature, 'b'.repeat(64));
-  assert.deepEqual(fixture.state.switchedTabs, [1]);
+  assert.equal(fixture.state.selectedTargetId, 'target-a');
+  assert.deepEqual(fixture.state.activatedTargetIds, ['target-a']);
+  assert.deepEqual(fixture.state.switchedTabs, []);
   assert.deepEqual(fixture.state.focusedPanes, [2]);
   assert.equal(fixture.state.authorityScopes.length, 2);
   assert.ok(fixture.state.evaluateAsyncCalls.some((expression) => expression.includes("chart.createStudy({ type: 'pine'")));

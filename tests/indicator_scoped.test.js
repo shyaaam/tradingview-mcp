@@ -3,18 +3,123 @@
  */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicator, updateScopedSettings } from '../src/core/indicators.js';
+import { applyScopedBlueprintIndicator, applyScopedPlanItem, removeScopedIndicator, updateScopedSettings, verifyScopedMutationAuthority } from '../src/core/indicators.js';
+import { activateBoundTarget } from '../src/core/tab.js';
 
-function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
+const TARGET_URL = 'https://www.tradingview.com/chart/chart-1/';
+
+function makeAuthorityDeps({ tabs = [{ index: 0, id: 'target-1', chart_id: 'chart-1', url: TARGET_URL }], layoutId = '8', paneSignature = 'a'.repeat(64) } = {}) {
+  return {
+    getObserverSession: () => ({ profileId: 'profile-a', chartTargetId: 'target-1' }),
+    resolveManagerBaseUrl: async () => 'http://manager.test/',
+    async fetch() { return { ok: true, async json() { return [{ id: 'profile-a', status: 'running' }]; } }; },
+    async listTabs() { return { success: true, tabs }; },
+    async evaluate() { return { layout_id: layoutId }; },
+    async indicatorSignatures() {
+      return { panes: [{ index: 2, signature: paneSignature, indicators: [] }] };
+    },
+  };
+}
+
+const reviewedAuthority = {
+  profile_id: 'profile-a', tab_index: 1, pane_index: 2,
+  indicator_name: 'Reviewed Study', expected_chart_target_id: 'target-1',
+  expected_chart_id: 'chart-1', expected_layout_id: '8',
+  expected_pane_signature: 'a'.repeat(64),
+};
+
+describe('exact bound-target activation', () => {
+  it('brings bound CDP target forward without resolving a positional tab index', async () => {
+    const calls = [];
+    const targetUrl = 'https://www.tradingview.com/chart/chart-b/';
+    const result = await activateBoundTarget({
+      expected_chart_target_id: 'target-b',
+      _deps: {
+        getObserverSession: () => ({ chartTargetId: 'target-b', chartTargetUrl: targetUrl }),
+        async getBoundClient() {
+          calls.push('bound-client');
+          return { Page: { async bringToFront() { calls.push('bring-to-front'); } } };
+        },
+        async getTargetInfo() { return { id: 'target-b', url: targetUrl }; },
+        async listTabs() { throw new Error('positional tab listing must not select activation target'); },
+      },
+    });
+    assert.deepEqual(calls, ['bound-client', 'bring-to-front']);
+    assert.equal(result.tab_id, 'target-b');
+  });
+
+  it('fails closed if bound CDP target URL differs from session authority', async () => {
+    let broughtToFront = false;
+    await assert.rejects(() => activateBoundTarget({
+      expected_chart_target_id: 'target-b',
+      _deps: {
+        getObserverSession: () => ({ chartTargetId: 'target-b', chartTargetUrl: 'https://www.tradingview.com/chart/chart-b/' }),
+        async getBoundClient() { return { Page: { async bringToFront() { broughtToFront = true; } } }; },
+        async getTargetInfo() { return { id: 'target-b', url: 'https://www.tradingview.com/chart/wrong/' }; },
+      },
+    }), /does not match reviewed chart authority/);
+    assert.equal(broughtToFront, false);
+  });
+});
+
+describe('scoped mutation target authority', () => {
+  it('accepts exact target after it moves from index 1 to 0; ignores wrong target at old index', async () => {
+    const deps = makeAuthorityDeps({ tabs: [
+      { index: 0, id: 'target-1', chart_id: 'chart-1', url: TARGET_URL },
+      { index: 1, id: 'other-target', chart_id: 'other-chart', url: 'https://www.tradingview.com/chart/other-chart/' },
+    ] });
+    const scope = await verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps });
+    assert.equal(scope.expected_chart_target_id, 'target-1');
+    assert.equal(scope.tab_index, 1); // retained as provenance, not authority
+  });
+
+  it('fails closed when exact target is absent or duplicated', async (t) => {
+    await t.test('absent', async () => {
+      const deps = makeAuthorityDeps({ tabs: [{ index: 0, id: 'other-target', chart_id: 'chart-1', url: TARGET_URL }] });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /target tab identity is not unique/);
+    });
+    await t.test('duplicate', async () => {
+      const deps = makeAuthorityDeps({ tabs: [
+        { index: 0, id: 'target-1', chart_id: 'chart-1', url: TARGET_URL },
+        { index: 1, id: 'target-1', chart_id: 'chart-1', url: TARGET_URL },
+      ] });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /target tab identity is not unique/);
+    });
+  });
+
+  it('fails closed when exact target chart identity or layout differs', async (t) => {
+    await t.test('chart id', async () => {
+      const deps = makeAuthorityDeps({ tabs: [{ index: 0, id: 'target-1', chart_id: 'other-chart', url: TARGET_URL }] });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /chart identity does not match/);
+    });
+    await t.test('chart URL', async () => {
+      const deps = makeAuthorityDeps({ tabs: [{ index: 0, id: 'target-1', chart_id: 'chart-1', url: 'https://www.tradingview.com/chart/wrong-url/' }] });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /chart identity does not match/);
+    });
+    await t.test('layout', async () => {
+      const deps = makeAuthorityDeps({ layoutId: '4' });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /layout identity does not match/);
+    });
+    await t.test('pane signature', async () => {
+      const deps = makeAuthorityDeps({ paneSignature: 'b'.repeat(64) });
+      await assert.rejects(() => verifyScopedMutationAuthority(reviewedAuthority, { _deps: deps }), /pre-mutation pane signature/);
+    });
+  });
+});
+
+function makeDeps({ studies = [], failActivation = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
-    switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], evaluateOptions: [], canonicalPriceStudy,
+    tabTargets: [{ index: 0, id: 'other-target' }, { index: 1, id: 'target-1' }],
+    selectedTargetId: null, activatedTargetIds: [], switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], evaluateOptions: [], canonicalPriceStudy,
     canonicalSourceCount, fallbackNameOverride, fallbackPaneOffset, byNameCreateCalls: 0, activePane: null,
   };
   return {
     state,
     deps: {
-      async switchTab({ index }) { if (failSwitch) throw new Error('tab target ambiguous'); state.switchedTabs.push(index); return { success: true, action: 'switched', index }; },
+      async verifyMutationAuthority() {},
+      async switchTab({ index }) { state.switchedTabs.push(index); state.selectedTargetId = state.tabTargets[index]?.id ?? null; return { success: true, action: 'switched', index, tab_id: state.selectedTargetId }; },
+      async activateBoundTarget({ expected_chart_target_id }) { if (failActivation) throw new Error('bound target activation failed'); state.activatedTargetIds.push(expected_chart_target_id); state.selectedTargetId = expected_chart_target_id; return { success: true, action: 'activated', tab_id: expected_chart_target_id }; },
       async focusPane({ index }) { if (failFocus) throw new Error('pane target ambiguous'); state.focusedPanes.push(index); state.activePane = index; return { success: true, focused_index: index, total: 8 }; },
       async indicatorSignatures() {
         return {
@@ -125,6 +230,20 @@ function makeDeps({ studies = [], failSwitch = false, failFocus = false, canonic
 }
 
 describe('scoped indicator plan primitives', () => {
+  it('activates exact reviewed target when stale index now belongs to another chart', async () => {
+    const { deps, state } = makeDeps();
+    await applyScopedPlanItem({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 2,
+      indicator_name: 'Relative Strength Index', expected_settings: {}, action: 'apply_indicator',
+      expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), _deps: deps,
+    });
+    assert.equal(state.tabTargets[0].id, 'other-target');
+    assert.equal(state.selectedTargetId, 'target-1');
+    assert.deepEqual(state.activatedTargetIds, ['target-1']);
+    assert.deepEqual(state.switchedTabs, []);
+  });
+
   it('applies an indicator and returns scoped evidence', async () => {
     const { deps } = makeDeps();
     const result = await applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 2, indicator_name: 'Relative Strength Index', expected_settings: { length: 14 }, action: 'apply_indicator', _deps: deps });
@@ -207,7 +326,8 @@ describe('scoped indicator plan primitives', () => {
       expected_layout_id: '8',
       expected_pane_signature: 'a'.repeat(64),
     });
-    assert.deepEqual(state.switchedTabs, [4]);
+    assert.deepEqual(state.activatedTargetIds, ['target-1']);
+    assert.deepEqual(state.switchedTabs, []);
     assert.deepEqual(state.focusedPanes, [2]);
     assert.equal(state.created.length, 1);
   });
@@ -308,8 +428,8 @@ describe('scoped indicator plan primitives', () => {
     ] });
     await assert.rejects(() => updateScopedSettings({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 50 }, _deps: deps }), /duplicate matching studies/);
   });
-  it('blocks ambiguous tab target selection', async () => {
-    await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps({ failSwitch: true }).deps }), /tab target ambiguous/);
+  it('blocks failed exact bound-target activation', async () => {
+    await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps({ failActivation: true }).deps }), /bound target activation failed/);
   });
   it('blocks ambiguous pane target selection', async () => {
     await assert.rejects(() => applyScopedPlanItem({ profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name: 'RSI', expected_settings: { length: 14 }, _deps: makeDeps({ failFocus: true }).deps }), /pane target ambiguous/);

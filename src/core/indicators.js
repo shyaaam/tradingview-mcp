@@ -3,7 +3,7 @@
  */
 import { evaluate as _evaluate, safeString } from '../connection.js';
 import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from './pane.js';
-import { switchTab as _switchTab, list as _listTabs } from './tab.js';
+import { activateBoundTarget as _activateBoundTarget, list as _listTabs } from './tab.js';
 import { getObserverSession } from './observer-session.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
@@ -18,9 +18,12 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     focusPane: deps?.focusPane || _focusPane,
     indicatorSignatures: deps?.indicatorSignatures || _indicatorSignatures,
-    switchTab: deps?.switchTab || _switchTab,
+    activateBoundTarget: deps?.activateBoundTarget || _activateBoundTarget,
     listTabs: deps?.listTabs || _listTabs,
-    verifyMutationAuthority: deps?.verifyMutationAuthority || (deps ? async () => {} : _verifyMutationAuthority),
+    getObserverSession: deps?.getObserverSession || getObserverSession,
+    resolveManagerBaseUrl: deps?.resolveManagerBaseUrl || resolveCloakManagerBaseUrl,
+    fetch: deps?.fetch || globalThis.fetch,
+    verifyMutationAuthority: deps?.verifyMutationAuthority || _verifyMutationAuthority,
   };
 }
 
@@ -109,9 +112,9 @@ function _settingsEvidenceFromStudy(study) {
   };
 }
 
-async function _selectScopedChart({ tab_index, pane_index, _deps }) {
-  const { focusPane, switchTab } = _resolve(_deps);
-  await switchTab({ index: tab_index });
+async function _selectScopedChart({ expected_chart_target_id, pane_index, _deps }) {
+  const { activateBoundTarget, focusPane } = _resolve(_deps);
+  await activateBoundTarget({ expected_chart_target_id, _deps });
   const focusResult = await focusPane({ index: pane_index });
   return focusResult || { success: true, focused_index: pane_index };
 }
@@ -607,13 +610,14 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
 }
 
 async function _verifyMutationAuthority(scope, { action, _deps }) {
-  const session = getObserverSession();
+  const { getObserverSession: readSession, resolveManagerBaseUrl, fetch: fetchManager, evaluate, indicatorSignatures, listTabs } = _resolve(_deps);
+  const session = readSession();
   if (!session || session.profileId !== scope.profile_id || session.chartTargetId !== scope.expected_chart_target_id) {
     throw new Error('scoped indicator mutation session identity does not match reviewed authority');
   }
-  const managerBaseUrl = await resolveCloakManagerBaseUrl();
+  const managerBaseUrl = await resolveManagerBaseUrl();
   if (!managerBaseUrl) throw new Error('scoped indicator mutation Manager is unavailable');
-  const response = await fetch(new URL('profiles', `${managerBaseUrl}/`).toString());
+  const response = await fetchManager(new URL('profiles', `${managerBaseUrl}/`).toString());
   if (!response.ok) throw new Error('scoped indicator mutation Manager identity read failed');
   const payload = await response.json();
   const profiles = Array.isArray(payload) ? payload : payload?.profiles;
@@ -624,10 +628,11 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   if (matches.length !== 1 || !['running', 'active'].includes(String(matches[0]?.status || matches[0]?.state || '').toLowerCase())) {
     throw new Error('scoped indicator mutation live Manager profile identity is not approved');
   }
-  const { evaluate, indicatorSignatures, listTabs } = _resolve(_deps);
   const tabs = await listTabs();
-  const tabMatches = tabs.tabs.filter((tab) => tab.index === scope.tab_index && tab.id === scope.expected_chart_target_id);
-  if (tabMatches.length !== 1) throw new Error('scoped indicator mutation target tab identity is not unique');
+  const tabMatches = Array.isArray(tabs?.tabs)
+    ? tabs.tabs.filter((tab) => tab?.id === scope.expected_chart_target_id)
+    : [];
+  if (tabs?.success !== true || tabMatches.length !== 1) throw new Error('scoped indicator mutation target tab identity is not unique');
   const tab = tabMatches[0];
   const expectedUrl = `https://www.tradingview.com/chart/${scope.expected_chart_id}/`;
   if (tab.chart_id !== scope.expected_chart_id || tab.url !== expectedUrl) throw new Error('scoped indicator mutation chart identity does not match reviewed authority');

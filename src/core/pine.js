@@ -6,7 +6,7 @@
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 import { createHash } from 'node:crypto';
 import { focus as focusPane, indicatorSignatures } from './pane.js';
-import { switchTab } from './tab.js';
+import { activateBoundTarget } from './tab.js';
 import { verifyScopedMutationAuthority } from './indicators.js';
 
 // ── Monaco finder (injected into TV page) ──
@@ -1042,7 +1042,7 @@ export async function applyScopedSavedPine({
     expected_layout_id,
     expected_pane_signature,
   }, { action: 'apply_indicator', _deps });
-  const focusResult = await (_deps?.switchTab || switchTab)({ index: scope.tab_index });
+  const focusResult = await (_deps?.activateBoundTarget || activateBoundTarget)({ expected_chart_target_id: scope.expected_chart_target_id, _deps });
   const paneFocusResult = await (_deps?.focusPane || focusPane)({ index: scope.pane_index });
   const savedScriptName = normalizePineScriptName(saved_script_name);
   const ensured = await ensureSavedPineScriptNamed({
