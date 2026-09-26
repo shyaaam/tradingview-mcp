@@ -66,8 +66,15 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
     || !sameChartInventory(beforeCharts, chartTargets(preClose))) {
     throw new Error('TradingView chart inventory changed before exact saved-chart retirement.');
   }
-  const closeUrl = new URL(`json/close/${encodeURIComponent(target.id)}`, `${cdpUrl}/`).toString();
-  await fetchAcknowledgement(closeUrl, fetchImpl, deadline);
+  const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
+  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(version?.webSocketDebuggerUrl, cdpUrl);
+  const closeResult = await sendBrowserCdpCommand(
+    browserWebSocketUrl,
+    { targetId: target.id },
+    deadline,
+    dependencies.createWebSocket,
+  );
+  if (closeResult?.success !== true) throw new Error('Exact saved-chart target close was not acknowledged.');
 
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let after = before;
@@ -181,6 +188,94 @@ function targetHasSavedChartId(target, savedChartId) {
   } catch { return false; }
 }
 
+function requireProfileBrowserWebSocketUrl(value, cdpUrl) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error('Browser CDP WebSocket endpoint is unavailable.');
+  }
+  let endpoint;
+  let profileEndpoint;
+  try {
+    endpoint = new URL(value);
+    profileEndpoint = new URL(cdpUrl);
+  } catch {
+    throw new Error('Browser CDP WebSocket endpoint is malformed.');
+  }
+  const expectedProtocol = profileEndpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+  const expectedPath = profileEndpoint.pathname.replace(/\/+$/u, '') || '/';
+  if (endpoint.protocol !== expectedProtocol || endpoint.host !== profileEndpoint.host
+    || endpoint.pathname.replace(/\/+$/u, '') !== expectedPath
+    || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+    throw new Error('Browser CDP WebSocket endpoint is outside exact Manager profile authority.');
+  }
+  return endpoint.toString();
+}
+
+async function sendBrowserCdpCommand(url, params, deadline, createWebSocket) {
+  const WebSocketImpl = globalThis.WebSocket;
+  if (typeof createWebSocket !== 'function' && typeof WebSocketImpl !== 'function') {
+    throw new Error('Browser CDP WebSocket is unavailable.');
+  }
+  let socket;
+  let settled = false;
+  const response = new Promise((resolve, reject) => {
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    try {
+      socket = createWebSocket ? createWebSocket(url) : new WebSocketImpl(url);
+    } catch {
+      fail(new Error('Browser CDP WebSocket could not be opened.'));
+      return;
+    }
+    socket.addEventListener('open', () => {
+      if (remainingMs(deadline) <= 0) {
+        fail(deadlineError(deadline.timeoutMs));
+        return;
+      }
+      try {
+        socket.send(JSON.stringify({ id: 1, method: 'Target.closeTarget', params }));
+      } catch {
+        fail(new Error('Browser CDP close command could not be sent.'));
+      }
+    }, { once: true });
+    socket.addEventListener('message', (event) => {
+      if (settled) return;
+      if (typeof event?.data !== 'string'
+        || Buffer.byteLength(event.data, 'utf8') > MAX_RETIREMENT_READ_BYTES) {
+        fail(new Error('Browser CDP response is malformed or exceeds the bounded read limit.'));
+        return;
+      }
+      let message;
+      try { message = JSON.parse(event.data); } catch {
+        fail(new Error('Browser CDP response is not valid JSON.'));
+        return;
+      }
+      if (message?.id !== 1) return;
+      if (message.error) {
+        fail(new Error('Browser CDP close command failed.'));
+        return;
+      }
+      settled = true;
+      resolve(message.result);
+    });
+    socket.addEventListener('error', () => fail(new Error('Browser CDP WebSocket failed.')), { once: true });
+    socket.addEventListener('close', () => {
+      fail(new Error('Browser CDP WebSocket closed before close acknowledgement.'));
+    }, { once: true });
+  });
+  try {
+    return await withDeadline(() => response, deadline, () => closeWebSocket(socket));
+  } finally {
+    closeWebSocket(socket);
+  }
+}
+
+function closeWebSocket(socket) {
+  try { socket?.close?.(); } catch { /* preserve retirement result */ }
+}
+
 function compareIdentity(left, right) {
   return left.id.localeCompare(right.id) || left.url.localeCompare(right.url);
 }
@@ -202,17 +297,6 @@ async function fetchJson(url, fetchImpl, deadline) {
     } catch {
       throw new Error('Manager/CDP response is not valid bounded JSON.');
     }
-  }, deadline, () => controller.abort());
-}
-
-async function fetchAcknowledgement(url, fetchImpl, deadline) {
-  const controller = new AbortController();
-  await withDeadline(async () => {
-    const response = await fetchImpl(url, { signal: controller.signal });
-    if (!response?.ok) {
-      throw new Error(`Exact saved-chart target close failed: ${response?.status || 'unknown'} ${response?.statusText || ''}`.trim());
-    }
-    await readBoundedResponseText(response, controller);
   }, deadline, () => controller.abort());
 }
 
