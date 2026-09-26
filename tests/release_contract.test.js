@@ -25,6 +25,7 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
+import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
@@ -79,6 +80,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_runtime_content_snapshot_v2',
     'tv_observer_hydrate_chart_target',
     'tv_observer_hydrate_chart_target_v2',
+    'tv_observer_retire_saved_chart_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -167,6 +169,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartTargetHydrationV2Tool(fakeServer);
+  registerChartTargetRetirementTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
   registerChartRuntimeContentSnapshotTools(fakeServer);
@@ -254,6 +257,18 @@ test('observer result fixtures satisfy registered output schemas', () => {
       },
       chrome_error_page: false,
       state: 'renderer-verified',
+      mutations_performed: true,
+    },
+    tv_observer_retire_saved_chart_v1: {
+      success: true,
+      retirement_version: 'saved-chart-retirement-v1',
+      authority_id: `v5-capture-slot:${'a'.repeat(64)}`,
+      authority_hash: 'a'.repeat(64),
+      profile_id: 'profile-a',
+      saved_chart_id: 'chart-b',
+      chart_target_id: 'target-b',
+      action: 'closed',
+      remaining_chart_targets: 1,
       mutations_performed: true,
     },
     chart_runtime_readiness_probe_v1: {
