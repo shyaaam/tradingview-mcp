@@ -3,7 +3,7 @@
  */
 import { evaluate as _evaluate, safeString } from '../connection.js';
 import { focus as _focusPane, indicatorSignatures as _indicatorSignatures } from './pane.js';
-import { switchTab as _switchTab, list as _listTabs } from './tab.js';
+import { activateBoundTarget as _activateBoundTarget, list as _listTabs } from './tab.js';
 import { getObserverSession } from './observer-session.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
@@ -18,9 +18,12 @@ function _resolve(deps) {
     evaluate: deps?.evaluate || _evaluate,
     focusPane: deps?.focusPane || _focusPane,
     indicatorSignatures: deps?.indicatorSignatures || _indicatorSignatures,
-    switchTab: deps?.switchTab || _switchTab,
+    activateBoundTarget: deps?.activateBoundTarget || _activateBoundTarget,
     listTabs: deps?.listTabs || _listTabs,
-    verifyMutationAuthority: deps?.verifyMutationAuthority || (deps ? async () => {} : _verifyMutationAuthority),
+    getObserverSession: deps?.getObserverSession || getObserverSession,
+    resolveManagerBaseUrl: deps?.resolveManagerBaseUrl || resolveCloakManagerBaseUrl,
+    fetch: deps?.fetch || globalThis.fetch,
+    verifyMutationAuthority: deps?.verifyMutationAuthority || _verifyMutationAuthority,
   };
 }
 
@@ -109,9 +112,9 @@ function _settingsEvidenceFromStudy(study) {
   };
 }
 
-async function _selectScopedChart({ tab_index, pane_index, _deps }) {
-  const { focusPane, switchTab } = _resolve(_deps);
-  await switchTab({ index: tab_index });
+async function _selectScopedChart({ expected_chart_target_id, pane_index, _deps }) {
+  const { activateBoundTarget, focusPane } = _resolve(_deps);
+  await activateBoundTarget({ expected_chart_target_id, _deps });
   const focusResult = await focusPane({ index: pane_index });
   return focusResult || { success: true, focused_index: pane_index };
 }
@@ -161,18 +164,22 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
         var name = String(meta && (meta.description || meta.shortDescription || '')).trim();
         return name.toLowerCase() === ${safeString(indicator_name.trim().toLowerCase())};
       });
-      if (canonicalMatches.length !== 1) {
-        return { error: 'scoped indicator add requires exactly one canonical pane indicator: ' + ${safeString(indicator_name)} };
-      }
-      var canonicalMeta = canonicalMatches[0].metaInfo();
-      var canonicalInputs = typeof canonicalMatches[0].inputs === 'function'
-        ? canonicalMatches[0].inputs()
-        : {};
-      if (!canonicalInputs || typeof canonicalInputs !== 'object' || Array.isArray(canonicalInputs)) {
-        return { error: 'scoped indicator add canonical inputs are unavailable: ' + ${safeString(indicator_name)} };
+      if (canonicalMatches.length > 1) {
+        return { error: 'scoped indicator add found multiple canonical pane indicators: ' + ${safeString(indicator_name)} };
       }
       var expectedSettings = ${expectedSettingsJson};
-      var inputs = Object.assign({}, canonicalInputs);
+      var canonicalMeta = null;
+      var inputs = {};
+      if (canonicalMatches.length === 1) {
+        canonicalMeta = canonicalMatches[0].metaInfo();
+        var canonicalInputs = typeof canonicalMatches[0].inputs === 'function'
+          ? canonicalMatches[0].inputs()
+          : {};
+        if (!canonicalInputs || typeof canonicalInputs !== 'object' || Array.isArray(canonicalInputs)) {
+          return { error: 'scoped indicator add canonical inputs are unavailable: ' + ${safeString(indicator_name)} };
+        }
+        inputs = Object.assign({}, canonicalInputs);
+      }
       Object.keys(expectedSettings).forEach(function(key) {
         var value = expectedSettings[key];
         if (value && typeof value === 'object' && !Array.isArray(value)
@@ -183,13 +190,47 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
           inputs[key] = value;
         }
       });
+      var before = chart.getAllStudies ? chart.getAllStudies().map(function(s) { return s.id; }) : [];
+      function readAddedStudy() {
+        return new Promise(function(resolve) {
+          setTimeout(function() {
+            var after = chart.getAllStudies ? chart.getAllStudies() : [];
+            var addedStudies = after.filter(function(study) {
+              return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
+            });
+            if (addedStudies.length !== 1) return resolve({ error: 'scoped indicator add did not produce exactly one identifiable study' });
+            var added = addedStudies[0];
+            var addedName = String(added.name || added.title || '').trim();
+            if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
+              return resolve({ error: 'scoped indicator add resolved an unexpected study name' });
+            }
+            var study = chart.getStudyById(added.id);
+            var inputValues = study && study.getInputValues ? study.getInputValues() : [];
+            resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputValues, values: added.values || added.description || null });
+          }, 1200);
+        });
+      }
+      if (canonicalMatches.length === 0) {
+        if (!chart || typeof chart.createStudy !== 'function') {
+          return { error: 'scoped indicator add canonical source and createStudy API are unavailable: ' + ${safeString(indicator_name)} };
+        }
+        var createInputs = Object.keys(inputs).map(function(key) { return { id: key, value: inputs[key] }; });
+        var creation;
+        try {
+          creation = chart.createStudy(${safeString(indicator_name)}, false, false, createInputs);
+        } catch (error) {
+          return { error: 'scoped indicator add by name failed: ' + String(error && error.message ? error.message : error) };
+        }
+        return Promise.resolve(creation).then(readAddedStudy).catch(function(error) {
+          return { error: 'scoped indicator add by name failed: ' + String(error && error.message ? error.message : error) };
+        });
+      }
       var targetModel = chart && chart._chartWidget && typeof chart._chartWidget.model === 'function'
         ? chart._chartWidget.model().model()
         : null;
       if (!targetModel || typeof targetModel.insertStudyWithParams !== 'function') {
         return { error: 'scoped indicator add target study insertion is unavailable' };
       }
-      var before = chart.getAllStudies ? chart.getAllStudies().map(function(s) { return s.id; }) : [];
       var insertion = targetModel.insertStudyWithParams({
         studyMetaInfo: canonicalMeta,
         inputs: inputs,
@@ -199,30 +240,12 @@ async function _applyIndicator({ indicator_name, expected_settings, _deps }) {
         return { error: 'scoped indicator add did not return an insertion handle' };
       }
       return Promise.resolve(insertion.startPromise).then(function() {
-        return Promise.resolve(insertion.study).then(function() {
-          return new Promise(function(resolve) {
-            setTimeout(function() {
-              var after = chart.getAllStudies ? chart.getAllStudies() : [];
-              var addedStudies = after.filter(function(study) {
-                return study && typeof study.id === 'string' && study.id.length > 0 && before.indexOf(study.id) === -1;
-              });
-              if (addedStudies.length !== 1) return resolve({ error: 'scoped indicator add did not produce exactly one identifiable study' });
-              var added = addedStudies[0];
-              var addedName = String(added.name || added.title || '').trim();
-              if (addedName.toLowerCase() !== ${safeString(indicator_name.trim().toLowerCase())}) {
-                return resolve({ error: 'scoped indicator add resolved an unexpected study name' });
-              }
-              var study = chart.getStudyById(added.id);
-              var inputValues = study && study.getInputValues ? study.getInputValues() : [];
-              resolve({ id: added.id, name: added.name || added.title || ${safeString(indicator_name)}, inputs: inputValues, values: added.values || added.description || null });
-            }, 1200);
-          });
-        });
+        return Promise.resolve(insertion.study).then(readAddedStudy);
       }).catch(function(error) {
         return { error: String(error && error.message ? error.message : error) };
       });
     })()
-  `);
+  `, { awaitPromise: true });
   if (result?.error) throw new Error(result.error);
   return result;
 }
@@ -587,13 +610,14 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
 }
 
 async function _verifyMutationAuthority(scope, { action, _deps }) {
-  const session = getObserverSession();
+  const { getObserverSession: readSession, resolveManagerBaseUrl, fetch: fetchManager, evaluate, indicatorSignatures, listTabs } = _resolve(_deps);
+  const session = readSession();
   if (!session || session.profileId !== scope.profile_id || session.chartTargetId !== scope.expected_chart_target_id) {
     throw new Error('scoped indicator mutation session identity does not match reviewed authority');
   }
-  const managerBaseUrl = await resolveCloakManagerBaseUrl();
+  const managerBaseUrl = await resolveManagerBaseUrl();
   if (!managerBaseUrl) throw new Error('scoped indicator mutation Manager is unavailable');
-  const response = await fetch(new URL('profiles', `${managerBaseUrl}/`).toString());
+  const response = await fetchManager(new URL('profiles', `${managerBaseUrl}/`).toString());
   if (!response.ok) throw new Error('scoped indicator mutation Manager identity read failed');
   const payload = await response.json();
   const profiles = Array.isArray(payload) ? payload : payload?.profiles;
@@ -604,10 +628,11 @@ async function _verifyMutationAuthority(scope, { action, _deps }) {
   if (matches.length !== 1 || !['running', 'active'].includes(String(matches[0]?.status || matches[0]?.state || '').toLowerCase())) {
     throw new Error('scoped indicator mutation live Manager profile identity is not approved');
   }
-  const { evaluate, indicatorSignatures, listTabs } = _resolve(_deps);
   const tabs = await listTabs();
-  const tabMatches = tabs.tabs.filter((tab) => tab.index === scope.tab_index && tab.id === scope.expected_chart_target_id);
-  if (tabMatches.length !== 1) throw new Error('scoped indicator mutation target tab identity is not unique');
+  const tabMatches = Array.isArray(tabs?.tabs)
+    ? tabs.tabs.filter((tab) => tab?.id === scope.expected_chart_target_id)
+    : [];
+  if (tabs?.success !== true || tabMatches.length !== 1) throw new Error('scoped indicator mutation target tab identity is not unique');
   const tab = tabMatches[0];
   const expectedUrl = `https://www.tradingview.com/chart/${scope.expected_chart_id}/`;
   if (tab.chart_id !== scope.expected_chart_id || tab.url !== expectedUrl) throw new Error('scoped indicator mutation chart identity does not match reviewed authority');

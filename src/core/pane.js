@@ -13,6 +13,7 @@ const CWC = 'window.TradingViewApi._chartWidgetCollection';
 const HASH = /^[0-9a-f]{64}$/i;
 export const PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION = 'pane-indicator-signatures-v1';
 export const PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION = 'pane-indicator-mutation-inventory-v1';
+export const PANE_INDICATOR_FOCUSED_MUTATION_INVENTORY_SCHEMA_VERSION = 'pane-indicator-focused-mutation-inventory-v1';
 const VOLATILE_INDICATOR_INPUT_KEYS = new Set([
   'first_visible_bar_time',
   'last_visible_bar_time',
@@ -254,10 +255,19 @@ export async function indicatorSignatures({ _deps } = {}) {
  * pane inventory is returned, including studies absent from getAllStudies.
  * Addressability is evidence, not an omission filter.
  */
-export async function mutationIdentityInventory({ _deps } = {}) {
+export async function mutationIdentityInventory({ paneIndex, expectedActivePaneIndex, _deps } = {}) {
+  if (paneIndex !== undefined && (!Number.isInteger(paneIndex) || paneIndex < 0 || paneIndex > 15)) {
+    throw new Error('TradingView pane mutation identity inventory pane index is incompatible.');
+  }
+  if (expectedActivePaneIndex !== undefined
+    && (!Number.isInteger(expectedActivePaneIndex) || expectedActivePaneIndex < 0 || expectedActivePaneIndex > 15)) {
+    throw new Error('TradingView pane mutation identity inventory active pane expectation is incompatible.');
+  }
   const evaluateFn = _deps?.evaluate || evaluate;
   const raw = await evaluateFn(`
     (function() {
+      var requestedPaneIndex = ${paneIndex === undefined ? 'null' : paneIndex};
+      var requestedActivePaneIndex = ${expectedActivePaneIndex === undefined ? 'null' : expectedActivePaneIndex};
       var cwc = ${CWC};
       var count = cwc && cwc.inlineChartsCount;
       if (typeof count === 'object' && count && typeof count.value === 'function') count = count.value();
@@ -266,10 +276,24 @@ export async function mutationIdentityInventory({ _deps } = {}) {
       if (!Number.isInteger(visibleCount) || visibleCount < 1 || all.length < visibleCount) {
         return { error: 'TradingView pane mutation identity inventory is unavailable.' };
       }
+      if (requestedPaneIndex !== null && requestedPaneIndex >= visibleCount) {
+        return { error: 'TradingView pane mutation identity inventory pane index is out of range.' };
+      }
       var activeChart = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
         && typeof window.TradingViewApi._activeChartWidgetWV.value === 'function'
         ? window.TradingViewApi._activeChartWidgetWV.value()
         : null;
+      if (requestedActivePaneIndex !== null) {
+        var activePaneIndex = -1;
+        try {
+          for (var activeIndex = 0; activeIndex < visibleCount; activeIndex++) {
+            if (all[activeIndex] === activeChart._chartWidget) { activePaneIndex = activeIndex; break; }
+          }
+        } catch (error) { activePaneIndex = -1; }
+        if (activePaneIndex !== requestedActivePaneIndex) {
+          return { error: 'TradingView pane mutation identity inventory active pane does not match requested pane.' };
+        }
+      }
       var publicStudies = activeChart && typeof activeChart.getAllStudies === 'function'
         ? activeChart.getAllStudies()
         : null;
@@ -286,7 +310,9 @@ export async function mutationIdentityInventory({ _deps } = {}) {
         publicStudyIds[publicStudyId] = true;
       }
       var panes = [];
-      for (var paneIndex = 0; paneIndex < visibleCount; paneIndex++) {
+      var firstPaneIndex = requestedPaneIndex === null ? 0 : requestedPaneIndex;
+      var paneEndIndex = requestedPaneIndex === null ? visibleCount : requestedPaneIndex + 1;
+      for (var paneIndex = firstPaneIndex; paneIndex < paneEndIndex; paneIndex++) {
         var widget = all[paneIndex];
         var model = widget && typeof widget.model === 'function' ? widget.model() : null;
         var chartModel = model && typeof model.model === 'function' ? model.model() : null;
@@ -345,18 +371,22 @@ export async function mutationIdentityInventory({ _deps } = {}) {
     throw new Error(raw?.error || 'TradingView pane mutation identity inventory is unavailable.');
   }
   const paneCount = Number(raw.pane_count);
-  if (!Number.isInteger(paneCount) || paneCount < 1 || !Array.isArray(raw.panes) || raw.panes.length !== paneCount) {
+  const expectedEntries = paneIndex === undefined ? paneCount : 1;
+  if (!Number.isInteger(paneCount) || paneCount < 1 || paneCount > 16
+    || (paneIndex !== undefined && paneIndex >= paneCount)
+    || !Array.isArray(raw.panes) || raw.panes.length !== expectedEntries) {
     throw new Error('TradingView pane mutation identity inventory is incompatible.');
   }
   const panes = raw.panes.map((pane, index) => {
-    if (!pane || Number(pane.index) !== index || !Array.isArray(pane.indicators)) {
+    const expectedIndex = paneIndex === undefined ? index : paneIndex;
+    if (!pane || Number(pane.index) !== expectedIndex || !Array.isArray(pane.indicators)) {
       throw new Error('TradingView pane mutation identity inventory is incompatible.');
     }
     const indicators = pane.indicators.map((indicator) => normalizeMutationIndicator(indicator));
-    assertUniqueMutationIdentity(indicators, pane.index);
+    assertUniqueMutationIdentity(indicators, expectedIndex);
     indicators.sort((left, right) => canonicalJson(stableMutationIndicator(left)).localeCompare(canonicalJson(stableMutationIndicator(right))));
     return {
-      index,
+      index: expectedIndex,
       indicators,
     };
   });
@@ -367,6 +397,260 @@ export async function mutationIdentityInventory({ _deps } = {}) {
     canonical_pane_index: 0,
     panes,
   };
+}
+
+/**
+ * Read pane-local public study visibility by focusing each pane in turn, then
+ * restore and verify the original focus. This is browser-focus mutation only;
+ * stable pane/study fingerprints prove that observable workspace state remains unchanged.
+ */
+export async function focusedMutationIdentityInventory(input = {}, { _deps = {} } = {}) {
+  const expected = normalizeFocusedMutationInventoryInput(input);
+  const dependencies = _deps || {};
+  const session = dependencies.session || getObserverSession();
+  const canonicalUrl = `https://www.tradingview.com/chart/${expected.chartId}/`;
+  if (!session
+    || session.profileId !== expected.profileId
+    || session.chartTargetId !== expected.targetId
+    || session.chartTargetUrl !== canonicalUrl) {
+    throw new Error('Focused pane mutation inventory session identity does not match reviewed authority.');
+  }
+
+  await readScopedManagerProfile(expected.profileId, dependencies);
+  const verifyTarget = async () => {
+    const tabs = await readScopedTabs(dependencies);
+    const entries = Array.isArray(tabs?.tabs) ? tabs.tabs : [];
+    const targetMatches = entries.filter((tab) => tab?.id === expected.targetId);
+    const exactMatches = entries.filter((tab) => Number(tab?.index) === expected.tabIndex
+      && tab?.id === expected.targetId
+      && tab?.chart_id === expected.chartId
+      && tab?.url === canonicalUrl);
+    if (tabs?.success !== true || targetMatches.length !== 1 || exactMatches.length !== 1) {
+      throw new Error('Focused pane mutation inventory browser target identity is not unique.');
+    }
+    return exactMatches[0];
+  };
+
+  const readPanes = dependencies.readPanes || list;
+  const focusPane = dependencies.focusPane || focus;
+  const readInventory = dependencies.readInventory || ((paneIndex) => mutationIdentityInventory({
+    paneIndex,
+    expectedActivePaneIndex: paneIndex,
+    _deps: dependencies.evaluate ? { evaluate: dependencies.evaluate } : undefined,
+  }));
+  const readContent = dependencies.readContent || (() => indicatorSignatures({
+    _deps: dependencies.evaluate ? { evaluate: dependencies.evaluate } : undefined,
+  }));
+  const beforeTab = await verifyTarget();
+  const before = await readPanes();
+  assertFocusedInventoryPaneState(before, null, 'before focus');
+  const initialActiveIndex = Number(before.active_index);
+  const studyFingerprintBefore = await focusedPaneStudyFingerprint(
+    readPanes,
+    readContent,
+    before,
+    initialActiveIndex,
+    'before focus',
+  );
+  let pane;
+  let focusPerformed = false;
+  let operationError;
+  try {
+    let current = await readPanes();
+    assertFocusedInventoryPaneState(current, null, `before pane ${expected.paneIndex}`);
+    if (Number(current.active_index) !== expected.paneIndex) {
+      const focused = await focusPane({ index: expected.paneIndex });
+      if (focused?.success !== true || Number(focused.focused_index) !== expected.paneIndex) {
+        throw new Error(`Focused pane mutation inventory could not focus pane ${expected.paneIndex}.`);
+      }
+      focusPerformed = true;
+      current = await readPanes();
+    }
+    assertFocusedInventoryPaneState(current, expected.paneIndex, `before inventory pane ${expected.paneIndex}`);
+    const target = await verifyTarget();
+    if (target.id !== beforeTab.id || target.url !== beforeTab.url || Number(target.index) !== expected.tabIndex) {
+      throw new Error('Focused pane mutation inventory browser target changed during pane read.');
+    }
+
+    const inventory = await readInventory(expected.paneIndex);
+    if (inventory?.success !== true
+      || inventory.schema_version !== PANE_INDICATOR_MUTATION_INVENTORY_SCHEMA_VERSION
+      || inventory.pane_count !== 8
+      || inventory.canonical_pane_index !== 0
+      || !Array.isArray(inventory.panes)
+      || inventory.panes.length !== 1
+      || Number(inventory.panes[0]?.index) !== expected.paneIndex) {
+      throw new Error(`Focused pane mutation inventory readback for pane ${expected.paneIndex} is incompatible.`);
+    }
+    const paneState = current.panes[expected.paneIndex];
+    pane = {
+      ...inventory.panes[0],
+      symbol: paneState.symbol,
+      resolution: paneState.resolution,
+    };
+  } catch (error) {
+    operationError = error;
+  }
+
+  let restored;
+  let restoreError;
+  let studyFingerprintAfter;
+  try {
+    const current = await readPanes();
+    assertFocusedInventoryPaneState(current, null, 'before focus restoration');
+    if (Number(current.active_index) !== initialActiveIndex) {
+      const result = await focusPane({ index: initialActiveIndex });
+      if (result?.success !== true || Number(result.focused_index) !== initialActiveIndex) {
+        throw new Error('Focused pane mutation inventory could not restore the original active pane.');
+      }
+    }
+    restored = await readPanes();
+    assertFocusedInventoryPaneState(restored, initialActiveIndex, 'after focus restoration');
+    const afterTab = await verifyTarget();
+    if (afterTab.id !== beforeTab.id || afterTab.url !== beforeTab.url || Number(afterTab.index) !== expected.tabIndex) {
+      throw new Error('Focused pane mutation inventory did not preserve the original browser tab.');
+    }
+    studyFingerprintAfter = await focusedPaneStudyFingerprint(
+      readPanes,
+      readContent,
+      restored,
+      initialActiveIndex,
+      'after focus restoration',
+    );
+  } catch (error) {
+    restoreError = error;
+  }
+  if (restoreError) {
+    const detail = operationError instanceof Error ? `${operationError.message}; ` : '';
+    throw new Error(`Focused pane mutation inventory restoration is unconfirmed: ${detail}${restoreError instanceof Error ? restoreError.message : String(restoreError)}`, {
+      cause: restoreError,
+    });
+  }
+  if (studyFingerprintBefore !== studyFingerprintAfter) {
+    throw new Error('Focused pane mutation inventory pane/study state changed during focus/read/restore.');
+  }
+  if (operationError) throw operationError;
+
+  return {
+    success: true,
+    schema_version: PANE_INDICATOR_FOCUSED_MUTATION_INVENTORY_SCHEMA_VERSION,
+    profile_id: expected.profileId,
+    tab_index: expected.tabIndex,
+    chart_target_id: expected.targetId,
+    chart_id: expected.chartId,
+    layout_id: expected.layoutId,
+    pane_count: 8,
+    canonical_pane_index: 0,
+    panes: [pane],
+    pane_study_state_mutation_performed: false,
+    pane_study_fingerprint_before_sha256: studyFingerprintBefore,
+    pane_study_fingerprint_after_sha256: studyFingerprintAfter,
+    focus: {
+      initial_active_index: initialActiveIndex,
+      requested_pane_index: expected.paneIndex,
+      focused_pane_indexes: focusPerformed ? [expected.paneIndex] : [],
+      restored_active_index: restored.active_index,
+      pane_restore_confirmed: true,
+      browser_tab_switch_performed: false,
+      target_tab_index: expected.tabIndex,
+      target_id_before: beforeTab.id,
+      target_id_after: beforeTab.id,
+    },
+  };
+}
+
+async function focusedPaneStudyFingerprint(readPanes, readContent, baseline, expectedActiveIndex, phase) {
+  const before = await readPanes();
+  assertFocusedInventoryPaneState(before, expectedActiveIndex, `content snapshot start ${phase}`);
+  assertFocusedPaneMapUnchanged(baseline, before, `content snapshot start ${phase}`);
+
+  const content = await readContent();
+  if (content?.success !== true
+    || content.schema_version !== PANE_INDICATOR_SIGNATURE_SCHEMA_VERSION
+    || content.pane_count !== 8
+    || content.canonical_pane_index !== 0
+    || !Array.isArray(content.panes)
+    || content.panes.length !== 8) {
+    throw new Error(`Focused pane mutation inventory cannot prove pane/study state unchanged ${phase}.`);
+  }
+  const indicatorPanes = content.panes.map((pane, index) => {
+    if (!pane || Number(pane.index) !== index || !HASH.test(String(pane.signature || '')) || !Array.isArray(pane.indicators)) {
+      throw new Error(`Focused pane mutation inventory pane/study signature is incompatible ${phase}.`);
+    }
+    return {
+      index,
+      signature: pane.signature,
+      indicators: pane.indicators.map((indicator) => normalizeIndicator(indicator)),
+    };
+  });
+
+  const after = await readPanes();
+  assertFocusedInventoryPaneState(after, expectedActiveIndex, `content snapshot end ${phase}`);
+  assertFocusedPaneMapUnchanged(before, after, `content snapshot end ${phase}`);
+  assertFocusedPaneMapUnchanged(baseline, after, `content snapshot end ${phase}`);
+  return createHash('sha256').update(canonicalJson({
+    layout: '8',
+    chart_count: 8,
+    panes: after.panes.map((pane, index) => ({
+      index,
+      symbol: pane.symbol,
+      resolution: pane.resolution === null ? null : String(pane.resolution),
+    })),
+    indicators: indicatorPanes,
+  }), 'utf8').digest('hex');
+}
+
+function assertFocusedPaneMapUnchanged(before, after, phase) {
+  if (String(before?.layout) !== String(after?.layout)
+    || Number(before?.chart_count) !== Number(after?.chart_count)
+    || !Array.isArray(before?.panes) || !Array.isArray(after?.panes)
+    || before.panes.length !== 8 || after.panes.length !== 8) {
+    throw new Error(`Focused pane mutation inventory pane map changed ${phase}.`);
+  }
+  for (let index = 0; index < 8; index += 1) {
+    const left = before.panes[index];
+    const right = after.panes[index];
+    if (Number(left?.index) !== index || Number(right?.index) !== index
+      || left?.symbol !== right?.symbol || String(left?.resolution ?? '') !== String(right?.resolution ?? '')) {
+      throw new Error(`Focused pane mutation inventory pane map changed ${phase}.`);
+    }
+  }
+}
+
+function normalizeFocusedMutationInventoryInput(input = {}) {
+  const profileId = scopedIdentifier(input.profile_id, 'profile_id');
+  const targetId = scopedIdentifier(input.expected_chart_target_id, 'expected_chart_target_id');
+  const chartId = scopedIdentifier(input.expected_chart_id, 'expected_chart_id');
+  const layoutId = scopedText(input.expected_layout_id, 'expected_layout_id');
+  const paneIndex = Number(input.pane_index);
+  const tabIndex = Number(input.tab_index);
+  if (!Number.isSafeInteger(paneIndex) || paneIndex < 0 || paneIndex >= 8) {
+    throw new Error('pane_index must be an integer between 0 and 7.');
+  }
+  if (!Number.isSafeInteger(tabIndex) || tabIndex < 0 || tabIndex > 255) {
+    throw new Error('tab_index must be an integer between 0 and 255.');
+  }
+  if (layoutId !== '8') throw new Error('Focused pane mutation inventory requires reviewed layout 8.');
+  return { profileId, targetId, chartId, layoutId, paneIndex, tabIndex };
+}
+
+function assertFocusedInventoryPaneState(state, activeIndex, phase) {
+  if (!state || state.success !== true || String(state.layout) !== '8'
+    || Number(state.chart_count) !== 8 || !Array.isArray(state.panes) || state.panes.length !== 8) {
+    throw new Error(`Focused pane mutation inventory layout identity is invalid ${phase}.`);
+  }
+  const observedActiveIndex = Number(state.active_index);
+  if (!Number.isInteger(observedActiveIndex) || observedActiveIndex < 0 || observedActiveIndex >= 8) {
+    throw new Error(`Focused pane mutation inventory cannot prove the active pane ${phase}.`);
+  }
+  if (activeIndex !== null && observedActiveIndex !== activeIndex) {
+    throw new Error(`Focused pane mutation inventory active pane does not match pane ${activeIndex} ${phase}.`);
+  }
+  for (let index = 0; index < 8; index += 1) {
+    if (Number(state.panes[index]?.index) !== index) {
+      throw new Error(`Focused pane mutation inventory pane map is invalid ${phase}.`);
+    }
+  }
 }
 
 export function derivePaneIndicatorSignature(indicators) {

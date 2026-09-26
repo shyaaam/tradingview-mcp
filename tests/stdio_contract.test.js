@@ -62,6 +62,7 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
   const text = response.content.find((entry) => entry.type === 'text')?.text;
   assert.equal(typeof text, 'string');
   const contract = JSON.parse(text);
+  assert.equal(text, JSON.stringify(contract), 'release contract text stays compact on stdio');
   assert.equal(contract.contractId, 'tv-observer-v1');
   assert.equal(contract.releaseCommit, COMMIT);
   assert.equal(contract.expectedCommit, COMMIT);

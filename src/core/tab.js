@@ -2,8 +2,9 @@
  * Core tab management logic.
  * Controls TradingView Desktop tabs via CDP and Electron keyboard shortcuts.
  */
-import { getClient, evaluate, updateObserverSessionTarget } from '../connection.js';
+import { getBoundClient, getClient, evaluate, getTargetInfo, updateObserverSessionTarget } from '../connection.js';
 import { resolveCdpBaseUrl } from './cloak.js';
+import { getObserverSession } from './observer-session.js';
 
 /**
  * List all open chart tabs (CDP page targets).
@@ -110,4 +111,30 @@ export async function switchTab({ index }) {
   } catch (e) {
     throw new Error(`Failed to activate tab ${idx}: ${e.message}`);
   }
+}
+
+/**
+ * Bring the already-bound observer target to front without consulting its
+ * volatile position in /json/list.
+ */
+export async function activateBoundTarget({ expected_chart_target_id, _deps } = {}) {
+  const targetId = typeof expected_chart_target_id === 'string' ? expected_chart_target_id.trim() : '';
+  if (!targetId) throw new Error('expected_chart_target_id is required to activate bound observer target');
+  const session = (_deps?.getObserverSession || getObserverSession)();
+  if (!session || session.chartTargetId !== targetId) {
+    throw new Error('bound observer target does not match reviewed chart authority');
+  }
+
+  const getClientForTarget = _deps?.getBoundClient || getBoundClient;
+  const getInfo = _deps?.getTargetInfo || getTargetInfo;
+  const client = await getClientForTarget();
+  const target = await getInfo();
+  if (!target || target.id !== targetId || target.url !== session.chartTargetUrl) {
+    throw new Error('bound observer CDP target does not match reviewed chart authority');
+  }
+  if (!client?.Page || typeof client.Page.bringToFront !== 'function') {
+    throw new Error('bound observer target cannot be activated');
+  }
+  await client.Page.bringToFront();
+  return { success: true, action: 'activated', tab_id: targetId, url: target.url };
 }

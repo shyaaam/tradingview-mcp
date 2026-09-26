@@ -14,8 +14,13 @@ export function registerPaneTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  registerObserverTool(server, 'pane_indicator_mutation_inventory', 'Read per-pane study identity and exact getAllStudies mutation visibility without focusing or mutating panes', async () => {
-    try { return jsonResult(await core.mutationIdentityInventory()); }
+  registerObserverTool(server, 'pane_indicator_mutation_inventory', 'Read all pane study identity, or one pane when pane_index is supplied, including exact getAllStudies mutation visibility without focusing or mutating panes; optional expected_active_pane_index binds visibility to active pane in same read', async ({ pane_index, expected_active_pane_index }) => {
+    try { return jsonResult(await core.mutationIdentityInventory({ paneIndex: pane_index, expectedActivePaneIndex: expected_active_pane_index })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  registerObserverTool(server, 'pane_indicator_focused_mutation_inventory', 'Read pane-local study mutation visibility with browser focus and pane/study integrity checks', async (input) => {
+    try { return jsonResult(await core.focusedMutationIdentityInventory(input)); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

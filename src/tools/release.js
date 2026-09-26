@@ -7,6 +7,6 @@ export function registerReleaseTools(server) {
     server,
     'tv_observer_contract',
     'Return the immutable tv-observer-v1 capability, release, and lifecycle contract',
-    async () => jsonResult(buildObserverContract()),
+    async () => jsonResult(buildObserverContract(), false, 0),
   );
 }

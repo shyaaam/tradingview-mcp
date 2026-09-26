@@ -42,16 +42,17 @@ async function fetchJson(url, init = {}) {
   return response.json();
 }
 
-async function probeManagerBaseUrl(baseUrl) {
+async function probeManagerBaseUrl(baseUrl, fetchJsonImpl = fetchJson) {
   try {
-    await fetchJson(new URL('profiles', `${baseUrl}/`).toString());
+    await fetchJsonImpl(new URL('profiles', `${baseUrl}/`).toString());
     return cleanBaseUrl(baseUrl);
   } catch {
     return null;
   }
 }
 
-export async function resolveCloakManagerBaseUrl() {
+export async function resolveCloakManagerBaseUrl(options = {}) {
+  const fetchJsonImpl = typeof options.fetchJson === 'function' ? options.fetchJson : fetchJson;
   const boundSession = getObserverSession();
   if (boundSession?.managerBaseUrl) return boundSession.managerBaseUrl;
 
@@ -59,7 +60,7 @@ export async function resolveCloakManagerBaseUrl() {
   if (explicit) return explicit;
 
   for (const candidate of DEFAULT_CLOAK_MANAGER_BASE_URLS) {
-    const resolved = await probeManagerBaseUrl(candidate);
+    const resolved = await probeManagerBaseUrl(candidate, fetchJsonImpl);
     if (resolved) return resolved;
   }
   return null;

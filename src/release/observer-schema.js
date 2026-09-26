@@ -288,6 +288,47 @@ export const paneIndicatorMutationInventoryOutput = {
   })),
 };
 
+export const paneIndicatorFocusedMutationInventoryOutput = {
+  success: z.literal(true),
+  schema_version: z.literal('pane-indicator-focused-mutation-inventory-v1'),
+  profile_id: z.string().min(1),
+  tab_index: z.number().int().nonnegative(),
+  chart_target_id: z.string().min(1),
+  chart_id: z.string().min(1),
+  layout_id: z.literal('8'),
+  pane_count: z.literal(8),
+  canonical_pane_index: z.literal(0),
+  panes: z.array(z.object({
+    index: z.number().int().min(0).max(7),
+    indicators: z.array(z.object({
+      indicator_id: z.string().min(1),
+      entity_id: z.string().min(1),
+      indicator_name: z.string().min(1),
+      is_price_study: z.boolean(),
+      settings: jsonObject,
+      get_study_by_id_resolves: z.boolean(),
+      present_in_get_all_studies: z.boolean(),
+      mutation_visible: z.boolean(),
+    })),
+    symbol: z.string(),
+    resolution: z.union([z.string(), z.number(), z.null()]),
+  })).length(1),
+  pane_study_state_mutation_performed: z.literal(false),
+  pane_study_fingerprint_before_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  pane_study_fingerprint_after_sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  focus: z.object({
+    initial_active_index: z.number().int().min(0).max(7),
+    requested_pane_index: z.number().int().min(0).max(7),
+    focused_pane_indexes: z.array(z.number().int().min(0).max(7)),
+    restored_active_index: z.number().int().min(0).max(7),
+    pane_restore_confirmed: z.literal(true),
+    browser_tab_switch_performed: z.literal(false),
+    target_tab_index: z.number().int().nonnegative(),
+    target_id_before: z.string().min(1),
+    target_id_after: z.string().min(1),
+  }),
+};
+
 export const chartStateOutput = {
   success: z.literal(true),
   symbol: z.string(),
@@ -622,6 +663,31 @@ export const observerToolDefinitions = Object.freeze({
     },
     outputSchema: chartTargetHydrationV2Output,
   },
+  tv_observer_retire_saved_chart_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      layout_code: z.literal('s'),
+      authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
+      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      chart_url: z.string().url(),
+      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      allowed_origins: z.array(z.literal('https://www.tradingview.com')).length(1),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      retirement_version: z.literal('saved-chart-retirement-v1'),
+      authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
+      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
+      profile_id: z.string().min(1).max(160),
+      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      chart_target_id: z.string().min(1).max(256).nullable(),
+      action: z.enum(['closed', 'already-closed']),
+      remaining_chart_targets: z.number().int().nonnegative(),
+      mutations_performed: z.boolean(),
+    },
+  },
   tv_observer_identity: {
     classification: 'read_only',
     inputSchema: emptyInput,
@@ -811,9 +877,23 @@ export const observerToolDefinitions = Object.freeze({
   },
   pane_indicator_mutation_inventory: {
     classification: 'read_only',
-    inputSchema: emptyInput,
+    inputSchema: {
+      pane_index: z.number().int().min(0).max(15).optional(),
+      expected_active_pane_index: z.number().int().min(0).max(15).optional(),
+    },
     outputSchema: paneIndicatorMutationInventoryOutput,
-    rejectUnexpectedInput: true,
+  },
+  pane_indicator_focused_mutation_inventory: {
+    classification: 'browser_focus_mutation',
+    inputSchema: {
+      profile_id: z.string().min(1),
+      tab_index: z.coerce.number().int().min(0).max(255),
+      pane_index: z.coerce.number().int().min(0).max(7),
+      expected_chart_target_id: z.string().min(1),
+      expected_chart_id: z.string().min(1),
+      expected_layout_id: z.literal('8'),
+    },
+    outputSchema: paneIndicatorFocusedMutationInventoryOutput,
   },
   pane_probe_layout_capability: {
     classification: 'chart_mutation',
@@ -1127,6 +1207,7 @@ export const observerToolDefinitions = Object.freeze({
       tab_index: z.number().int().nonnegative(),
       pane_index: z.number().int().nonnegative(),
       name: z.string().min(1).describe('Exact repository-controlled saved Pine Script name'),
+      saved_script_name: z.string().min(1).max(200).describe('Unique account-library name for this immutable scoped Pine source'),
       source: z.string().min(1).describe('Exact repository-controlled Pine Script source'),
       expected_chart_target_id: z.string().min(1),
       expected_chart_id: z.string().min(1),
@@ -1143,8 +1224,9 @@ export const observerToolDefinitions = Object.freeze({
       chart_id: z.string().min(1),
       layout_id: z.string().min(1),
       name: z.string().min(1),
+      saved_script_name: z.string().min(1),
       action: z.enum(['created', 'unchanged']),
-      saved_script_action: z.enum(['created', 'updated', 'unchanged']),
+      saved_script_action: z.enum(['created', 'unchanged']),
       saved_script_id: z.string().min(1),
       chart_study_id: z.string().min(1),
       chart_indicator_id: z.string().min(1),
@@ -1167,7 +1249,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);

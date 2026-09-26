@@ -25,6 +25,7 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
+import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
 import { registerChartRuntimeContentSnapshotTools } from '../src/tools/chart-runtime-content-snapshot.js';
@@ -79,6 +80,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_runtime_content_snapshot_v2',
     'tv_observer_hydrate_chart_target',
     'tv_observer_hydrate_chart_target_v2',
+    'tv_observer_retire_saved_chart_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -91,6 +93,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'pane_list',
     'pane_indicator_signatures',
     'pane_indicator_mutation_inventory',
+    'pane_indicator_focused_mutation_inventory',
     'indicator_apply_scoped',
     'indicator_update_settings_scoped',
     'indicator_remove_scoped',
@@ -111,9 +114,19 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   assert.equal(names.includes('capture_screenshot'), false);
 
   const classifications = Object.fromEntries(observerCapabilityManifest.capabilities.map((capability) => [capability.name, capability.classification]));
+  const mutationInventory = observerCapabilityManifest.capabilities.find(({ name }) => name === 'pane_indicator_mutation_inventory');
+  assert.ok(mutationInventory);
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.type, 'integer');
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.minimum, 0);
+  assert.equal(mutationInventory.inputSchema.properties.pane_index.maximum, 15);
+  assert.equal(mutationInventory.inputSchema.required?.includes('pane_index') ?? false, false);
+  assert.equal(mutationInventory.inputSchema.properties.expected_active_pane_index.minimum, 0);
+  assert.equal(mutationInventory.inputSchema.properties.expected_active_pane_index.maximum, 15);
+  assert.equal(mutationInventory.inputSchema.required?.includes('expected_active_pane_index') ?? false, false);
   assert.deepEqual({
     pane_indicator_signatures: classifications.pane_indicator_signatures,
     pane_indicator_mutation_inventory: classifications.pane_indicator_mutation_inventory,
+    pane_indicator_focused_mutation_inventory: classifications.pane_indicator_focused_mutation_inventory,
     indicator_apply_scoped: classifications.indicator_apply_scoped,
     indicator_update_settings_scoped: classifications.indicator_update_settings_scoped,
     indicator_remove_scoped: classifications.indicator_remove_scoped,
@@ -125,6 +138,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
+    pane_indicator_focused_mutation_inventory: 'browser_focus_mutation',
     indicator_apply_scoped: 'chart_mutation',
     indicator_update_settings_scoped: 'chart_mutation',
     indicator_remove_scoped: 'chart_mutation',
@@ -155,6 +169,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartTargetHydrationV2Tool(fakeServer);
+  registerChartTargetRetirementTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
   registerChartRuntimeContentSnapshotTools(fakeServer);
@@ -242,6 +257,18 @@ test('observer result fixtures satisfy registered output schemas', () => {
       },
       chrome_error_page: false,
       state: 'renderer-verified',
+      mutations_performed: true,
+    },
+    tv_observer_retire_saved_chart_v1: {
+      success: true,
+      retirement_version: 'saved-chart-retirement-v1',
+      authority_id: `v5-capture-slot:${'a'.repeat(64)}`,
+      authority_hash: 'a'.repeat(64),
+      profile_id: 'profile-a',
+      saved_chart_id: 'chart-b',
+      chart_target_id: 'target-b',
+      action: 'closed',
+      remaining_chart_targets: 1,
       mutations_performed: true,
     },
     chart_runtime_readiness_probe_v1: {
@@ -687,6 +714,46 @@ test('observer result fixtures satisfy registered output schemas', () => {
         }],
       }],
     },
+    pane_indicator_focused_mutation_inventory: {
+      success: true,
+      schema_version: 'pane-indicator-focused-mutation-inventory-v1',
+      profile_id: 'profile-a',
+      tab_index: 2,
+      chart_target_id: 'chart-1',
+      chart_id: 'x',
+      layout_id: '8',
+      pane_count: 8,
+      canonical_pane_index: 0,
+      panes: [{
+        index: 1,
+        indicators: [{
+          indicator_id: 'ESD$TV_VOLUME',
+          entity_id: 'study-volume-1',
+          indicator_name: 'Volume',
+          is_price_study: false,
+          settings: {},
+          get_study_by_id_resolves: true,
+          present_in_get_all_studies: true,
+          mutation_visible: true,
+        }],
+        symbol: 'AAPL',
+        resolution: '60',
+      }],
+      pane_study_state_mutation_performed: false,
+      pane_study_fingerprint_before_sha256: 'a'.repeat(64),
+      pane_study_fingerprint_after_sha256: 'a'.repeat(64),
+      focus: {
+        initial_active_index: 0,
+        requested_pane_index: 1,
+        focused_pane_indexes: [1],
+        restored_active_index: 0,
+        pane_restore_confirmed: true,
+        browser_tab_switch_performed: false,
+        target_tab_index: 2,
+        target_id_before: 'chart-1',
+        target_id_after: 'chart-1',
+      },
+    },
     pane_probe_layout_capability: {
       success: true,
       probe_version: 'pane-layout-capability-probe-v1',
@@ -903,6 +970,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
       chart_id: 'chart-a',
       layout_id: '8',
       name: 'Repo BOS',
+      saved_script_name: 'TV Observer V5 - Repo BOS',
       action: 'created',
       saved_script_action: 'unchanged',
       saved_script_id: 'script-1',
