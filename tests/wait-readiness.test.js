@@ -4,12 +4,15 @@ import { runInNewContext } from 'node:vm';
 
 import { waitForChartReady } from '../src/wait.js';
 
-function browserEvaluator(canonicalSymbol, selectors) {
+function browserEvaluator(canonicalSymbol, selectors, canonicalResolution = '1') {
   return (expression) => runInNewContext(expression, {
     window: {
       TradingViewApi: {
         _activeChartWidgetWV: {
-          value: () => ({ symbol: () => canonicalSymbol }),
+          value: () => ({
+            symbol: () => canonicalSymbol,
+            resolution: () => canonicalResolution,
+          }),
         },
       },
     },
@@ -58,4 +61,32 @@ test('readiness stays false when canonical pane symbol is unavailable, mismatche
     assert.equal(ready, false);
     assert.equal(reads, 1);
   }
+});
+
+test('readiness stays false until canonical pane resolution exactly matches expected timeframe', async () => {
+  for (const currentResolution of ['', '1D', '1480']) {
+    let reads = 0;
+    const ready = await waitForChartReady('OANDA:USDJPY', '480', 1, {
+      evaluate: async (expression) => {
+        reads += 1;
+        return browserEvaluator('OANDA:USDJPY', [], currentResolution)(expression);
+      },
+    });
+
+    assert.equal(ready, false);
+    assert.equal(reads, 1);
+  }
+});
+
+test('readiness becomes true after canonical pane symbol and resolution match with stable bars', async () => {
+  let reads = 0;
+  const ready = await waitForChartReady('OANDA:USDJPY', '480', 5_000, {
+    evaluate: async (expression) => {
+      reads += 1;
+      return browserEvaluator('OANDA:USDJPY', [], '480')(expression);
+    },
+  });
+
+  assert.equal(ready, true);
+  assert.equal(reads, 3);
 });

@@ -27,14 +27,23 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
 
         // Read canonical chart symbol; legend text is a display label, not symbol identity.
         var currentSymbol = '';
+        var currentResolution = '';
         try {
           var chart = window.TradingViewApi._activeChartWidgetWV.value();
           currentSymbol = chart && typeof chart.symbol === 'function'
             ? String(chart.symbol() || '').trim()
             : '';
+          currentResolution = chart && typeof chart.resolution === 'function'
+            ? String(chart.resolution() || '').trim()
+            : '';
         } catch {}
 
-        return { isLoading: !!isLoading, barCount: barCount, currentSymbol: currentSymbol };
+        return {
+          isLoading: !!isLoading,
+          barCount: barCount,
+          currentSymbol: currentSymbol,
+          currentResolution: currentResolution,
+        };
       })()
     `);
 
@@ -53,6 +62,12 @@ export async function waitForChartReady(expectedSymbol = null, expectedTf = null
     // Check symbol match if expected
     if (expectedSymbol && (!state.currentSymbol
       || state.currentSymbol.toUpperCase() !== expectedSymbol.toUpperCase())) {
+      stableCount = 0;
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      continue;
+    }
+
+    if (expectedTf && (!state.currentResolution || state.currentResolution !== String(expectedTf))) {
       stableCount = 0;
       await new Promise(r => setTimeout(r, POLL_INTERVAL));
       continue;
