@@ -12,24 +12,52 @@ function fixture(initialTargets = [
   { id: 'target-b', type: 'page', url: 'https://www.tradingview.com/chart/chart-b/' },
 ]) {
   let targets = initialTargets.map((target) => ({ ...target }));
-  const calls = { close: [], fetch: [] };
+  const calls = {
+    close: [], fetch: [], webSocketUrls: [], socketCloseCount: 0, closeAcknowledged: true,
+    profileCdpUrl: 'http://manager.test/profiles/profile-a/cdp',
+    browserWebSocketUrl: 'ws://manager.test/profiles/profile-a/cdp',
+    targetUrlAfterClose: null,
+  };
   const fetch = async (url) => {
     calls.fetch.push(url);
     const parsed = new URL(url);
     if (parsed.pathname === '/profiles') {
-      return ok([{ profile_id: 'profile-a', status: 'running', cdp_url: 'http://manager.test/profiles/profile-a/cdp' }]);
+      return ok([{ profile_id: 'profile-a', status: 'running', cdp_url: calls.profileCdpUrl }]);
+    }
+    if (parsed.pathname.endsWith('/json/version')) {
+      return ok({ webSocketDebuggerUrl: calls.browserWebSocketUrl });
     }
     if (parsed.pathname.endsWith('/json/list')) return ok(targets.map((target) => ({ ...target })));
-    const closeIndex = parsed.pathname.lastIndexOf('/json/close/');
-    if (closeIndex >= 0) {
-      const targetId = decodeURIComponent(parsed.pathname.slice(closeIndex + '/json/close/'.length));
-      calls.close.push(targetId);
-      targets = targets.filter((target) => target.id !== targetId);
-      return ok('Target is closing');
-    }
     throw new Error(`Unexpected fixture URL: ${parsed.pathname}`);
   };
-  return { fetch, calls };
+  const createWebSocket = (url) => {
+    calls.webSocketUrls.push(url);
+    const socket = new EventTarget();
+    socket.send = (raw) => {
+      const request = JSON.parse(raw);
+      assert.equal(request.method, 'Target.closeTarget');
+      calls.close.push(request.params.targetId);
+      if (calls.closeAcknowledged) {
+        if (calls.targetUrlAfterClose !== null) {
+          targets = targets.map((target) => target.id === request.params.targetId
+            ? { ...target, url: calls.targetUrlAfterClose }
+            : target);
+        } else {
+          targets = targets.filter((target) => target.id !== request.params.targetId);
+        }
+      }
+      queueMicrotask(() => socket.dispatchEvent(new MessageEvent('message', {
+        data: JSON.stringify({ id: request.id, result: { success: calls.closeAcknowledged } }),
+      })));
+    };
+    socket.close = () => {
+      calls.socketCloseCount += 1;
+      socket.dispatchEvent(new Event('close'));
+    };
+    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
+    return socket;
+  };
+  return { fetch, createWebSocket, calls };
 }
 
 function ok(value) {
@@ -73,6 +101,65 @@ test('retirement closes exact saved-chart target and preserves every other chart
   assert.equal(result.chart_target_id, 'target-b');
   assert.equal(result.remaining_chart_targets, 1);
   assert.equal(result.mutations_performed, true);
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.deepEqual(deps.calls.webSocketUrls, ['ws://manager.test/profiles/profile-a/cdp']);
+  assert.ok(deps.calls.socketCloseCount >= 1);
+});
+
+test('retirement rejects a browser WebSocket outside the exact Manager profile endpoint', async () => {
+  const deps = fixture();
+  const originalFetch = deps.fetch;
+  deps.fetch = async (url, init) => {
+    if (new URL(url).pathname.endsWith('/json/version')) {
+      return ok({ webSocketDebuggerUrl: 'ws://other-manager.test/profiles/profile-a/cdp' });
+    }
+    return originalFetch(url, init);
+  };
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /outside exact Manager profile authority/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.webSocketUrls, []);
+});
+
+test('retirement rejects profile A authority redirected to profile B CDP path', async () => {
+  const deps = fixture();
+  deps.calls.profileCdpUrl = 'http://manager.test/api/profiles/profile-b/cdp';
+  deps.calls.browserWebSocketUrl = 'ws://manager.test/api/profiles/profile-b/cdp';
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /outside exact Manager profile authority/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.webSocketUrls, []);
+});
+
+test('retirement requires positive Target.closeTarget acknowledgement', async () => {
+  const deps = fixture();
+  deps.calls.closeAcknowledged = false;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /close was not acknowledged/u,
+  );
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.equal(deps.calls.socketCloseCount >= 1, true);
+});
+
+test('retirement fails if exact target ID remains after navigating away from saved chart', async () => {
+  const deps = fixture();
+  deps.calls.targetUrlAfterClose = 'about:blank';
+  const clock = { now: 0 };
+  await assert.rejects(
+    retire(INPUT, {
+      ...deps,
+      managerBaseUrl: 'http://manager.test',
+      timeoutMs: 1_000,
+      now: () => clock.now,
+      sleep: async () => { clock.now += 10; },
+    }),
+    /target remained open/u,
+  );
   assert.deepEqual(deps.calls.close, ['target-b']);
 });
 
@@ -267,7 +354,7 @@ test('retirement rechecks complete chart inventory immediately before exact clos
   assert.deepEqual(deps.calls.close, []);
 });
 
-test('retirement applies one end-to-end deadline to Manager fetch and profile-scoped close', async () => {
+test('retirement applies one end-to-end deadline to Manager fetch and browser CDP close', async () => {
   const pendingFetch = fixture();
   pendingFetch.fetch = async () => new Promise(() => {});
   const fetchStart = performance.now();
@@ -281,15 +368,17 @@ test('retirement applies one end-to-end deadline to Manager fetch and profile-sc
   );
   assert.ok(performance.now() - fetchStart < 500);
 
-  let closeRequested = false;
   const pendingClose = fixture();
-  const originalFetch = pendingClose.fetch;
-  pendingClose.fetch = async (url, init) => {
-    if (new URL(url).pathname.includes('/json/close/')) {
-      closeRequested = true;
-      return new Promise(() => {});
-    }
-    return originalFetch(url, init);
+  let closeRequested = false;
+  pendingClose.createWebSocket = () => {
+    const socket = new EventTarget();
+    socket.send = () => { closeRequested = true; };
+    socket.close = () => {
+      pendingClose.calls.socketCloseCount += 1;
+      socket.dispatchEvent(new Event('close'));
+    };
+    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
+    return socket;
   };
   const closeStart = performance.now();
   await assert.rejects(
@@ -302,4 +391,5 @@ test('retirement applies one end-to-end deadline to Manager fetch and profile-sc
   );
   assert.ok(performance.now() - closeStart < 500);
   assert.equal(closeRequested, true);
+  assert.ok(pendingClose.calls.socketCloseCount >= 1);
 });
