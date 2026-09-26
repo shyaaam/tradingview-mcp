@@ -682,7 +682,7 @@ export const observerToolDefinitions = Object.freeze({
       authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
       profile_id: z.string().min(1).max(160),
       saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
-      chart_target_id: z.string().min(1).nullable(),
+      chart_target_id: z.string().min(1).max(256).nullable(),
       action: z.enum(['closed', 'already-closed']),
       remaining_chart_targets: z.number().int().nonnegative(),
       mutations_performed: z.boolean(),

@@ -9,6 +9,9 @@ const CHART_ORIGIN = 'https://www.tradingview.com';
 const AUTHORITY_SCHEMA_VERSION = 'v5-capture-slot-authority-v2';
 const DEFAULT_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 100;
+const MAX_RETIREMENT_READ_BYTES = 128 * 1024;
+const MAX_CDP_TARGET_ID_CHARS = 256;
+const MAX_CDP_TARGET_URL_CHARS = 4_096;
 
 /** Close only one exact saved-chart target; the durable saved chart is not deleted. */
 export async function retireSavedChartTarget(input = {}, dependencies = {}) {
@@ -153,8 +156,9 @@ function pageTargets(value) {
       throw new Error('CDP target listing contains a malformed entry.');
     }
     if (entry.type !== 'page') return [];
-    if (typeof entry.id !== 'string' || entry.id.length === 0
-      || typeof entry.url !== 'string' || entry.url.length === 0) {
+    if (typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > MAX_CDP_TARGET_ID_CHARS
+      || /[\u0000-\u001f\u007f]/u.test(entry.id)
+      || typeof entry.url !== 'string' || entry.url.length === 0 || entry.url.length > MAX_CDP_TARGET_URL_CHARS) {
       throw new Error('CDP page target identity is malformed.');
     }
     return [entry];
@@ -192,7 +196,12 @@ async function fetchJson(url, fetchImpl, deadline) {
     if (!response?.ok) {
       throw new Error(`request failed: ${response?.status || 'unknown'} ${response?.statusText || ''}`.trim());
     }
-    return response.json();
+    const text = await readBoundedResponseText(response, controller);
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error('Manager/CDP response is not valid bounded JSON.');
+    }
   }, deadline, () => controller.abort());
 }
 
@@ -203,8 +212,38 @@ async function fetchAcknowledgement(url, fetchImpl, deadline) {
     if (!response?.ok) {
       throw new Error(`Exact saved-chart target close failed: ${response?.status || 'unknown'} ${response?.statusText || ''}`.trim());
     }
-    if (typeof response.text === 'function') await response.text();
+    await readBoundedResponseText(response, controller);
   }, deadline, () => controller.abort());
+}
+
+async function readBoundedResponseText(response, controller) {
+  const contentLength = response.headers?.get?.('content-length');
+  if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > MAX_RETIREMENT_READ_BYTES) {
+    controller.abort();
+    throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
+  }
+  if (response.body === null) return '';
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new Error('Manager/CDP response body stream is unavailable.');
+
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const item = await reader.read();
+      if (item.done) break;
+      totalBytes += item.value.byteLength;
+      if (totalBytes > MAX_RETIREMENT_READ_BYTES) {
+        controller.abort();
+        await reader.cancel().catch(() => {});
+        throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
+      }
+      chunks.push(Buffer.from(item.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalBytes).toString('utf8');
 }
 
 function remainingMs(deadline) {

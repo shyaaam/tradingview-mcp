@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { retireSavedChartTarget } from '../src/core/chart-target-retirement.js';
+import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
 const INPUT = Object.freeze(makeAuthority());
 
@@ -32,11 +33,7 @@ function fixture(initialTargets = [
 }
 
 function ok(value) {
-  return {
-    ok: true,
-    async json() { return value; },
-    async text() { return typeof value === 'string' ? value : JSON.stringify(value); },
-  };
+  return new Response(typeof value === 'string' ? value : JSON.stringify(value), { status: 200 });
 }
 
 function makeAuthority(overrides = {}) {
@@ -206,6 +203,45 @@ test('malformed page target inventory fails closed before retirement', async () 
     /page target identity is malformed/u,
   );
   assert.deepEqual(deps.calls.close, []);
+});
+
+test('bounded Manager and CDP response bodies fail closed before chart close', async (t) => {
+  for (const responseKind of ['manager', 'cdp']) {
+    await t.test(responseKind, async () => {
+      const deps = fixture();
+      const originalFetch = deps.fetch;
+      deps.fetch = async (url, init) => {
+        const pathname = new URL(url).pathname;
+        const oversized = responseKind === 'manager'
+          ? pathname === '/profiles'
+          : pathname.endsWith('/json/list');
+        if (oversized) return new Response('x'.repeat(128 * 1024 + 1), { status: 200 });
+        return originalFetch(url, init);
+      };
+      await assert.rejects(
+        retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+        /exceeds bounded 131072-byte read limit/u,
+      );
+      assert.deepEqual(deps.calls.close, []);
+    });
+  }
+});
+
+test('oversized CDP target IDs are rejected before close and output schema caps echoed IDs', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
+    { id: 'x'.repeat(257), type: 'page', url: INPUT.chart_url },
+  ]);
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /page target identity is malformed/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+
+  const targetIdSchema = observerToolDefinitions.tv_observer_retire_saved_chart_v1.outputSchema.chart_target_id;
+  assert.equal(targetIdSchema.safeParse('x'.repeat(256)).success, true);
+  assert.equal(targetIdSchema.safeParse('x'.repeat(257)).success, false);
+  assert.equal(targetIdSchema.safeParse(null).success, true);
 });
 
 test('retirement rechecks complete chart inventory immediately before exact close', async () => {
