@@ -67,7 +67,11 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
     throw new Error('TradingView chart inventory changed before exact saved-chart retirement.');
   }
   const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
-  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(version?.webSocketDebuggerUrl, cdpUrl);
+  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
+    version?.webSocketDebuggerUrl,
+    cdpUrl,
+    expected.profileId,
+  );
   const closeResult = await sendBrowserCdpCommand(
     browserWebSocketUrl,
     { targetId: target.id },
@@ -78,15 +82,20 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
 
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let after = before;
+  let afterTargets = before;
   while (remainingMs(deadline) > 0) {
-    after = pageTargets(await requestJson(new URL('json/list', `${cdpUrl}/`).toString()));
-    if (!after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId))) break;
+    afterTargets = await requestJson(new URL('json/list', `${cdpUrl}/`).toString());
+    after = pageTargets(afterTargets);
+    const exactTargetRemains = afterTargets.some((entry) => entry?.id === target.id);
+    const savedChartRemains = after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId));
+    if (!exactTargetRemains && !savedChartRemains) break;
     await withDeadline(
       () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
       deadline,
     );
   }
-  if (after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId))) {
+  if (afterTargets.some((entry) => entry?.id === target.id)
+    || after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId))) {
     throw new Error('Exact saved-chart target remained open after bounded close.');
   }
   const preservedBefore = beforeCharts.filter((entry) => entry.id !== target.id).map(targetIdentity).sort(compareIdentity);
@@ -188,7 +197,7 @@ function targetHasSavedChartId(target, savedChartId) {
   } catch { return false; }
 }
 
-function requireProfileBrowserWebSocketUrl(value, cdpUrl) {
+function requireProfileBrowserWebSocketUrl(value, cdpUrl, profileId) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error('Browser CDP WebSocket endpoint is unavailable.');
   }
@@ -200,6 +209,10 @@ function requireProfileBrowserWebSocketUrl(value, cdpUrl) {
   } catch {
     throw new Error('Browser CDP WebSocket endpoint is malformed.');
   }
+  if (!isExactProfileCdpPath(profileEndpoint.pathname, profileId)
+    || profileEndpoint.username || profileEndpoint.password || profileEndpoint.search || profileEndpoint.hash) {
+    throw new Error('Manager CDP endpoint is outside exact Manager profile authority.');
+  }
   const expectedProtocol = profileEndpoint.protocol === 'https:' ? 'wss:' : 'ws:';
   const expectedPath = profileEndpoint.pathname.replace(/\/+$/u, '') || '/';
   if (endpoint.protocol !== expectedProtocol || endpoint.host !== profileEndpoint.host
@@ -208,6 +221,20 @@ function requireProfileBrowserWebSocketUrl(value, cdpUrl) {
     throw new Error('Browser CDP WebSocket endpoint is outside exact Manager profile authority.');
   }
   return endpoint.toString();
+}
+
+function isExactProfileCdpPath(pathname, profileId) {
+  let segments;
+  try {
+    segments = pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
+  } catch {
+    return false;
+  }
+  const profilesIndex = segments.lastIndexOf('profiles');
+  return profilesIndex >= 0
+    && segments[profilesIndex + 1] === profileId
+    && segments[profilesIndex + 2] === 'cdp'
+    && profilesIndex + 3 === segments.length;
 }
 
 async function sendBrowserCdpCommand(url, params, deadline, createWebSocket) {

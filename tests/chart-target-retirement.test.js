@@ -12,15 +12,20 @@ function fixture(initialTargets = [
   { id: 'target-b', type: 'page', url: 'https://www.tradingview.com/chart/chart-b/' },
 ]) {
   let targets = initialTargets.map((target) => ({ ...target }));
-  const calls = { close: [], fetch: [], webSocketUrls: [], socketCloseCount: 0, closeAcknowledged: true };
+  const calls = {
+    close: [], fetch: [], webSocketUrls: [], socketCloseCount: 0, closeAcknowledged: true,
+    profileCdpUrl: 'http://manager.test/profiles/profile-a/cdp',
+    browserWebSocketUrl: 'ws://manager.test/profiles/profile-a/cdp',
+    targetUrlAfterClose: null,
+  };
   const fetch = async (url) => {
     calls.fetch.push(url);
     const parsed = new URL(url);
     if (parsed.pathname === '/profiles') {
-      return ok([{ profile_id: 'profile-a', status: 'running', cdp_url: 'http://manager.test/profiles/profile-a/cdp' }]);
+      return ok([{ profile_id: 'profile-a', status: 'running', cdp_url: calls.profileCdpUrl }]);
     }
     if (parsed.pathname.endsWith('/json/version')) {
-      return ok({ webSocketDebuggerUrl: 'ws://manager.test/profiles/profile-a/cdp' });
+      return ok({ webSocketDebuggerUrl: calls.browserWebSocketUrl });
     }
     if (parsed.pathname.endsWith('/json/list')) return ok(targets.map((target) => ({ ...target })));
     throw new Error(`Unexpected fixture URL: ${parsed.pathname}`);
@@ -32,7 +37,15 @@ function fixture(initialTargets = [
       const request = JSON.parse(raw);
       assert.equal(request.method, 'Target.closeTarget');
       calls.close.push(request.params.targetId);
-      if (calls.closeAcknowledged) targets = targets.filter((target) => target.id !== request.params.targetId);
+      if (calls.closeAcknowledged) {
+        if (calls.targetUrlAfterClose !== null) {
+          targets = targets.map((target) => target.id === request.params.targetId
+            ? { ...target, url: calls.targetUrlAfterClose }
+            : target);
+        } else {
+          targets = targets.filter((target) => target.id !== request.params.targetId);
+        }
+      }
       queueMicrotask(() => socket.dispatchEvent(new MessageEvent('message', {
         data: JSON.stringify({ id: request.id, result: { success: calls.closeAcknowledged } }),
       })));
@@ -110,6 +123,18 @@ test('retirement rejects a browser WebSocket outside the exact Manager profile e
   assert.deepEqual(deps.calls.webSocketUrls, []);
 });
 
+test('retirement rejects profile A authority redirected to profile B CDP path', async () => {
+  const deps = fixture();
+  deps.calls.profileCdpUrl = 'http://manager.test/api/profiles/profile-b/cdp';
+  deps.calls.browserWebSocketUrl = 'ws://manager.test/api/profiles/profile-b/cdp';
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /outside exact Manager profile authority/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.webSocketUrls, []);
+});
+
 test('retirement requires positive Target.closeTarget acknowledgement', async () => {
   const deps = fixture();
   deps.calls.closeAcknowledged = false;
@@ -119,6 +144,23 @@ test('retirement requires positive Target.closeTarget acknowledgement', async ()
   );
   assert.deepEqual(deps.calls.close, ['target-b']);
   assert.equal(deps.calls.socketCloseCount >= 1, true);
+});
+
+test('retirement fails if exact target ID remains after navigating away from saved chart', async () => {
+  const deps = fixture();
+  deps.calls.targetUrlAfterClose = 'about:blank';
+  const clock = { now: 0 };
+  await assert.rejects(
+    retire(INPUT, {
+      ...deps,
+      managerBaseUrl: 'http://manager.test',
+      timeoutMs: 1_000,
+      now: () => clock.now,
+      sleep: async () => { clock.now += 10; },
+    }),
+    /target remained open/u,
+  );
+  assert.deepEqual(deps.calls.close, ['target-b']);
 });
 
 test('retirement is idempotent when exact saved chart is already absent', async () => {
