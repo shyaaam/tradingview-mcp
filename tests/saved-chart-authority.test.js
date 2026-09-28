@@ -78,7 +78,7 @@ function openPreflightProbeTarget(layouts = [], close = async () => {}) {
 }
 
 function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false, htmlForm = false,
-  createButton = true } = {}) {
+  createButton = true, textInput = true } = {}) {
   const makeNode = (tagName, rect, properties = {}) => ({
     tagName: tagName.toUpperCase(),
     children: [],
@@ -116,8 +116,10 @@ function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false
   const button = makeNode('button', { x: 650, y: 250, width: 90, height: 32 }, {
     textContent: 'Create', disabled: false,
   });
-  root.children.push(input);
-  input.parentElement = root;
+  if (textInput) {
+    root.children.push(input);
+    input.parentElement = root;
+  }
   if (createButton) {
     root.children.push(button);
     button.parentElement = root;
@@ -474,7 +476,9 @@ test('form probe accepts only unique fields inside one bounded non-dialog contai
   await t.test('ambiguous global field or full-page root remains fail-closed', async (t) => {
     const cases = [
       { name: 'multiple visible text fields', dom: createLayoutFormDom({ extraTextInput: true }),
-        code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_COUNT_NOT_ONE' },
+        code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_AMBIGUOUS' },
+      { name: 'missing visible text field', dom: createLayoutFormDom({ textInput: false }),
+        code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_MISSING' },
       { name: 'missing exact Create button', dom: createLayoutFormDom({ createButton: false }),
         code: 'CREATE_LAYOUT_NON_DIALOG_BUTTON_COUNT_NOT_ONE' },
       { name: 'full-page common root', dom: createLayoutFormDom({ fullPageContainer: true }),

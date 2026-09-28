@@ -41,8 +41,10 @@ const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
     } else {
       var inputs = textInputs(document);
       var buttons = createButtons(document);
-      if (inputs.length !== 1) {
-        failureCode = 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_COUNT_NOT_ONE';
+      if (inputs.length === 0) {
+        failureCode = 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_MISSING';
+      } else if (inputs.length > 1) {
+        failureCode = 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_AMBIGUOUS';
       } else if (buttons.length !== 1) {
         failureCode = 'CREATE_LAYOUT_NON_DIALOG_BUTTON_COUNT_NOT_ONE';
       } else {
