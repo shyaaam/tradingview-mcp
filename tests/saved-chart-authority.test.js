@@ -48,8 +48,38 @@ function inventory(layouts = []) {
   };
 }
 
+function preflightProbePage(layouts = []) {
+  const normalizedLayouts = layouts.map(({ layoutId, name, symbol = '', resolution = '' }) => ({
+    layout_id: layoutId,
+    name,
+    symbol,
+    resolution,
+  }));
+  return {
+    Runtime: {
+      evaluate: async () => ({ result: { value: {
+        authenticated: true,
+        account_subject_sha256: ACCOUNT_HASH,
+        layouts: normalizedLayouts,
+        chart_uid: null,
+      } } }),
+    },
+    close: async () => {},
+  };
+}
+
+function openPreflightProbeTarget(layouts = [], close = async () => {}) {
+  const page = preflightProbePage(layouts);
+  return async () => ({
+    target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+    page,
+    close,
+  });
+}
+
 async function runReadOnlyCreateFormPreflight(inputMaxLength) {
-  let closeCount = 0;
+  let inventoryCloseCount = 0;
+  let temporaryTargetCloseCount = 0;
   let pressedClicks = 0;
   const formState = {
     inputCount: 1,
@@ -61,6 +91,14 @@ async function runReadOnlyCreateFormPreflight(inputMaxLength) {
   const page = {
     Runtime: {
       evaluate: async ({ expression }) => {
+        if (expression === ACCOUNT_LAYOUT_PROBE) {
+          return { result: { value: {
+            authenticated: true,
+            account_subject_sha256: ACCOUNT_HASH,
+            layouts: [],
+            chart_uid: null,
+          } } };
+        }
         if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
           return { result: { value: { x: 10, y: 10 } } };
         }
@@ -72,15 +110,20 @@ async function runReadOnlyCreateFormPreflight(inputMaxLength) {
         return { result: { value: null } };
       },
     },
-    close: async () => { closeCount += 1; },
+    close: async () => { inventoryCloseCount += 1; },
   };
   const result = await preflightSavedChartAuthority(INPUT, {
     readProfileInventory: async () => ({ ...inventory([]), page }),
+    openTemporaryChartTarget: async () => ({
+      target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+      page,
+      close: async () => { temporaryTargetCloseCount += 1; },
+    }),
     dispatchMouseEvent: async (event) => { if (event.type === 'mousePressed') pressedClicks += 1; },
     dispatchKeyEvent: async () => {},
     sleep: async () => {},
   });
-  return { result, closeCount, pressedClicks };
+  return { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks };
 }
 
 test('layout marker is deterministic, account-independent, and slot-specific', () => {
@@ -106,10 +149,12 @@ test('saved-layout probe fails closed instead of silently dropping malformed ent
 
 test('read-only preflight reports current-account marker state and create availability', async () => {
   let menuProbeCount = 0;
+  const layouts = [
+    { layoutId: 'user-layout-id', name: 'User chart', symbol: 'BATS:META', resolution: '60' },
+  ];
   const result = await preflightSavedChartAuthority(INPUT, {
-    readProfileInventory: async () => inventory([
-      { layoutId: 'user-layout-id', name: 'User chart', symbol: 'BATS:META', resolution: '60' },
-    ]),
+    readProfileInventory: async () => inventory(layouts),
+    openTemporaryChartTarget: openPreflightProbeTarget(layouts),
     canCreateSavedLayout: async () => {
       menuProbeCount += 1;
       return { available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 };
@@ -142,8 +187,81 @@ test('read-only preflight reports current-account marker state and create availa
   assert.equal(menuProbeCount, 1);
 });
 
+test('create preflight uses a fresh generic chart target and closes it without touching existing chart', async () => {
+  const existingPage = { close: async () => {} };
+  const freshPage = preflightProbePage([]);
+  let closeCount = 0;
+  let createFormProbeCount = 0;
+  const currentInventory = inventory([]);
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => ({ ...currentInventory, page: existingPage }),
+    openTemporaryChartTarget: async (profile, _dependencies, targets) => {
+      assert.equal(profile.profileId, INPUT.expectedProfileId);
+      assert.deepEqual(targets, currentInventory.targets);
+      return {
+        target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+        page: freshPage,
+        close: async () => { closeCount += 1; },
+      };
+    },
+    canCreateSavedLayout: async (page) => {
+      assert.equal(page, freshPage);
+      createFormProbeCount += 1;
+      return { available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 };
+    },
+  });
+
+  assert.equal(result.can_create, true);
+  assert.equal(result.create_preflight_failure_code, null);
+  assert.equal(createFormProbeCount, 1);
+  assert.equal(closeCount, 1);
+});
+
+test('create preflight rejects fresh target when current-account layout inventory differs', async () => {
+  const freshPage = preflightProbePage([
+    { layoutId: 'unexpected-layout', name: 'Unexpected' },
+  ]);
+  let closeCount = 0;
+  let createFormProbeCount = 0;
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => inventory([]),
+    openTemporaryChartTarget: async () => ({
+      target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+      page: freshPage,
+      close: async () => { closeCount += 1; },
+    }),
+    canCreateSavedLayout: async () => {
+      createFormProbeCount += 1;
+      return { available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 };
+    },
+  });
+
+  assert.equal(result.can_create, false);
+  assert.equal(result.create_preflight_failure_code, 'CREATE_PREFLIGHT_LAYOUT_INVENTORY_CHANGED');
+  assert.equal(createFormProbeCount, 0);
+  assert.equal(closeCount, 1);
+});
+
+test('create preflight fails closed when disposable chart target cannot be closed', async () => {
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => inventory([]),
+    openTemporaryChartTarget: openPreflightProbeTarget([], async () => {
+      throw new Error('temporary target close failed');
+    }),
+    canCreateSavedLayout: async () => ({
+      available: true,
+      failureCode: null,
+      inputCount: 1,
+      inputMaxLength: -1,
+    }),
+  });
+
+  assert.equal(result.can_create, false);
+  assert.equal(result.create_preflight_failure_code, 'CREATE_PREFLIGHT_TARGET_CLOSE_UNCONFIRMED');
+});
+
 test('read-only preflight diagnoses a marker length limit before any saved-chart create click', async () => {
-  const { result, closeCount, pressedClicks } = await runReadOnlyCreateFormPreflight(32);
+  const { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks } = await runReadOnlyCreateFormPreflight(32);
 
   assert.equal(result.can_create, false);
   assert.equal(result.create_preflight_failure_code, 'CREATE_LAYOUT_MARKER_EXCEEDS_INPUT_LIMIT');
@@ -151,18 +269,20 @@ test('read-only preflight diagnoses a marker length limit before any saved-chart
   assert.equal(result.create_input_count, 1);
   assert.equal(result.create_input_max_length, 32);
   assert.equal(pressedClicks, 2, 'preflight may open menu and dialog, but must not click Create');
-  assert.equal(closeCount, 1);
+  assert.equal(inventoryCloseCount, 1);
+  assert.equal(temporaryTargetCloseCount, 1);
 });
 
 test('read-only preflight fails closed on missing input maxLength before chart-create claim', async () => {
-  const { result, closeCount, pressedClicks } = await runReadOnlyCreateFormPreflight(undefined);
+  const { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks } = await runReadOnlyCreateFormPreflight(undefined);
 
   assert.equal(result.can_create, false);
   assert.equal(result.create_preflight_failure_code, 'CREATE_LAYOUT_INPUT_MAX_LENGTH_INVALID');
   assert.equal(result.create_input_count, 1);
   assert.equal(result.create_input_max_length, null);
   assert.equal(pressedClicks, 2, 'preflight must stop before clicking Create');
-  assert.equal(closeCount, 1);
+  assert.equal(inventoryCloseCount, 1);
+  assert.equal(temporaryTargetCloseCount, 1);
 });
 
 test('preflight refuses stale profile UUID before reporting create capability', async () => {
@@ -208,6 +328,9 @@ test('default profile inventory marks verified current-account tabs authenticate
         : [target],
     }),
     connectTarget: async () => page,
+    openTemporaryChartTarget: openPreflightProbeTarget([
+      { layoutId: 'current-account-layout', name: 'Current chart' },
+    ]),
     canCreateSavedLayout: async () => ({
       available: false,
       failureCode: 'CREATE_LAYOUT_MENU_NOT_AVAILABLE',
@@ -285,6 +408,9 @@ test('cold profile preflight opens one exact-profile chart tab, reads current ac
     },
     connectBrowser: async () => browser,
     connectTarget: async () => page,
+    openTemporaryChartTarget: openPreflightProbeTarget([
+      { layoutId: 'new-account-layout', name: 'Current account chart' },
+    ]),
     canCreateSavedLayout: async () => ({ available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 }),
   });
 

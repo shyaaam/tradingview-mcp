@@ -115,7 +115,7 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     if (inventory.authenticated && inventory.layouts !== null
       && exactMarkerMatches(inventory.layouts, marker).length === 0) {
       try {
-        createProbe = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(inventory.page, marker, dependencies);
+        createProbe = await preflightCreateOnFreshChartTarget(inventory, marker, dependencies);
       } catch (error) {
         createProbe = { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
       }
@@ -273,6 +273,46 @@ function ensureResult(input, marker, state) {
     temporary_target_closed: state.temporaryTargetClosed,
     failure_code: state.failureCode,
   };
+}
+
+async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies) {
+  let temporaryTarget;
+  let result = { available: false, failureCode: 'CREATE_PREFLIGHT_NOT_COMPLETED', inputCount: null, inputMaxLength: null };
+  let closeFailed = false;
+  try {
+    temporaryTarget = await (dependencies.openTemporaryChartTarget || openTemporaryChartTarget)(
+      inventory.profile, dependencies, inventory.targets,
+    );
+    const probe = await evaluate(temporaryTarget.page, ACCOUNT_LAYOUT_PROBE);
+    if (probe?.authenticated !== true || probe.account_subject_sha256 !== inventory.accountSubjectSha256
+      || !Array.isArray(probe.layouts)) {
+      throw new Error('CREATE_PREFLIGHT_ACCOUNT_OR_LAYOUT_IDENTITY_MISMATCH');
+    }
+    const layouts = normalizeLayouts(probe.layouts);
+    if (stableJson(layouts) !== stableJson(inventory.layouts)) {
+      throw new Error('CREATE_PREFLIGHT_LAYOUT_INVENTORY_CHANGED');
+    }
+    if (exactMarkerMatches(layouts, marker).length !== 0) {
+      throw new Error('CREATE_PREFLIGHT_MARKER_APPEARED');
+    }
+    result = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(
+      temporaryTarget.page, marker, dependencies,
+    );
+  } catch (error) {
+    result = { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
+  } finally {
+    if (temporaryTarget) {
+      try {
+        await temporaryTarget.close();
+      } catch {
+        closeFailed = true;
+      }
+    }
+  }
+  return closeFailed
+    ? { available: false, failureCode: 'CREATE_PREFLIGHT_TARGET_CLOSE_UNCONFIRMED',
+      inputCount: result.inputCount, inputMaxLength: result.inputMaxLength }
+    : result;
 }
 
 async function readProfileInventory(profileName, dependencies) {
