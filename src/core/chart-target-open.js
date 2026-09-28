@@ -10,13 +10,14 @@ const POLL_INTERVAL_MS = 250;
 
 /** Open one fresh generic chart target in an explicitly named, already-running profile. */
 export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
-  const profileId = requireText(input.profile_id, 'profile_id');
+  const profileName = requireText(input.profile_name, 'profile_name');
   const deps = dependencies;
   await (deps.invalidateObserverSession || invalidateObserverSession)();
 
   const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
   if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required to open a bootstrap chart target.');
-  const profile = await loadExactProfile(managerBaseUrl, profileId, deps);
+  const profile = await loadExactProfile(managerBaseUrl, profileName, deps);
+  const profileId = requireText(profile.profile_id || profile.id || profile.profileId, 'current profile id');
   if (!['running', 'active'].includes(String(profile.status || profile.state || '').toLowerCase())) {
     throw new Error('Exact CloakBrowser profile must already be running; this operation never launches or restarts it.');
   }
@@ -36,6 +37,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
     if (chartTargets.length === 1 && generic.length === 1) {
       return bindAndReturn({
         managerBaseUrl,
+        profileName,
         profileId,
         cdpUrl,
         target: generic[0],
@@ -102,6 +104,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   }
   return bindAndReturn({
     managerBaseUrl,
+    profileName,
     profileId,
     cdpUrl,
     target: finalTarget,
@@ -112,7 +115,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   });
 }
 
-async function bindAndReturn({ managerBaseUrl, profileId, cdpUrl, target, targetCreated, navigationPerformed, pageState, deps }) {
+async function bindAndReturn({ managerBaseUrl, profileName, profileId, cdpUrl, target, targetCreated, navigationPerformed, pageState, deps }) {
   await (deps.bindObserverSession || bindObserverSession)({
     managerBaseUrl,
     profileId,
@@ -123,6 +126,7 @@ async function bindAndReturn({ managerBaseUrl, profileId, cdpUrl, target, target
   return {
     success: true,
     open_version: 'bootstrap-chart-target-v1',
+    profile_name: profileName,
     profile_id: profileId,
     target_id: target.id,
     target_url: safeTargetUrl(target.url),
@@ -133,19 +137,19 @@ async function bindAndReturn({ managerBaseUrl, profileId, cdpUrl, target, target
   };
 }
 
-async function loadExactProfile(managerBaseUrl, profileId, deps) {
+async function loadExactProfile(managerBaseUrl, profileName, deps) {
   const payload = await fetchJson(new URL('profiles', `${managerBaseUrl}/`).toString(), deps);
   const profiles = Array.isArray(payload) ? payload : payload?.profiles;
-  const matches = Array.isArray(profiles)
-    ? profiles.filter((entry) => String(entry?.profile_id || entry?.id || entry?.profileId || '') === profileId)
-    : [];
-  if (matches.length !== 1) throw new Error('Exact CloakBrowser profile is missing or ambiguous.');
+  if (!Array.isArray(profiles)) throw new Error('CloakBrowser profile inventory is malformed.');
+  const matches = profiles.filter((entry) => String(entry?.name || entry?.profile_name || entry?.profileName || '') === profileName);
+  if (matches.length !== 1) throw new Error('Exact CloakBrowser profile name is missing or ambiguous.');
   return matches[0];
 }
 
 async function listTargets(cdpUrl, deps) {
   const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), deps);
-  return Array.isArray(targets) ? targets : [];
+  if (!Array.isArray(targets)) throw new Error('Exact profile CDP target inventory is malformed.');
+  return targets;
 }
 
 async function waitForTarget(cdpUrl, targetId, deps) {

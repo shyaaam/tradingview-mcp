@@ -265,6 +265,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
     tv_observer_open_bootstrap_chart_target_v1: {
       success: true,
       open_version: 'bootstrap-chart-target-v1',
+      profile_name: 'tv-observer-1',
       profile_id: 'profile-a',
       target_id: 'target-new',
       target_url: 'https://www.tradingview.com/chart/',

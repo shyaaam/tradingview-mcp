@@ -666,18 +666,20 @@ export const observerToolDefinitions = Object.freeze({
   tv_observer_open_bootstrap_chart_target_v1: {
     classification: 'bootstrap_mutation',
     inputSchema: {
-      profile_id: z.string().min(1).max(160)
-        .describe('Exact current CloakBrowser Manager profile ID; never auto-selected.'),
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact CloakBrowser profile name; resolves its current Manager UUID on every call.'),
     },
     outputSchema: {
       success: z.literal(true),
       open_version: z.literal('bootstrap-chart-target-v1'),
-      profile_id: z.string().min(1).max(160),
+      profile_name: z.string().min(1).max(160),
+      profile_id: z.string().min(1).max(160)
+        .describe('Current ephemeral Manager UUID resolved by exact profile name; never durable authority.'),
       target_id: z.string().min(1).max(256),
       target_url: z.string().url(),
       target_created: z.boolean(),
       navigation_performed: z.boolean(),
-      page_state: z.enum(['generic_chart', 'chart_id_route', 'login_route', 'other_tradingview_route']),
+      page_state: z.enum(['generic_chart', 'login_route']),
       mutations_performed: z.boolean(),
     },
   },
