@@ -126,6 +126,44 @@ async function runReadOnlyCreateFormPreflight(inputMaxLength) {
   return { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks };
 }
 
+async function runMissingDialogDiagnostic(state) {
+  let menuClicks = 0;
+  let escapeCount = 0;
+  let temporaryTargetCloseCount = 0;
+  const page = {
+    Runtime: {
+      evaluate: async ({ expression }) => {
+        if (expression === ACCOUNT_LAYOUT_PROBE) {
+          return { result: { value: {
+            authenticated: true,
+            account_subject_sha256: ACCOUNT_HASH,
+            layouts: [],
+            chart_uid: null,
+          } } };
+        }
+        if (expression.includes('createActionCount')) return { result: { value: state } };
+        if (expression.includes('querySelectorAll(\'[role="dialog"]\')')) return { result: { value: 0 } };
+        if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
+          return { result: { value: { x: 10, y: 10 } } };
+        }
+        return { result: { value: null } };
+      },
+    },
+  };
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => inventory([]),
+    openTemporaryChartTarget: async () => ({
+      target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+      page,
+      close: async () => { temporaryTargetCloseCount += 1; },
+    }),
+    dispatchMouseEvent: async (event) => { if (event.type === 'mousePressed') menuClicks += 1; },
+    dispatchKeyEvent: async (event) => { if (event.type === 'keyDown') escapeCount += 1; },
+    sleep: async () => {},
+  });
+  return { result, menuClicks, escapeCount, temporaryTargetCloseCount };
+}
+
 test('layout marker is deterministic, account-independent, and slot-specific', () => {
   assert.match(MARKER, /^V5OBS-A-[A-Za-z0-9_-]{32}$/u);
   assert.equal(savedChartLayoutMarker(INPUT.captureSlotId, INPUT.reconciliationKey), MARKER);
@@ -240,6 +278,27 @@ test('create preflight rejects fresh target when current-account layout inventor
   assert.equal(result.create_preflight_failure_code, 'CREATE_PREFLIGHT_LAYOUT_INVENTORY_CHANGED');
   assert.equal(createFormProbeCount, 0);
   assert.equal(closeCount, 1);
+});
+
+test('missing create dialog reports bounded menu and modal structure diagnostics', async (t) => {
+  const cases = [
+    [{ dialogCount: 0, modalCount: 0, createActionCount: 1, textInputCount: 0, createButtonCount: 0 },
+      'CREATE_LAYOUT_ACTION_STILL_VISIBLE'],
+    [{ dialogCount: 0, modalCount: 1, createActionCount: 0, textInputCount: 1, createButtonCount: 1 },
+      'CREATE_LAYOUT_DIALOG_ROLE_CHANGED'],
+    [{ dialogCount: 0, modalCount: 0, createActionCount: 0, textInputCount: 1, createButtonCount: 0 },
+      'CREATE_LAYOUT_FORM_OUTSIDE_DIALOG'],
+  ];
+  for (const [state, expectedFailureCode] of cases) {
+    await t.test(expectedFailureCode, async () => {
+      const { result, menuClicks, escapeCount, temporaryTargetCloseCount } = await runMissingDialogDiagnostic(state);
+      assert.equal(result.can_create, false);
+      assert.equal(result.create_preflight_failure_code, expectedFailureCode);
+      assert.equal(menuClicks, 2);
+      assert.equal(escapeCount, 1);
+      assert.equal(temporaryTargetCloseCount, 1);
+    });
+  }
 });
 
 test('create preflight fails closed when disposable chart target cannot be closed', async () => {

@@ -476,7 +476,12 @@ async function canCreateSavedLayout(page, marker, dependencies) {
 
 async function inspectCreateLayoutForm(page, marker, dependencies) {
   if (!await waitForVisibleDialog(page, dependencies)) {
-    return { available: false, failureCode: 'CREATE_LAYOUT_DIALOG_NOT_VISIBLE', inputCount: 0, inputMaxLength: null };
+    return {
+      available: false,
+      failureCode: await classifyCreateLayoutDialogFailure(page),
+      inputCount: 0,
+      inputMaxLength: null,
+    };
   }
   const state = await evaluate(page, `
     (function() {
@@ -525,6 +530,41 @@ async function inspectCreateLayoutForm(page, marker, dependencies) {
     inputCoords: state.inputCoords,
     createCoords: state.createCoords,
   };
+}
+
+async function classifyCreateLayoutDialogFailure(page) {
+  try {
+    const state = await evaluate(page, `
+      (function() {
+        function visible(node) {
+          var rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }
+        return {
+          dialogCount: Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible).length,
+          modalCount: Array.from(document.querySelectorAll('[aria-modal="true"]')).filter(visible).length,
+          createActionCount: Array.from(document.querySelectorAll('[role="row"][aria-label="Create new layout"]')).filter(visible).length,
+          textInputCount: Array.from(document.querySelectorAll('input[type="text"]')).filter(visible).length,
+          createButtonCount: Array.from(document.querySelectorAll('button'))
+            .filter(function(node) { return visible(node) && node.textContent.trim() === 'Create'; }).length,
+        };
+      })()
+    `);
+    if (state === null || typeof state !== 'object' || Array.isArray(state)
+      || !['dialogCount', 'modalCount', 'createActionCount', 'textInputCount', 'createButtonCount']
+      .every((key) => Number.isSafeInteger(state[key]) && state[key] >= 0)) {
+      return 'CREATE_LAYOUT_UI_DIAGNOSTIC_INVALID';
+    }
+    if (state.createActionCount > 0) return 'CREATE_LAYOUT_ACTION_STILL_VISIBLE';
+    if (state.dialogCount > 1 || state.modalCount > 1) return 'CREATE_LAYOUT_DIALOG_AMBIGUOUS';
+    if (state.dialogCount === 0 && state.modalCount === 1) return 'CREATE_LAYOUT_DIALOG_ROLE_CHANGED';
+    if (state.dialogCount === 0 && (state.textInputCount > 0 || state.createButtonCount > 0)) {
+      return 'CREATE_LAYOUT_FORM_OUTSIDE_DIALOG';
+    }
+    return 'CREATE_LAYOUT_DIALOG_NOT_VISIBLE';
+  } catch {
+    return 'CREATE_LAYOUT_UI_DIAGNOSTIC_UNAVAILABLE';
+  }
 }
 
 async function createSavedLayout(profileName, expectedProfileId, captureSlotId, marker, priorInventory, dependencies, onCreateAttempt) {
