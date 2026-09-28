@@ -467,6 +467,9 @@ async function inspectCreateLayoutForm(page, marker, dependencies) {
   if (inputCount !== 1 || !state?.inputCoords) {
     return { available: false, failureCode: 'CREATE_LAYOUT_INPUT_COUNT_NOT_ONE', inputCount, inputMaxLength };
   }
+  if (inputMaxLength === null || inputMaxLength < -1) {
+    return { available: false, failureCode: 'CREATE_LAYOUT_INPUT_MAX_LENGTH_INVALID', inputCount, inputMaxLength: null };
+  }
   if (inputMaxLength !== null && inputMaxLength >= 0 && marker.length > inputMaxLength) {
     return { available: false, failureCode: 'CREATE_LAYOUT_MARKER_EXCEEDS_INPUT_LIMIT', inputCount, inputMaxLength };
   }

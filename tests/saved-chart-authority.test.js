@@ -48,6 +48,41 @@ function inventory(layouts = []) {
   };
 }
 
+async function runReadOnlyCreateFormPreflight(inputMaxLength) {
+  let closeCount = 0;
+  let pressedClicks = 0;
+  const formState = {
+    inputCount: 1,
+    inputCoords: { x: 20, y: 20 },
+    createButtonCount: 1,
+    createCoords: { x: 30, y: 30 },
+  };
+  if (inputMaxLength !== undefined) formState.inputMaxLength = inputMaxLength;
+  const page = {
+    Runtime: {
+      evaluate: async ({ expression }) => {
+        if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
+          return { result: { value: { x: 10, y: 10 } } };
+        }
+        if (expression.includes("querySelectorAll('[role=\"dialog\"]')")) {
+          return { result: { value: expression.includes('input[type=\"text\"]')
+            ? formState
+            : 1 } };
+        }
+        return { result: { value: null } };
+      },
+    },
+    close: async () => { closeCount += 1; },
+  };
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => ({ ...inventory([]), page }),
+    dispatchMouseEvent: async (event) => { if (event.type === 'mousePressed') pressedClicks += 1; },
+    dispatchKeyEvent: async () => {},
+    sleep: async () => {},
+  });
+  return { result, closeCount, pressedClicks };
+}
+
 test('layout marker is deterministic, account-independent, and slot-specific', () => {
   assert.match(MARKER, /^V5OBS-A-[A-Za-z0-9_-]{32}$/u);
   assert.equal(savedChartLayoutMarker(INPUT.captureSlotId, INPUT.reconciliationKey), MARKER);
@@ -108,37 +143,7 @@ test('read-only preflight reports current-account marker state and create availa
 });
 
 test('read-only preflight diagnoses a marker length limit before any saved-chart create click', async () => {
-  let closeCount = 0;
-  let pressedClicks = 0;
-  const page = {
-    Runtime: {
-      evaluate: async ({ expression }) => {
-        if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
-          return { result: { value: { x: 10, y: 10 } } };
-        }
-        if (expression.includes("querySelectorAll('[role=\"dialog\"]')")) {
-          if (expression.includes("input[type=\"text\"]")) {
-            return { result: { value: {
-              inputCount: 1,
-              inputMaxLength: 32,
-              inputCoords: { x: 20, y: 20 },
-              createButtonCount: 1,
-              createCoords: { x: 30, y: 30 },
-            } } };
-          }
-          return { result: { value: 1 } };
-        }
-        return { result: { value: null } };
-      },
-    },
-    close: async () => { closeCount += 1; },
-  };
-  const result = await preflightSavedChartAuthority(INPUT, {
-    readProfileInventory: async () => ({ ...inventory([]), page }),
-    dispatchMouseEvent: async (event) => { if (event.type === 'mousePressed') pressedClicks += 1; },
-    dispatchKeyEvent: async () => {},
-    sleep: async () => {},
-  });
+  const { result, closeCount, pressedClicks } = await runReadOnlyCreateFormPreflight(32);
 
   assert.equal(result.can_create, false);
   assert.equal(result.create_preflight_failure_code, 'CREATE_LAYOUT_MARKER_EXCEEDS_INPUT_LIMIT');
@@ -146,6 +151,17 @@ test('read-only preflight diagnoses a marker length limit before any saved-chart
   assert.equal(result.create_input_count, 1);
   assert.equal(result.create_input_max_length, 32);
   assert.equal(pressedClicks, 2, 'preflight may open menu and dialog, but must not click Create');
+  assert.equal(closeCount, 1);
+});
+
+test('read-only preflight fails closed on missing input maxLength before chart-create claim', async () => {
+  const { result, closeCount, pressedClicks } = await runReadOnlyCreateFormPreflight(undefined);
+
+  assert.equal(result.can_create, false);
+  assert.equal(result.create_preflight_failure_code, 'CREATE_LAYOUT_INPUT_MAX_LENGTH_INVALID');
+  assert.equal(result.create_input_count, 1);
+  assert.equal(result.create_input_max_length, null);
+  assert.equal(pressedClicks, 2, 'preflight must stop before clicking Create');
   assert.equal(closeCount, 1);
 });
 
