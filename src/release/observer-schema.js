@@ -697,6 +697,62 @@ export const observerToolDefinitions = Object.freeze({
       status: z.string().min(1).max(80),
     },
   },
+  tv_observer_saved_chart_authority_preflight_v1: {
+    classification: 'read_only',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
+      expected_profile_id: z.string().min(1).max(160).optional()
+        .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      preflight_version: z.literal('saved-chart-authority-preflight-v1'),
+      profile_name: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      authenticated: z.boolean(),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      action: z.enum(['not_found', 'found', 'multiple']),
+      match_count: z.number().int().nonnegative(),
+      layout_count: z.number().int().nonnegative().nullable(),
+      layout_inventory_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      chart_target_count: z.number().int().nonnegative().nullable(),
+      can_create: z.boolean(),
+      failure_code: z.string().regex(/^[A-Z0-9_]{1,64}$/).nullable(),
+    },
+  },
+  tv_observer_ensure_saved_chart_authority_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
+      expected_profile_id: z.string().min(1).max(160).optional()
+        .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      expected_account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      create_if_absent: z.boolean(),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      authority_ensure_version: z.literal('saved-chart-authority-ensure-v1'),
+      profile_name: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      create_if_absent: z.boolean(),
+      action: z.enum(['unknown', 'multiple', 'not_found', 'created', 'reused']),
+      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      match_count: z.number().int().nonnegative(),
+      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/).nullable(),
+      canonical_chart_url: z.string().url().nullable(),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      mutations_performed: z.boolean(),
+      temporary_target_closed: z.boolean(),
+      failure_code: z.string().regex(/^[A-Z0-9_]{1,64}$/).nullable(),
+    },
+  },
   tv_observer_retire_saved_chart_v1: {
     classification: 'bootstrap_mutation',
     inputSchema: {
@@ -1283,7 +1339,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);

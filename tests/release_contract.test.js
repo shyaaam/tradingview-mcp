@@ -26,6 +26,7 @@ import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
 import { registerChartTargetOpenTool } from '../src/tools/chart-target-open.js';
+import { registerSavedChartAuthorityTools } from '../src/tools/saved-chart-authority.js';
 import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
@@ -83,6 +84,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_hydrate_chart_target_v2',
     'tv_observer_open_bootstrap_chart_target_v1',
     'tv_observer_resolve_profile_name_v1',
+    'tv_observer_saved_chart_authority_preflight_v1',
+    'tv_observer_ensure_saved_chart_authority_v1',
     'tv_observer_retire_saved_chart_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
@@ -173,6 +176,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTargetHydrationTool(fakeServer);
   registerChartTargetHydrationV2Tool(fakeServer);
   registerChartTargetOpenTool(fakeServer);
+  registerSavedChartAuthorityTools(fakeServer);
   registerChartTargetRetirementTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
@@ -277,6 +281,40 @@ test('observer result fixtures satisfy registered output schemas', () => {
     },
     tv_observer_resolve_profile_name_v1: {
       success: true, profile_name: 'tv-observer-1', profile_id: 'ephemeral-profile-id', status: 'running',
+    },
+    tv_observer_saved_chart_authority_preflight_v1: {
+      success: true,
+      preflight_version: 'saved-chart-authority-preflight-v1',
+      profile_name: 'tv-observer-1',
+      capture_slot_id: 'v5-capture-slot-a',
+      reconciliation_key: 'a'.repeat(64),
+      layout_marker: `V5OBS-A-${'a'.repeat(32)}`,
+      authenticated: true,
+      account_subject_sha256: 'b'.repeat(64),
+      action: 'not_found',
+      match_count: 0,
+      layout_count: 3,
+      layout_inventory_sha256: 'c'.repeat(64),
+      chart_target_count: 1,
+      can_create: true,
+      failure_code: null,
+    },
+    tv_observer_ensure_saved_chart_authority_v1: {
+      success: true,
+      authority_ensure_version: 'saved-chart-authority-ensure-v1',
+      profile_name: 'tv-observer-1',
+      capture_slot_id: 'v5-capture-slot-a',
+      reconciliation_key: 'a'.repeat(64),
+      create_if_absent: true,
+      action: 'created',
+      layout_marker: `V5OBS-A-${'a'.repeat(32)}`,
+      match_count: 1,
+      saved_chart_id: 'new-chart',
+      canonical_chart_url: 'https://www.tradingview.com/chart/new-chart/',
+      account_subject_sha256: 'b'.repeat(64),
+      mutations_performed: true,
+      temporary_target_closed: true,
+      failure_code: null,
     },
     tv_observer_retire_saved_chart_v1: {
       success: true,
