@@ -25,6 +25,7 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
+import { registerChartTargetOpenTool } from '../src/tools/chart-target-open.js';
 import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
@@ -80,6 +81,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_runtime_content_snapshot_v2',
     'tv_observer_hydrate_chart_target',
     'tv_observer_hydrate_chart_target_v2',
+    'tv_observer_open_bootstrap_chart_target_v1',
     'tv_observer_retire_saved_chart_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
@@ -169,6 +171,7 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartTargetHydrationV2Tool(fakeServer);
+  registerChartTargetOpenTool(fakeServer);
   registerChartTargetRetirementTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
@@ -257,6 +260,17 @@ test('observer result fixtures satisfy registered output schemas', () => {
       },
       chrome_error_page: false,
       state: 'renderer-verified',
+      mutations_performed: true,
+    },
+    tv_observer_open_bootstrap_chart_target_v1: {
+      success: true,
+      open_version: 'bootstrap-chart-target-v1',
+      profile_id: 'profile-a',
+      target_id: 'target-new',
+      target_url: 'https://www.tradingview.com/chart/',
+      target_created: true,
+      navigation_performed: true,
+      page_state: 'generic_chart',
       mutations_performed: true,
     },
     tv_observer_retire_saved_chart_v1: {
