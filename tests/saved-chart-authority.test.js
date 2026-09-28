@@ -77,12 +77,74 @@ function openPreflightProbeTarget(layouts = [], close = async () => {}) {
   });
 }
 
-async function runReadOnlyCreateFormPreflight(inputMaxLength) {
+function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false, htmlForm = false } = {}) {
+  const makeNode = (tagName, rect, properties = {}) => ({
+    tagName: tagName.toUpperCase(),
+    children: [],
+    parentElement: null,
+    getBoundingClientRect: () => rect,
+    contains(candidate) {
+      return this === candidate || this.children.some((child) => child.contains(candidate));
+    },
+    querySelectorAll(selector) {
+      const descendants = this.children.flatMap((child) => [child, ...collect(child)]);
+      return descendants.filter((node) => matchesSelector(node, selector));
+    },
+    ...properties,
+  });
+  const collect = (node) => node.children.flatMap((child) => [child, ...collect(child)]);
+  const matchesSelector = (node, selector) => {
+    if (selector === '[role="dialog"]') return node.role === 'dialog';
+    if (selector === '[role="row"][aria-label="Create new layout"]') {
+      return node.role === 'row' && node.ariaLabel === 'Create new layout';
+    }
+    if (selector === 'input[type="text"]') return node.tagName === 'INPUT' && node.type === 'text';
+    if (selector === 'button') return node.tagName === 'BUTTON';
+    if (selector === 'form') return node.tagName === 'FORM';
+    return false;
+  };
+  const html = makeNode('html', { x: 0, y: 0, width: 1200, height: 800 });
+  const body = makeNode('body', { x: 0, y: 0, width: 1200, height: 800 });
+  const rootRect = fullPageContainer
+    ? { x: 0, y: 0, width: 1200, height: 800 }
+    : { x: 300, y: 180, width: 600, height: 300 };
+  const root = makeNode(htmlForm ? 'form' : 'div', rootRect);
+  const input = makeNode('input', { x: 400, y: 250, width: 220, height: 32 }, {
+    type: 'text', value: '', maxLength: 80,
+  });
+  const button = makeNode('button', { x: 650, y: 250, width: 90, height: 32 }, {
+    textContent: 'Create', disabled: false,
+  });
+  root.children.push(input, button);
+  input.parentElement = root;
+  button.parentElement = root;
+  if (extraTextInput) {
+    const extra = makeNode('input', { x: 20, y: 20, width: 100, height: 24 }, { type: 'text', value: '', maxLength: 80 });
+    body.children.push(extra);
+    extra.parentElement = body;
+  }
+  body.children.push(root);
+  root.parentElement = body;
+  html.children.push(body);
+  body.parentElement = html;
+  return {
+    document: {
+      body,
+      documentElement: html,
+      querySelectorAll: (selector) => collect(html).filter((node) => matchesSelector(node, selector)),
+    },
+    window: { innerWidth: 1200, innerHeight: 800 },
+  };
+}
+
+async function runReadOnlyCreateFormPreflight(inputMaxLength, rootKind = 'dialog') {
   let inventoryCloseCount = 0;
   let temporaryTargetCloseCount = 0;
   let pressedClicks = 0;
   const formState = {
+    rootKind,
     inputCount: 1,
+    inputValue: '',
     inputCoords: { x: 20, y: 20 },
     createButtonCount: 1,
     createCoords: { x: 30, y: 30 },
@@ -99,6 +161,7 @@ async function runReadOnlyCreateFormPreflight(inputMaxLength) {
             chart_uid: null,
           } } };
         }
+        if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) return { result: { value: formState } };
         if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
           return { result: { value: { x: 10, y: 10 } } };
         }
@@ -342,6 +405,80 @@ test('read-only preflight fails closed on missing input maxLength before chart-c
   assert.equal(pressedClicks, 2, 'preflight must stop before clicking Create');
   assert.equal(inventoryCloseCount, 1);
   assert.equal(temporaryTargetCloseCount, 1);
+});
+
+test('read-only preflight accepts one unique create form outside role=dialog without clicking Create', async () => {
+  const { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks } =
+    await runReadOnlyCreateFormPreflight(-1, 'shared-container');
+
+  assert.equal(result.can_create, true);
+  assert.equal(result.create_preflight_failure_code, null);
+  assert.equal(result.create_input_count, 1);
+  assert.equal(result.create_input_max_length, -1);
+  assert.equal(pressedClicks, 2, 'preflight may open the menu and form but must not click Create');
+  assert.equal(inventoryCloseCount, 1);
+  assert.equal(temporaryTargetCloseCount, 1);
+});
+
+test('form probe accepts only unique fields inside one bounded non-dialog container', async (t) => {
+  const assertPreflight = async (dom, expectedCanCreate) => {
+    const result = await preflightSavedChartAuthority(INPUT, {
+      readProfileInventory: async () => inventory([]),
+      openTemporaryChartTarget: async () => ({
+        target: { id: 'fresh-generic-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+        page: {
+          Runtime: {
+            evaluate: async ({ expression }) => {
+              if (expression === ACCOUNT_LAYOUT_PROBE) return { result: { value: {
+                authenticated: true, account_subject_sha256: ACCOUNT_HASH, layouts: [], chart_uid: null,
+              } } };
+              if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) {
+                return { result: { value: vm.runInNewContext(expression, dom) } };
+              }
+              if (expression.includes('createActionCount')) return { result: { value: {
+                dialogCount: 0, modalCount: 0, createActionCount: 0, textInputCount: 1, createButtonCount: 1,
+              } } };
+              if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
+                return { result: { value: { x: 10, y: 10 } } };
+              }
+              return { result: { value: null } };
+            },
+          },
+        },
+        close: async () => {},
+      }),
+      dispatchMouseEvent: async () => {},
+      dispatchKeyEvent: async () => {},
+      sleep: async () => {},
+    });
+
+    assert.equal(result.can_create, expectedCanCreate);
+    assert.equal(result.create_preflight_failure_code, expectedCanCreate ? null : 'CREATE_LAYOUT_FORM_OUTSIDE_DIALOG');
+    if (!expectedCanCreate) return;
+    assert.equal(result.create_input_count, 1);
+    assert.equal(result.create_input_max_length, 80);
+  };
+
+  await t.test('unique input and Create button share bounded container', async () => {
+    await assertPreflight(createLayoutFormDom(), true);
+  });
+
+  await t.test('one bounded HTML form with exact fields is accepted', async () => {
+    await assertPreflight(createLayoutFormDom({ htmlForm: true }), true);
+  });
+
+  await t.test('ambiguous global field or full-page root remains fail-closed', async (t) => {
+    const cases = [
+      { name: 'multiple visible text fields', dom: createLayoutFormDom({ extraTextInput: true }) },
+      { name: 'full-page common root', dom: createLayoutFormDom({ fullPageContainer: true }) },
+      { name: 'full-page HTML form', dom: createLayoutFormDom({ fullPageContainer: true, htmlForm: true }) },
+    ];
+    for (const { name, dom } of cases) {
+      await t.test(name, async () => {
+        await assertPreflight(dom, false);
+      });
+    }
+  });
 });
 
 test('preflight refuses stale profile UUID before reporting create capability', async () => {

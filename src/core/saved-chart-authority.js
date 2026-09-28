@@ -13,6 +13,77 @@ const PAGE_POLL_ATTEMPTS = 40;
 const PAGE_POLL_MS = 500;
 const CHART_UID = /^[A-Za-z0-9_-]{1,160}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
+const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
+  (function() {
+    function visible(node) {
+      var rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+    function textInputs(root) {
+      return Array.from(root.querySelectorAll('input[type="text"]')).filter(visible);
+    }
+    function createButtons(root) {
+      return Array.from(root.querySelectorAll('button')).filter(function(node) {
+        return visible(node) && node.textContent.trim() === 'Create';
+      });
+    }
+    var dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(visible);
+    var actions = Array.from(document.querySelectorAll('[role="row"][aria-label="Create new layout"]')).filter(visible);
+    var root = null;
+    var rootKind = null;
+    if (dialogs.length === 1) {
+      root = dialogs[0];
+      rootKind = 'dialog';
+    } else if (dialogs.length === 0 && actions.length === 0) {
+      var inputs = textInputs(document);
+      var buttons = createButtons(document);
+      if (inputs.length === 1 && buttons.length === 1) {
+        var forms = Array.from(document.querySelectorAll('form')).filter(function(form) {
+          return textInputs(form).length === 1 && createButtons(form).length === 1;
+        });
+        if (forms.length === 1) {
+          var formRect = forms[0].getBoundingClientRect();
+          var formIsFullPage = formRect.width >= window.innerWidth * 0.98
+            && formRect.height >= window.innerHeight * 0.98;
+          if (visible(forms[0]) && !formIsFullPage) {
+            root = forms[0];
+            rootKind = 'form';
+          }
+        } else if (forms.length === 0) {
+          var common = inputs[0].parentElement;
+          while (common && common !== document.body && common !== document.documentElement
+            && !common.contains(buttons[0])) common = common.parentElement;
+          if (common && common !== document.body && common !== document.documentElement
+            && textInputs(common).length === 1 && createButtons(common).length === 1) {
+            var rect = common.getBoundingClientRect();
+            var fullPage = rect.width >= window.innerWidth * 0.98 && rect.height >= window.innerHeight * 0.98;
+            if (visible(common) && !fullPage) {
+              root = common;
+              rootKind = 'shared-container';
+            }
+          }
+        }
+      }
+    }
+    if (!root) return { rootKind: null };
+    var rootInputs = textInputs(root);
+    var rootButtons = createButtons(root);
+    var input = rootInputs.length === 1 ? rootInputs[0] : null;
+    var button = rootButtons.length === 1 ? rootButtons[0] : null;
+    var inputRect = input ? input.getBoundingClientRect() : null;
+    var buttonRect = button ? button.getBoundingClientRect() : null;
+    return {
+      rootKind: rootKind,
+      inputCount: rootInputs.length,
+      inputMaxLength: input ? input.maxLength : null,
+      inputValue: input ? input.value : null,
+      inputCoords: inputRect ? { x: inputRect.x + inputRect.width / 2, y: inputRect.y + inputRect.height / 2 } : null,
+      createButtonCount: rootButtons.length,
+      createButtonEnabled: button ? !button.disabled : false,
+      createCoords: buttonRect ? { x: buttonRect.x + buttonRect.width / 2, y: buttonRect.y + buttonRect.height / 2 } : null,
+    };
+  })()
+`;
 
 export const ACCOUNT_LAYOUT_PROBE = `
   (async function() {
@@ -475,7 +546,8 @@ async function canCreateSavedLayout(page, marker, dependencies) {
 }
 
 async function inspectCreateLayoutForm(page, marker, dependencies) {
-  if (!await waitForVisibleDialog(page, dependencies)) {
+  const state = await waitForCreateLayoutForm(page, dependencies);
+  if (state?.rootKind === null || state?.rootKind === undefined) {
     return {
       available: false,
       failureCode: await classifyCreateLayoutDialogFailure(page),
@@ -483,30 +555,6 @@ async function inspectCreateLayoutForm(page, marker, dependencies) {
       inputMaxLength: null,
     };
   }
-  const state = await evaluate(page, `
-    (function() {
-      var dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
-        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-      if (dialogs.length !== 1) return { inputCount: 0, inputMaxLength: null, inputCoords: null, createButtonCount: 0, createCoords: null };
-      var dialog = dialogs[0];
-      var inputs = Array.from(dialog.querySelectorAll('input[type="text"]'))
-        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-      var input = inputs.length === 1 ? inputs[0] : null;
-      var inputRect = input ? input.getBoundingClientRect() : null;
-      var buttons = Array.from(dialog.querySelectorAll('button'))
-        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0 && node.textContent.trim() === 'Create'; });
-      var button = buttons.length === 1 ? buttons[0] : null;
-      var buttonRect = button ? button.getBoundingClientRect() : null;
-      return {
-        inputCount: inputs.length,
-        inputMaxLength: input ? input.maxLength : null,
-        inputCoords: inputRect ? { x: inputRect.x + inputRect.width / 2, y: inputRect.y + inputRect.height / 2 } : null,
-        createButtonCount: buttons.length,
-        createButtonEnabled: button ? !button.disabled : false,
-        createCoords: buttonRect ? { x: buttonRect.x + buttonRect.width / 2, y: buttonRect.y + buttonRect.height / 2 } : null,
-      };
-    })()
-  `);
   const inputCount = Number.isSafeInteger(state?.inputCount) ? state.inputCount : 0;
   const inputMaxLength = Number.isSafeInteger(state?.inputMaxLength) ? state.inputMaxLength : null;
   if (inputCount !== 1 || !state?.inputCoords) {
@@ -526,10 +574,23 @@ async function inspectCreateLayoutForm(page, marker, dependencies) {
     failureCode: null,
     inputCount,
     inputMaxLength,
+    inputValue: typeof state.inputValue === 'string' ? state.inputValue : null,
     createButtonEnabled: state.createButtonEnabled === true,
     inputCoords: state.inputCoords,
     createCoords: state.createCoords,
   };
+}
+
+async function waitForCreateLayoutForm(page, dependencies) {
+  let state = null;
+  for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
+    state = await evaluate(page, CREATE_LAYOUT_FORM_PROBE);
+    if (state?.rootKind === 'dialog' || state?.rootKind === 'form' || state?.rootKind === 'shared-container') {
+      return state;
+    }
+    await sleep(dependencies, TARGET_POLL_MS);
+  }
+  return state;
 }
 
 async function classifyCreateLayoutDialogFailure(page) {
@@ -628,19 +689,11 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     const inputCoords = createForm.inputCoords;
     await clickAt(page, inputCoords, dependencies);
     await (dependencies.insertText || ((text) => page.Input.insertText({ text })))(marker);
-    const value = await evaluate(page, `
-      (function() {
-        var dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
-          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-        if (dialogs.length !== 1) return null;
-        var inputs = Array.from(dialogs[0].querySelectorAll('input[type="text"]'))
-          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-        return inputs.length === 1 ? inputs[0].value : null;
-      })()
-    `);
-    if (value !== marker) throw new Error('CREATE_LAYOUT_MARKER_INPUT_MISMATCH');
     const filledForm = await inspectCreateLayoutForm(page, marker, dependencies);
-    if (!filledForm.available || !filledForm.createButtonEnabled) throw new Error('CREATE_LAYOUT_BUTTON_NOT_READY');
+    if (!filledForm.available || filledForm.inputValue !== marker) {
+      throw new Error('CREATE_LAYOUT_MARKER_INPUT_MISMATCH');
+    }
+    if (!filledForm.createButtonEnabled) throw new Error('CREATE_LAYOUT_BUTTON_NOT_READY');
     const createCoords = filledForm.createCoords;
     onCreateAttempt();
     await clickAt(page, createCoords, dependencies);
@@ -727,16 +780,6 @@ async function loadSavedLayout(page, layoutId, dependencies) {
   const result = await evaluate(page, expression);
   if (result?.ok !== true) throw new Error('SAVED_LAYOUT_LOAD_API_UNAVAILABLE');
   await sleep(dependencies, 1000);
-}
-
-async function waitForVisibleDialog(page, dependencies) {
-  for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
-    const visible = await evaluate(page, `Array.from(document.querySelectorAll('[role="dialog"]'))
-      .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length`);
-    if (visible === 1) return true;
-    await sleep(dependencies, TARGET_POLL_MS);
-  }
-  return false;
 }
 
 async function clickUniqueVisible(page, selector, dependencies, errorCode) {
