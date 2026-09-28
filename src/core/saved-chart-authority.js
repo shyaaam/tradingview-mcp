@@ -153,7 +153,7 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       mutationsPerformed: false, temporaryTargetClosed: true, failureCode: 'PROFILE_NOT_AUTHENTICATED',
     });
   }
-  if (inventory.accountSubjectSha256 !== input.expectedAccountSubjectSha256) {
+  if (inventory.accountSubjectSha256 !== normalized.expectedAccountSubjectSha256) {
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null,
       accountSubjectSha256: inventory.accountSubjectSha256,
@@ -190,7 +190,7 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       mutationsPerformed: false, temporaryTargetClosed: closed, failureCode: null,
     });
   }
-  if (!input.createIfAbsent) {
+  if (!normalized.createIfAbsent) {
     return ensureResult(normalized, marker, {
       action: 'not_found', matchCount: 0, savedChartId: null,
       accountSubjectSha256: inventory.accountSubjectSha256,
@@ -786,17 +786,27 @@ function validateEnsureInput(input) {
   const profileName = requireText(input.profileName ?? input.profile_name, 'profile_name');
   const captureSlotId = input.captureSlotId ?? input.capture_slot_id;
   const reconciliationKey = input.reconciliationKey ?? input.reconciliation_key;
+  const expectedAccountSubjectSha256 = input.expectedAccountSubjectSha256 ?? input.expected_account_subject_sha256;
+  const createIfAbsent = input.createIfAbsent ?? input.create_if_absent ?? false;
   if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
     throw new Error('Saved-chart authority request is invalid');
   }
-  if (input.expectedAccountSubjectSha256 !== undefined
-    && !HASH.test(String(input.expectedAccountSubjectSha256))) throw new Error('Expected account identity hash is invalid');
+  if (expectedAccountSubjectSha256 !== undefined
+    && !HASH.test(String(expectedAccountSubjectSha256))) throw new Error('Expected account identity hash is invalid');
+  if (typeof createIfAbsent !== 'boolean') throw new Error('Create-if-absent authority is invalid');
   const expectedProfileId = input.expectedProfileId ?? input.expected_profile_id;
   if (expectedProfileId !== undefined && (typeof expectedProfileId !== 'string'
     || expectedProfileId.trim() !== expectedProfileId || expectedProfileId.length < 1 || expectedProfileId.length > 160)) {
     throw new Error('Expected ephemeral profile identity is invalid');
   }
-  return Object.freeze({ profileName, expectedProfileId: expectedProfileId ?? null, captureSlotId, reconciliationKey });
+  return Object.freeze({
+    profileName,
+    expectedProfileId: expectedProfileId ?? null,
+    expectedAccountSubjectSha256: expectedAccountSubjectSha256 ?? null,
+    createIfAbsent,
+    captureSlotId,
+    reconciliationKey,
+  });
 }
 
 function safeFailureCode(error) {

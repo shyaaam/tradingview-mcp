@@ -270,6 +270,7 @@ test('existing exact marker is mapped to verified route UID without any new save
   assert.equal(result.saved_chart_id, 'saved-route-uid');
   assert.equal(result.canonical_chart_url, 'https://www.tradingview.com/chart/saved-route-uid/');
   assert.equal(result.mutations_performed, false);
+  assert.equal(result.create_if_absent, true);
   assert.equal(createCount, 0);
 });
 
@@ -289,6 +290,7 @@ test('one-shot create reports exact saved chart UID and preserves unknown outcom
   assert.equal(created.action, 'created');
   assert.equal(created.saved_chart_id, 'fresh-chart-uid');
   assert.equal(created.mutations_performed, true);
+  assert.equal(created.create_if_absent, true);
   assert.equal(createCount, 1);
 
   const ambiguous = await ensureSavedChartAuthority(request, {
@@ -301,7 +303,25 @@ test('one-shot create reports exact saved chart UID and preserves unknown outcom
   });
   assert.equal(ambiguous.action, 'unknown');
   assert.equal(ambiguous.mutations_performed, true);
+  assert.equal(ambiguous.create_if_absent, true);
   assert.equal(createCount, 2);
+});
+
+test('discovery-only result echoes false create authority and never creates a chart', async () => {
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: false,
+  }, {
+    readProfileInventory: async () => inventory([]),
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'not_found');
+  assert.equal(result.create_if_absent, false);
+  assert.equal(result.mutations_performed, false);
+  assert.equal(createCount, 0);
 });
 
 test('account switch and duplicate marker fail closed without create retry', async () => {
