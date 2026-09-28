@@ -177,8 +177,8 @@ function normalizeProfileEntry(entry, index) {
       const normalized = value.toLowerCase();
       return normalized === 'running' || normalized === 'active' ? 'active' : normalized;
     });
-  const cdpUrl = consistentTextAliases(entry, ['cdp_url', 'cdp_endpoint', 'cdpUrl'],
-    `CloakBrowser profile inventory entry ${index} CDP endpoint`, false);
+  const cdpUrl = optionalTextAliases(entry, ['cdp_url', 'cdp_endpoint', 'cdpUrl'],
+    `CloakBrowser profile inventory entry ${index} CDP endpoint`);
   return { profileName, profileId, status, cdpUrl };
 }
 
@@ -206,6 +206,23 @@ function consistentTextAliases(record, keys, label, required, normalize = (value
   }
   const values = present.map((key) => requiredInventoryText(record[key], label));
   if (new Set(values.map(normalize)).size !== 1) throw new Error(`${label} aliases conflict.`);
+  return values[0];
+}
+
+function optionalTextAliases(record, keys, label) {
+  const present = keys.filter((key) => Object.hasOwn(record, key));
+  if (present.length === 0) return undefined;
+
+  const rawValues = present.map((key) => record[key]);
+  const isEmpty = (value) => value === undefined || value === null || value === '';
+  const emptyCount = rawValues.filter(isEmpty).length;
+  if (emptyCount > 0 && emptyCount < rawValues.length) {
+    throw new Error(`${label} aliases conflict.`);
+  }
+  if (emptyCount === rawValues.length) return undefined;
+
+  const values = rawValues.map((value) => requiredInventoryText(value, label));
+  if (new Set(values).size !== 1) throw new Error(`${label} aliases conflict.`);
   return values[0];
 }
 
