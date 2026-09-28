@@ -77,7 +77,8 @@ function openPreflightProbeTarget(layouts = [], close = async () => {}) {
   });
 }
 
-function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false, htmlForm = false } = {}) {
+function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false, htmlForm = false,
+  createButton = true } = {}) {
   const makeNode = (tagName, rect, properties = {}) => ({
     tagName: tagName.toUpperCase(),
     children: [],
@@ -115,9 +116,12 @@ function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false
   const button = makeNode('button', { x: 650, y: 250, width: 90, height: 32 }, {
     textContent: 'Create', disabled: false,
   });
-  root.children.push(input, button);
+  root.children.push(input);
   input.parentElement = root;
-  button.parentElement = root;
+  if (createButton) {
+    root.children.push(button);
+    button.parentElement = root;
+  }
   if (extraTextInput) {
     const extra = makeNode('input', { x: 20, y: 20, width: 100, height: 24 }, { type: 'text', value: '', maxLength: 80 });
     body.children.push(extra);
@@ -421,7 +425,7 @@ test('read-only preflight accepts one unique create form outside role=dialog wit
 });
 
 test('form probe accepts only unique fields inside one bounded non-dialog container', async (t) => {
-  const assertPreflight = async (dom, expectedCanCreate) => {
+  const assertPreflight = async (dom, expectedCanCreate, expectedFailureCode = null) => {
     const result = await preflightSavedChartAuthority(INPUT, {
       readProfileInventory: async () => inventory([]),
       openTemporaryChartTarget: async () => ({
@@ -453,7 +457,7 @@ test('form probe accepts only unique fields inside one bounded non-dialog contai
     });
 
     assert.equal(result.can_create, expectedCanCreate);
-    assert.equal(result.create_preflight_failure_code, expectedCanCreate ? null : 'CREATE_LAYOUT_FORM_OUTSIDE_DIALOG');
+    assert.equal(result.create_preflight_failure_code, expectedFailureCode);
     if (!expectedCanCreate) return;
     assert.equal(result.create_input_count, 1);
     assert.equal(result.create_input_max_length, 80);
@@ -469,13 +473,18 @@ test('form probe accepts only unique fields inside one bounded non-dialog contai
 
   await t.test('ambiguous global field or full-page root remains fail-closed', async (t) => {
     const cases = [
-      { name: 'multiple visible text fields', dom: createLayoutFormDom({ extraTextInput: true }) },
-      { name: 'full-page common root', dom: createLayoutFormDom({ fullPageContainer: true }) },
-      { name: 'full-page HTML form', dom: createLayoutFormDom({ fullPageContainer: true, htmlForm: true }) },
+      { name: 'multiple visible text fields', dom: createLayoutFormDom({ extraTextInput: true }),
+        code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_COUNT_NOT_ONE' },
+      { name: 'missing exact Create button', dom: createLayoutFormDom({ createButton: false }),
+        code: 'CREATE_LAYOUT_NON_DIALOG_BUTTON_COUNT_NOT_ONE' },
+      { name: 'full-page common root', dom: createLayoutFormDom({ fullPageContainer: true }),
+        code: 'CREATE_LAYOUT_SHARED_ROOT_TOO_LARGE' },
+      { name: 'full-page HTML form', dom: createLayoutFormDom({ fullPageContainer: true, htmlForm: true }),
+        code: 'CREATE_LAYOUT_FORM_ROOT_TOO_LARGE' },
     ];
-    for (const { name, dom } of cases) {
+    for (const { name, dom, code } of cases) {
       await t.test(name, async () => {
-        await assertPreflight(dom, false);
+        await assertPreflight(dom, false, code);
       });
     }
   });

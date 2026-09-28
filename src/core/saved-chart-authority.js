@@ -31,41 +31,61 @@ const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
     var actions = Array.from(document.querySelectorAll('[role="row"][aria-label="Create new layout"]')).filter(visible);
     var root = null;
     var rootKind = null;
+    var failureCode = null;
+    if (dialogs.length > 1) return { rootKind: null, failureCode: 'CREATE_LAYOUT_DIALOG_AMBIGUOUS' };
     if (dialogs.length === 1) {
       root = dialogs[0];
       rootKind = 'dialog';
-    } else if (dialogs.length === 0 && actions.length === 0) {
+    } else if (actions.length > 0) {
+      failureCode = 'CREATE_LAYOUT_ACTION_STILL_VISIBLE';
+    } else {
       var inputs = textInputs(document);
       var buttons = createButtons(document);
-      if (inputs.length === 1 && buttons.length === 1) {
+      if (inputs.length !== 1) {
+        failureCode = 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_COUNT_NOT_ONE';
+      } else if (buttons.length !== 1) {
+        failureCode = 'CREATE_LAYOUT_NON_DIALOG_BUTTON_COUNT_NOT_ONE';
+      } else {
         var forms = Array.from(document.querySelectorAll('form')).filter(function(form) {
           return textInputs(form).length === 1 && createButtons(form).length === 1;
         });
-        if (forms.length === 1) {
+        if (forms.length > 1) {
+          failureCode = 'CREATE_LAYOUT_FORM_ROOT_AMBIGUOUS';
+        } else if (forms.length === 1) {
           var formRect = forms[0].getBoundingClientRect();
           var formIsFullPage = formRect.width >= window.innerWidth * 0.98
             && formRect.height >= window.innerHeight * 0.98;
-          if (visible(forms[0]) && !formIsFullPage) {
+          if (formIsFullPage) {
+            failureCode = 'CREATE_LAYOUT_FORM_ROOT_TOO_LARGE';
+          } else if (visible(forms[0])) {
             root = forms[0];
             rootKind = 'form';
+          } else {
+            failureCode = 'CREATE_LAYOUT_FORM_ROOT_NOT_VISIBLE';
           }
         } else if (forms.length === 0) {
           var common = inputs[0].parentElement;
           while (common && common !== document.body && common !== document.documentElement
             && !common.contains(buttons[0])) common = common.parentElement;
-          if (common && common !== document.body && common !== document.documentElement
-            && textInputs(common).length === 1 && createButtons(common).length === 1) {
+          if (!common || common === document.body || common === document.documentElement
+            || textInputs(common).length !== 1 || createButtons(common).length !== 1) {
+            failureCode = 'CREATE_LAYOUT_SHARED_ROOT_NOT_EXACT';
+          } else {
             var rect = common.getBoundingClientRect();
             var fullPage = rect.width >= window.innerWidth * 0.98 && rect.height >= window.innerHeight * 0.98;
-            if (visible(common) && !fullPage) {
+            if (fullPage) {
+              failureCode = 'CREATE_LAYOUT_SHARED_ROOT_TOO_LARGE';
+            } else if (visible(common)) {
               root = common;
               rootKind = 'shared-container';
+            } else {
+              failureCode = 'CREATE_LAYOUT_SHARED_ROOT_NOT_VISIBLE';
             }
           }
         }
       }
     }
-    if (!root) return { rootKind: null };
+    if (!root) return { rootKind: null, failureCode: failureCode };
     var rootInputs = textInputs(root);
     var rootButtons = createButtons(root);
     var input = rootInputs.length === 1 ? rootInputs[0] : null;
@@ -550,7 +570,8 @@ async function inspectCreateLayoutForm(page, marker, dependencies) {
   if (state?.rootKind === null || state?.rootKind === undefined) {
     return {
       available: false,
-      failureCode: await classifyCreateLayoutDialogFailure(page),
+      failureCode: typeof state?.failureCode === 'string'
+        ? state.failureCode : await classifyCreateLayoutDialogFailure(page),
       inputCount: 0,
       inputMaxLength: null,
     };
