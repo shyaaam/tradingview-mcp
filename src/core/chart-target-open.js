@@ -96,9 +96,9 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
     throw new Error('TradingView generic chart navigation failed.');
   }
 
-  const finalTarget = await waitForTradingViewTarget(cdpUrl, targetId, deps);
-  if (!finalTarget || !isTradingViewPage(finalTarget.url)) {
-    throw new Error('New target did not remain on the exact TradingView origin after navigation.');
+  const finalTarget = await waitForBootstrapLanding(cdpUrl, targetId, deps);
+  if (!finalTarget) {
+    throw new Error('New target did not reach the exact generic chart or login route after navigation.');
   }
   return bindAndReturn({
     managerBaseUrl,
@@ -157,10 +157,10 @@ async function waitForTarget(cdpUrl, targetId, deps) {
   return null;
 }
 
-async function waitForTradingViewTarget(cdpUrl, targetId, deps) {
+async function waitForBootstrapLanding(cdpUrl, targetId, deps) {
   for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
     const target = (await listTargets(cdpUrl, deps)).find((entry) => entry?.id === targetId);
-    if (target && isTradingViewPage(target.url)) return target;
+    if (target && (isGenericChartUrl(target.url) || isTradingViewLoginTarget(target))) return target;
     await (deps.sleep || sleep)(POLL_INTERVAL_MS);
   }
   return null;
@@ -170,15 +170,6 @@ async function fetchJson(url, deps) {
   const response = await (deps.fetch || fetch)(url);
   if (!response.ok) throw new Error(`CloakBrowser request failed: ${response.status}.`);
   return response.json();
-}
-
-function isTradingViewPage(value) {
-  try {
-    const url = new URL(String(value || ''));
-    return url.protocol === 'https:' && url.hostname === 'www.tradingview.com';
-  } catch {
-    return false;
-  }
 }
 
 function isTradingViewChartTarget(target) {

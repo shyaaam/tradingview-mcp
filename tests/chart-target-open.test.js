@@ -203,8 +203,20 @@ test('reports login route without claiming saved-chart authority', async () => {
   assert.equal(Object.hasOwn(result, 'saved_chart_id'), false);
 });
 
+test('does not bind an ID-backed chart route as a generic bootstrap landing', async () => {
+  const harness = makeHarness({ finalUrl: 'https://www.tradingview.com/chart/account-layout-id/' });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_id: PROFILE_ID }, harness.deps),
+    /did not reach the exact generic chart or login route/u,
+  );
+  assert.equal(harness.calls.createTarget.length, 1);
+  assert.equal(harness.calls.navigate.length, 1);
+  assert.equal(harness.calls.bound.length, 0);
+});
+
 test('rejects navigation that leaves TradingView origin', async () => {
   const harness = makeHarness({ finalUrl: 'https://example.invalid/chart/' });
-  await assert.rejects(openBootstrapChartTarget({ profile_id: PROFILE_ID }, harness.deps), /did not remain on the exact TradingView origin/u);
+  await assert.rejects(openBootstrapChartTarget({ profile_id: PROFILE_ID }, harness.deps), /did not reach the exact generic chart or login route/u);
   assert.equal(harness.calls.createTarget.length, 1);
+  assert.equal(harness.calls.bound.length, 0);
 });
