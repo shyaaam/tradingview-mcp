@@ -18,6 +18,8 @@ const CAPABILITY_NAMES = [
   'chart_runtime_content_snapshot_v2',
   'tv_observer_hydrate_chart_target',
   'tv_observer_hydrate_chart_target_v2',
+  'tv_observer_open_bootstrap_chart_target_v1',
+  'tv_observer_resolve_profile_name_v1',
   'tv_observer_retire_saved_chart_v1',
   'tv_observer_identity',
   'chart_saved_layout_identity',
