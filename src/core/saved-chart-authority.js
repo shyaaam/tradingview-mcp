@@ -244,7 +244,8 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
   } catch (error) {
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null, accountSubjectSha256: null,
-      mutationsPerformed: false, temporaryTargetClosed: true, failureCode: safeFailureCode(error),
+      mutationsPerformed: false, temporaryTargetClosed: temporaryTargetCloseEvidence(error),
+      failureCode: safeFailureCode(error),
     });
   }
   await closeProfileInventory(inventory);
@@ -446,15 +447,29 @@ async function readProfileInventory(profileName, dependencies) {
       firstPage ??= page;
       if (page !== firstPage) await closePage(page);
     } catch (error) {
-      if (temporaryTarget !== null) await temporaryTarget.close();
-      else await closePage(page);
-      if (firstPage !== null) await closePage(firstPage);
-      throw error;
+      let temporaryTargetClosed = temporaryTarget === null;
+      if (temporaryTarget !== null) {
+        try {
+          await temporaryTarget.close();
+          temporaryTargetClosed = true;
+        } catch {
+          temporaryTargetClosed = false;
+        }
+      } else {
+        try { await closePage(page); } catch { /* preserve inventory failure */ }
+      }
+      if (firstPage !== null && firstPage !== page && firstPage !== temporaryTarget?.page) {
+        try { await closePage(firstPage); } catch { /* preserve inventory failure */ }
+      }
+      throw inventoryReadFailure(error, temporaryTargetClosed);
     }
   }
   if (firstPage === null || canonicalLayouts === null || accountSubjectSha256 === null) {
-    if (temporaryTarget !== null) await temporaryTarget.close();
-    throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
+    const error = new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
+    if (temporaryTarget !== null) {
+      try { await temporaryTarget.close(); } catch { throw inventoryReadFailure(error, false); }
+    }
+    throw error;
   }
   return {
     profile,
@@ -468,6 +483,19 @@ async function readProfileInventory(profileName, dependencies) {
       else await closePage(firstPage);
     },
   };
+}
+
+function inventoryReadFailure(error, temporaryTargetClosed) {
+  const failure = new Error(error instanceof Error ? error.message : 'PROFILE_INVENTORY_READ_FAILED', { cause: error });
+  failure.temporaryTargetClosed = temporaryTargetClosed;
+  return failure;
+}
+
+function temporaryTargetCloseEvidence(error) {
+  return error !== null && typeof error === 'object'
+    && typeof error.temporaryTargetClosed === 'boolean'
+    ? error.temporaryTargetClosed
+    : true;
 }
 
 async function openTemporaryChartTarget(profile, dependencies, existingTargets) {
@@ -488,13 +516,17 @@ async function openTemporaryChartTarget(profile, dependencies, existingTargets) 
   const close = async () => {
     if (closed) return;
     closed = true;
-    if (page) await closePage(page);
+    if (page) {
+      try { await closePage(page); } catch { /* target close below is authoritative */ }
+    }
     let result = null;
     if (targetId !== null) {
       try { result = await browser.Target.closeTarget({ targetId }); } catch { result = null; }
     }
     try { await browser.close?.(); } catch { /* exact target close result is authoritative */ }
-    if (result?.success !== true) throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
+    if (targetId === null || result?.success !== true) {
+      throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
+    }
   };
   try {
     const created = await browser.Target.createTarget({ url: 'about:blank' });
@@ -523,8 +555,12 @@ async function openTemporaryChartTarget(profile, dependencies, existingTargets) 
     }
     return { target: navigatedTarget, page, close };
   } catch (error) {
-    try { await close(); } catch { /* preserve the original fail-closed reason */ }
-    throw error;
+    let temporaryTargetClosed = false;
+    try {
+      await close();
+      temporaryTargetClosed = true;
+    } catch { /* retain close uncertainty for the caller */ }
+    throw inventoryReadFailure(error, temporaryTargetClosed);
   }
 }
 
@@ -995,6 +1031,7 @@ function validateEnsureInput(input) {
 
 function safeFailureCode(error) {
   const message = error instanceof Error ? error.message : '';
-  const code = message.replace(/[^A-Z0-9_]/gu, '_').replace(/_+/gu, '_').slice(0, 64).toUpperCase();
-  return /^[A-Z0-9_]{1,64}$/u.test(code) ? code : 'PROVIDER_OPERATION_FAILED';
+  if (/^[A-Z0-9_]{1,64}$/u.test(message)) return message;
+  if (/^websocket is not open\b/iu.test(message)) return 'CDP_WEBSOCKET_NOT_OPEN';
+  return 'PROVIDER_OPERATION_FAILED';
 }

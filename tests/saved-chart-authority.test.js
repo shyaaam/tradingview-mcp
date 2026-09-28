@@ -714,6 +714,87 @@ test('one-shot create reports exact saved chart UID and preserves unknown outcom
   assert.equal(createCount, 2);
 });
 
+test('read-inventory WebSocket failure returns safe actionable code before any saved-chart mutation', async () => {
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    readProfileInventory: async () => { throw new Error('WebSocket is not open'); },
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'unknown');
+  assert.equal(result.failure_code, 'CDP_WEBSOCKET_NOT_OPEN');
+  assert.equal(result.account_subject_sha256, null);
+  assert.equal(result.mutations_performed, false);
+  assert.equal(result.temporary_target_closed, true);
+  assert.equal(createCount, 0);
+});
+
+test('inventory WebSocket failure with unconfirmed temporary-target close cannot claim cleanup', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:1234/api/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = `ws://127.0.0.1:1234/api/profiles/${profileId}/cdp`;
+  const targetWebSocketUrl = `${browserWebSocketUrl}/devtools/page/inventory`;
+  let targetCreated = false;
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    managerBaseUrl: 'http://127.0.0.1:8080',
+    fetch: async (input) => {
+      const url = new URL(String(input));
+      let body;
+      if (url.pathname === '/profiles') {
+        body = [{ name: INPUT.profileName, id: profileId, status: 'running', cdp_url: cdpUrl }];
+      } else if (url.pathname.endsWith('/json/version')) {
+        body = { webSocketDebuggerUrl: browserWebSocketUrl };
+      } else if (url.pathname.endsWith('/json/list')) {
+        body = targetCreated
+          ? [{ id: 'inventory', type: 'page', url: 'about:blank', webSocketDebuggerUrl: targetWebSocketUrl }]
+          : [];
+      } else {
+        throw new Error(`unexpected URL ${url}`);
+      }
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => ({
+      Target: {
+        createTarget: async () => { targetCreated = true; return { targetId: 'inventory' }; },
+        closeTarget: async () => ({ success: false }),
+      },
+      close: async () => {},
+    }),
+    connectTarget: async () => { throw new Error('WebSocket is not open'); },
+    sleep: async () => {},
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'unknown');
+  assert.equal(result.failure_code, 'CDP_WEBSOCKET_NOT_OPEN');
+  assert.equal(result.mutations_performed, false);
+  assert.equal(result.temporary_target_closed, false);
+  assert.equal(createCount, 0);
+});
+
+test('unrecognized lower-case provider errors never collapse into misleading partial codes', async () => {
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    readProfileInventory: async () => { throw new Error('unexpected provider details'); },
+  });
+
+  assert.equal(result.action, 'unknown');
+  assert.equal(result.failure_code, 'PROVIDER_OPERATION_FAILED');
+  assert.equal(result.mutations_performed, false);
+});
+
 test('discovery-only result echoes false create authority and never creates a chart', async () => {
   let createCount = 0;
   const result = await ensureSavedChartAuthority({
