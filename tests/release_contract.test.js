@@ -297,6 +297,10 @@ test('observer result fixtures satisfy registered output schemas', () => {
       layout_inventory_sha256: 'c'.repeat(64),
       chart_target_count: 1,
       can_create: true,
+      create_preflight_failure_code: null,
+      create_marker_length: 40,
+      create_input_count: 1,
+      create_input_max_length: -1,
       failure_code: null,
     },
     tv_observer_ensure_saved_chart_authority_v1: {

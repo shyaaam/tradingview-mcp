@@ -75,7 +75,10 @@ test('read-only preflight reports current-account marker state and create availa
     readProfileInventory: async () => inventory([
       { layoutId: 'user-layout-id', name: 'User chart', symbol: 'BATS:META', resolution: '60' },
     ]),
-    canCreateSavedLayout: async () => { menuProbeCount += 1; return true; },
+    canCreateSavedLayout: async () => {
+      menuProbeCount += 1;
+      return { available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 };
+    },
   });
 
   assert.deepEqual(result, {
@@ -95,9 +98,55 @@ test('read-only preflight reports current-account marker state and create availa
     ])).digest('hex'),
     chart_target_count: 1,
     can_create: true,
+    create_preflight_failure_code: null,
+    create_marker_length: MARKER.length,
+    create_input_count: 1,
+    create_input_max_length: -1,
     failure_code: null,
   });
   assert.equal(menuProbeCount, 1);
+});
+
+test('read-only preflight diagnoses a marker length limit before any saved-chart create click', async () => {
+  let closeCount = 0;
+  let pressedClicks = 0;
+  const page = {
+    Runtime: {
+      evaluate: async ({ expression }) => {
+        if (expression.includes('save-load-menu') || expression.includes('Create new layout')) {
+          return { result: { value: { x: 10, y: 10 } } };
+        }
+        if (expression.includes("querySelectorAll('[role=\"dialog\"]')")) {
+          if (expression.includes("input[type=\"text\"]")) {
+            return { result: { value: {
+              inputCount: 1,
+              inputMaxLength: 32,
+              inputCoords: { x: 20, y: 20 },
+              createButtonCount: 1,
+              createCoords: { x: 30, y: 30 },
+            } } };
+          }
+          return { result: { value: 1 } };
+        }
+        return { result: { value: null } };
+      },
+    },
+    close: async () => { closeCount += 1; },
+  };
+  const result = await preflightSavedChartAuthority(INPUT, {
+    readProfileInventory: async () => ({ ...inventory([]), page }),
+    dispatchMouseEvent: async (event) => { if (event.type === 'mousePressed') pressedClicks += 1; },
+    dispatchKeyEvent: async () => {},
+    sleep: async () => {},
+  });
+
+  assert.equal(result.can_create, false);
+  assert.equal(result.create_preflight_failure_code, 'CREATE_LAYOUT_MARKER_EXCEEDS_INPUT_LIMIT');
+  assert.equal(result.create_marker_length, MARKER.length);
+  assert.equal(result.create_input_count, 1);
+  assert.equal(result.create_input_max_length, 32);
+  assert.equal(pressedClicks, 2, 'preflight may open menu and dialog, but must not click Create');
+  assert.equal(closeCount, 1);
 });
 
 test('preflight refuses stale profile UUID before reporting create capability', async () => {
@@ -143,7 +192,12 @@ test('default profile inventory marks verified current-account tabs authenticate
         : [target],
     }),
     connectTarget: async () => page,
-    canCreateSavedLayout: async () => false,
+    canCreateSavedLayout: async () => ({
+      available: false,
+      failureCode: 'CREATE_LAYOUT_MENU_NOT_AVAILABLE',
+      inputCount: null,
+      inputMaxLength: null,
+    }),
   });
 
   assert.equal(result.authenticated, true);
@@ -215,7 +269,7 @@ test('cold profile preflight opens one exact-profile chart tab, reads current ac
     },
     connectBrowser: async () => browser,
     connectTarget: async () => page,
-    canCreateSavedLayout: async () => true,
+    canCreateSavedLayout: async () => ({ available: true, failureCode: null, inputCount: 1, inputMaxLength: -1 }),
   });
 
   assert.equal(result.authenticated, true);

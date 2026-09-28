@@ -103,17 +103,21 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
       layouts: [],
       chartTargetCount: null,
       createAvailable: false,
+      createFailureCode: null,
+      createInputCount: null,
+      createInputMaxLength: null,
       failureCode: safeFailureCode(error),
     });
   }
 
-  let createAvailable = false;
+  let createProbe = { available: false, failureCode: null, inputCount: null, inputMaxLength: null };
   try {
-    if (inventory.authenticated && inventory.layouts !== null) {
+    if (inventory.authenticated && inventory.layouts !== null
+      && exactMarkerMatches(inventory.layouts, marker).length === 0) {
       try {
-        createAvailable = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(inventory.page, dependencies);
-      } catch {
-        createAvailable = false;
+        createProbe = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(inventory.page, marker, dependencies);
+      } catch (error) {
+        createProbe = { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
       }
     }
   } finally {
@@ -124,7 +128,10 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     accountSubjectSha256: inventory.accountSubjectSha256,
     layouts: inventory.layouts ?? [],
     chartTargetCount: inventory.targets.length,
-    createAvailable,
+    createAvailable: createProbe.available,
+    createFailureCode: createProbe.failureCode,
+    createInputCount: createProbe.inputCount,
+    createInputMaxLength: createProbe.inputMaxLength,
     failureCode: inventory.authenticated && inventory.layouts !== null ? null : 'PROFILE_NOT_AUTHENTICATED',
   });
 }
@@ -234,6 +241,10 @@ function preflightResult(input, marker, state) {
     action,
     match_count: matches.length,
     can_create: action === 'not_found' && state.authenticated && state.createAvailable,
+    create_preflight_failure_code: state.createFailureCode,
+    create_marker_length: marker.length,
+    create_input_count: state.createInputCount,
+    create_input_max_length: state.createInputMaxLength,
     layout_count: state.authenticated && state.layouts !== null ? state.layouts.length : null,
     layout_inventory_sha256: state.authenticated && state.layouts !== null
       ? createHash('sha256').update(stableJson(state.layouts), 'utf8').digest('hex')
@@ -410,27 +421,67 @@ function exactMarkerMatches(layouts, marker) {
   return layouts.filter((layout) => layout.name === marker);
 }
 
-async function canCreateSavedLayout(page, dependencies) {
-  const coords = await evaluate(page, `
-    (function() {
-      var buttons = Array.from(document.querySelectorAll('[data-name="save-load-menu"]'))
-        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-      if (buttons.length !== 1 || buttons[0].disabled) return null;
-      var r = buttons[0].getBoundingClientRect();
-      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-    })()
-  `);
-  if (!coords) return false;
+async function canCreateSavedLayout(page, marker, dependencies) {
   try {
-    await clickAt(page, coords, dependencies);
+    await clickUniqueVisible(page, '[data-name="save-load-menu"]', dependencies, 'SAVE_LAYOUT_MENU_NOT_UNIQUE');
     await sleep(dependencies, 250);
-    return await evaluate(page, `
-      Array.from(document.querySelectorAll('[role="row"][aria-label="Create new layout"]'))
-        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).length
-    `) === 1;
+    await clickUniqueVisible(page, '[role="row"][aria-label="Create new layout"]', dependencies, 'CREATE_LAYOUT_ACTION_NOT_UNIQUE');
+    return await inspectCreateLayoutForm(page, marker, dependencies);
+  } catch (error) {
+    return { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
   } finally {
     await pressEscape(page, dependencies);
   }
+}
+
+async function inspectCreateLayoutForm(page, marker, dependencies) {
+  if (!await waitForVisibleDialog(page, dependencies)) {
+    return { available: false, failureCode: 'CREATE_LAYOUT_DIALOG_NOT_VISIBLE', inputCount: 0, inputMaxLength: null };
+  }
+  const state = await evaluate(page, `
+    (function() {
+      var dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      if (dialogs.length !== 1) return { inputCount: 0, inputMaxLength: null, inputCoords: null, createButtonCount: 0, createCoords: null };
+      var dialog = dialogs[0];
+      var inputs = Array.from(dialog.querySelectorAll('input[type="text"]'))
+        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      var input = inputs.length === 1 ? inputs[0] : null;
+      var inputRect = input ? input.getBoundingClientRect() : null;
+      var buttons = Array.from(dialog.querySelectorAll('button'))
+        .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0 && node.textContent.trim() === 'Create'; });
+      var button = buttons.length === 1 ? buttons[0] : null;
+      var buttonRect = button ? button.getBoundingClientRect() : null;
+      return {
+        inputCount: inputs.length,
+        inputMaxLength: input ? input.maxLength : null,
+        inputCoords: inputRect ? { x: inputRect.x + inputRect.width / 2, y: inputRect.y + inputRect.height / 2 } : null,
+        createButtonCount: buttons.length,
+        createButtonEnabled: button ? !button.disabled : false,
+        createCoords: buttonRect ? { x: buttonRect.x + buttonRect.width / 2, y: buttonRect.y + buttonRect.height / 2 } : null,
+      };
+    })()
+  `);
+  const inputCount = Number.isSafeInteger(state?.inputCount) ? state.inputCount : 0;
+  const inputMaxLength = Number.isSafeInteger(state?.inputMaxLength) ? state.inputMaxLength : null;
+  if (inputCount !== 1 || !state?.inputCoords) {
+    return { available: false, failureCode: 'CREATE_LAYOUT_INPUT_COUNT_NOT_ONE', inputCount, inputMaxLength };
+  }
+  if (inputMaxLength !== null && inputMaxLength >= 0 && marker.length > inputMaxLength) {
+    return { available: false, failureCode: 'CREATE_LAYOUT_MARKER_EXCEEDS_INPUT_LIMIT', inputCount, inputMaxLength };
+  }
+  if (state.createButtonCount !== 1 || !state.createCoords) {
+    return { available: false, failureCode: 'CREATE_LAYOUT_BUTTON_NOT_READY', inputCount, inputMaxLength };
+  }
+  return {
+    available: true,
+    failureCode: null,
+    inputCount,
+    inputMaxLength,
+    createButtonEnabled: state.createButtonEnabled === true,
+    inputCoords: state.inputCoords,
+    createCoords: state.createCoords,
+  };
 }
 
 async function createSavedLayout(profileName, expectedProfileId, captureSlotId, marker, priorInventory, dependencies, onCreateAttempt) {
@@ -489,43 +540,25 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
 
     await clickUniqueVisible(page, '[data-name="save-load-menu"]', dependencies, 'SAVE_LAYOUT_MENU_NOT_UNIQUE');
     await clickUniqueVisible(page, '[role="row"][aria-label="Create new layout"]', dependencies, 'CREATE_LAYOUT_ACTION_NOT_UNIQUE');
-    const dialog = await waitForVisibleDialog(page, dependencies);
-    const inputState = await evaluate(page, `
-      (function() {
-        var inputs = Array.from(document.querySelectorAll('[role="dialog"] input[type="text"][placeholder="My layout"]'))
-          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-        if (inputs.length !== 1) return { count: inputs.length };
-        return { count: 1, maxLength: inputs[0].maxLength };
-      })()
-    `);
-    if (!dialog || inputState?.count !== 1 || (inputState.maxLength > 0 && marker.length > inputState.maxLength)) {
-      throw new Error('CREATE_LAYOUT_DIALOG_INPUT_NOT_EXACT');
-    }
-    const inputCoords = await evaluate(page, `
-      (function() {
-        var node = document.querySelector('[role="dialog"] input[type="text"][placeholder="My layout"]');
-        if (!node) return null;
-        var r = node.getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      })()
-    `);
-    if (!inputCoords) throw new Error('CREATE_LAYOUT_INPUT_NOT_FOUND');
+    const createForm = await inspectCreateLayoutForm(page, marker, dependencies);
+    if (!createForm.available) throw new Error(createForm.failureCode);
+    const inputCoords = createForm.inputCoords;
     await clickAt(page, inputCoords, dependencies);
     await (dependencies.insertText || ((text) => page.Input.insertText({ text })))(marker);
-    const value = await evaluate(page, `document.querySelector('[role="dialog"] input[type="text"][placeholder="My layout"]')?.value || null`);
-    if (value !== marker) throw new Error('CREATE_LAYOUT_MARKER_INPUT_MISMATCH');
-    const createCoords = await evaluate(page, `
+    const value = await evaluate(page, `
       (function() {
-        var dialog = document.querySelector('[role="dialog"]');
-        if (!dialog) return null;
-        var buttons = Array.from(dialog.querySelectorAll('button'))
-          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0 && node.textContent.trim() === 'Create'; });
-        if (buttons.length !== 1 || buttons[0].disabled) return null;
-        var r = buttons[0].getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        var dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+        if (dialogs.length !== 1) return null;
+        var inputs = Array.from(dialogs[0].querySelectorAll('input[type="text"]'))
+          .filter(function(node) { var r = node.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+        return inputs.length === 1 ? inputs[0].value : null;
       })()
     `);
-    if (!createCoords) throw new Error('CREATE_LAYOUT_BUTTON_NOT_UNIQUE');
+    if (value !== marker) throw new Error('CREATE_LAYOUT_MARKER_INPUT_MISMATCH');
+    const filledForm = await inspectCreateLayoutForm(page, marker, dependencies);
+    if (!filledForm.available || !filledForm.createButtonEnabled) throw new Error('CREATE_LAYOUT_BUTTON_NOT_READY');
+    const createCoords = filledForm.createCoords;
     onCreateAttempt();
     await clickAt(page, createCoords, dependencies);
     const createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
