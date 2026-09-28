@@ -683,6 +683,20 @@ export const observerToolDefinitions = Object.freeze({
       mutations_performed: z.boolean(),
     },
   },
+  tv_observer_resolve_profile_name_v1: {
+    classification: 'read_only',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact CloakBrowser profile name; resolves the current Manager UUID for this call only.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      profile_name: z.string().min(1).max(160),
+      profile_id: z.string().min(1).max(160)
+        .describe('Ephemeral current Manager UUID; callers must not persist it.'),
+      status: z.string().min(1).max(80),
+    },
+  },
   tv_observer_retire_saved_chart_v1: {
     classification: 'bootstrap_mutation',
     inputSchema: {
@@ -1269,7 +1283,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);

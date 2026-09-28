@@ -14,20 +14,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   const deps = dependencies;
   await (deps.invalidateObserverSession || invalidateObserverSession)();
 
-  const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
-  if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required to open a bootstrap chart target.');
-  const profile = await loadExactProfile(managerBaseUrl, profileName, deps);
-  const profileId = requireText(profile.profile_id || profile.id || profile.profileId, 'current profile id');
-  if (!['running', 'active'].includes(String(profile.status || profile.state || '').toLowerCase())) {
-    throw new Error('Exact CloakBrowser profile must already be running; this operation never launches or restarts it.');
-  }
-
-  const cdpUrl = resolveManagerCdpUrl(
-    managerBaseUrl,
-    profileId,
-    profile.cdp_url || profile.cdp_endpoint || profile.cdpUrl,
-  );
-  assertExactProfileCdpPath(cdpUrl, profileId);
+  const { managerBaseUrl, profileId, cdpUrl } = await resolveExactRunningProfile(profileName, deps);
   const version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), deps);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);
   const before = await listTargets(cdpUrl, deps);
@@ -115,6 +102,26 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   });
 }
 
+/** Resolve the current Manager UUID from one exact profile name on every call. */
+export async function resolveExactRunningProfile(profileNameValue, dependencies = {}) {
+  const profileName = requireText(profileNameValue, 'profile_name');
+  const deps = dependencies;
+  const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
+  if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required to resolve an exact profile name.');
+  const profile = await loadExactProfile(managerBaseUrl, profileName, deps);
+  const profileId = requireText(profile.profile_id || profile.id || profile.profileId, 'current profile id');
+  if (!['running', 'active'].includes(String(profile.status || profile.state || '').toLowerCase())) {
+    throw new Error('Exact CloakBrowser profile must already be running; this operation never launches or restarts it.');
+  }
+  const cdpUrl = resolveManagerCdpUrl(
+    managerBaseUrl,
+    profileId,
+    profile.cdp_url || profile.cdp_endpoint || profile.cdpUrl,
+  );
+  assertExactProfileCdpPath(cdpUrl, profileId);
+  return Object.freeze({ managerBaseUrl, profileName, profileId, cdpUrl, status: String(profile.status || profile.state) });
+}
+
 async function bindAndReturn({ managerBaseUrl, profileName, profileId, cdpUrl, target, targetCreated, navigationPerformed, pageState, deps }) {
   await (deps.bindObserverSession || bindObserverSession)({
     managerBaseUrl,
@@ -141,15 +148,76 @@ async function loadExactProfile(managerBaseUrl, profileName, deps) {
   const payload = await fetchJson(new URL('profiles', `${managerBaseUrl}/`).toString(), deps);
   const profiles = Array.isArray(payload) ? payload : payload?.profiles;
   if (!Array.isArray(profiles)) throw new Error('CloakBrowser profile inventory is malformed.');
-  const matches = profiles.filter((entry) => String(entry?.name || entry?.profile_name || entry?.profileName || '') === profileName);
+  const normalized = profiles.map((entry, index) => normalizeProfileEntry(entry, index));
+  const matches = normalized.filter((entry) => entry.profileName === profileName);
   if (matches.length !== 1) throw new Error('Exact CloakBrowser profile name is missing or ambiguous.');
-  return matches[0];
+  const match = matches[0];
+  return {
+    name: match.profileName,
+    profile_id: match.profileId,
+    status: match.status,
+    cdp_url: match.cdpUrl,
+  };
 }
 
 async function listTargets(cdpUrl, deps) {
   const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), deps);
   if (!Array.isArray(targets)) throw new Error('Exact profile CDP target inventory is malformed.');
-  return targets;
+  return targets.map((target, index) => normalizeTargetEntry(target, index));
+}
+
+function normalizeProfileEntry(entry, index) {
+  if (!isRecord(entry)) throw new Error(`CloakBrowser profile inventory entry ${index} is malformed.`);
+  const profileName = consistentTextAliases(entry, ['name', 'profile_name', 'profileName'],
+    `CloakBrowser profile inventory entry ${index} name`, true);
+  const profileId = consistentTextAliases(entry, ['profile_id', 'id', 'profileId'],
+    `CloakBrowser profile inventory entry ${index} id`, true);
+  const status = consistentTextAliases(entry, ['status', 'state'],
+    `CloakBrowser profile inventory entry ${index} status`, true, (value) => {
+      const normalized = value.toLowerCase();
+      return normalized === 'running' || normalized === 'active' ? 'active' : normalized;
+    });
+  const cdpUrl = consistentTextAliases(entry, ['cdp_url', 'cdp_endpoint', 'cdpUrl'],
+    `CloakBrowser profile inventory entry ${index} CDP endpoint`, false);
+  return { profileName, profileId, status, cdpUrl };
+}
+
+function normalizeTargetEntry(target, index) {
+  if (!isRecord(target)) throw new Error(`Exact profile CDP target inventory entry ${index} is malformed.`);
+  const id = consistentTextAliases(target, ['id', 'targetId', 'target_id'],
+    `Exact profile CDP target inventory entry ${index} id`, true);
+  const type = requiredInventoryText(target.type,
+    `Exact profile CDP target inventory entry ${index} type`);
+  if (typeof target.url !== 'string' || target.url.trim() !== target.url) {
+    throw new Error(`Exact profile CDP target inventory entry ${index} URL is malformed.`);
+  }
+  if (target.webSocketDebuggerUrl !== undefined && target.webSocketDebuggerUrl !== null
+    && (typeof target.webSocketDebuggerUrl !== 'string' || target.webSocketDebuggerUrl.trim() !== target.webSocketDebuggerUrl)) {
+    throw new Error(`Exact profile CDP target inventory entry ${index} websocket is malformed.`);
+  }
+  return { ...target, id, type, url: target.url };
+}
+
+function consistentTextAliases(record, keys, label, required, normalize = (value) => value) {
+  const present = keys.filter((key) => Object.hasOwn(record, key));
+  if (present.length === 0) {
+    if (required) throw new Error(`${label} is missing.`);
+    return undefined;
+  }
+  const values = present.map((key) => requiredInventoryText(record[key], label));
+  if (new Set(values.map(normalize)).size !== 1) throw new Error(`${label} aliases conflict.`);
+  return values[0];
+}
+
+function requiredInventoryText(value, label) {
+  if (typeof value !== 'string' || value.trim() !== value || value.length < 1 || value.length > 4096) {
+    throw new Error(`${label} is malformed.`);
+  }
+  return value;
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 async function waitForTarget(cdpUrl, targetId, deps) {
@@ -222,7 +290,7 @@ function isBlankUrl(value) {
   return String(value || '').trim() === 'about:blank';
 }
 
-function assertExactProfileCdpPath(value, profileId) {
+export function assertExactProfileCdpPath(value, profileId) {
   let endpoint;
   try { endpoint = new URL(value); } catch { throw new Error('Manager CDP endpoint is malformed.'); }
   if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash
@@ -231,7 +299,7 @@ function assertExactProfileCdpPath(value, profileId) {
   }
 }
 
-function assertExactProfileBrowserWebSocket(value, cdpUrl, profileId) {
+export function assertExactProfileBrowserWebSocket(value, cdpUrl, profileId) {
   let endpoint;
   let profileEndpoint;
   try {

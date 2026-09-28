@@ -271,4 +271,42 @@ test('fails closed on malformed profile or target inventories', async () => {
     /profile name is missing or ambiguous/u,
   );
   assert.equal(ambiguousProfiles.calls.createTarget.length, 0);
+
+  const malformedMember = makeHarness({ profileInventory: [
+    { id: PROFILE_ID, name: PROFILE_NAME, status: 'running', cdp_url: `/api/profiles/${PROFILE_ID}/cdp` },
+    null,
+  ] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, malformedMember.deps),
+    /profile inventory entry 1 is malformed/u,
+  );
+  assert.equal(malformedMember.calls.createTarget.length, 0);
+
+  const conflictingProfileAliases = makeHarness({ profileInventory: [{
+    id: PROFILE_ID,
+    profile_id: 'different-profile-id',
+    name: PROFILE_NAME,
+    status: 'running',
+  }] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, conflictingProfileAliases.deps),
+    /profile inventory entry 0 id aliases conflict/u,
+  );
+  assert.equal(conflictingProfileAliases.calls.createTarget.length, 0);
+
+  const malformedTargetMember = makeHarness({ targetInventory: [null] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, malformedTargetMember.deps),
+    /CDP target inventory entry 0 is malformed/u,
+  );
+  assert.equal(malformedTargetMember.calls.createTarget.length, 0);
+
+  const conflictingTargetAliases = makeHarness({ targetInventory: [{
+    id: 'target-one', targetId: 'target-two', type: 'page', url: 'https://www.tradingview.com/',
+  }] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, conflictingTargetAliases.deps),
+    /CDP target inventory entry 0 id aliases conflict/u,
+  );
+  assert.equal(conflictingTargetAliases.calls.createTarget.length, 0);
 });

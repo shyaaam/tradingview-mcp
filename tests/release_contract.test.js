@@ -82,6 +82,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_hydrate_chart_target',
     'tv_observer_hydrate_chart_target_v2',
     'tv_observer_open_bootstrap_chart_target_v1',
+    'tv_observer_resolve_profile_name_v1',
     'tv_observer_retire_saved_chart_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
@@ -273,6 +274,9 @@ test('observer result fixtures satisfy registered output schemas', () => {
       navigation_performed: true,
       page_state: 'generic_chart',
       mutations_performed: true,
+    },
+    tv_observer_resolve_profile_name_v1: {
+      success: true, profile_name: 'tv-observer-1', profile_id: 'ephemeral-profile-id', status: 'running',
     },
     tv_observer_retire_saved_chart_v1: {
       success: true,
