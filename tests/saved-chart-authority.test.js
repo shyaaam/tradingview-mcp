@@ -78,7 +78,7 @@ function openPreflightProbeTarget(layouts = [], close = async () => {}) {
 }
 
 function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false, htmlForm = false,
-  createButton = true, textInput = true } = {}) {
+  createButton = true, textInput = true, inputType = 'text' } = {}) {
   const makeNode = (tagName, rect, properties = {}) => ({
     tagName: tagName.toUpperCase(),
     children: [],
@@ -99,7 +99,7 @@ function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false
     if (selector === '[role="row"][aria-label="Create new layout"]') {
       return node.role === 'row' && node.ariaLabel === 'Create new layout';
     }
-    if (selector === 'input[type="text"]') return node.tagName === 'INPUT' && node.type === 'text';
+    if (selector === 'input') return node.tagName === 'INPUT';
     if (selector === 'button') return node.tagName === 'BUTTON';
     if (selector === 'form') return node.tagName === 'FORM';
     return false;
@@ -111,7 +111,7 @@ function createLayoutFormDom({ extraTextInput = false, fullPageContainer = false
     : { x: 300, y: 180, width: 600, height: 300 };
   const root = makeNode(htmlForm ? 'form' : 'div', rootRect);
   const input = makeNode('input', { x: 400, y: 250, width: 220, height: 32 }, {
-    type: 'text', value: '', maxLength: 80,
+    type: inputType, value: '', maxLength: 80,
   });
   const button = makeNode('button', { x: 650, y: 250, width: 90, height: 32 }, {
     textContent: 'Create', disabled: false,
@@ -478,6 +478,8 @@ test('form probe accepts only unique fields inside one bounded non-dialog contai
       { name: 'multiple visible text fields', dom: createLayoutFormDom({ extraTextInput: true }),
         code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_AMBIGUOUS' },
       { name: 'missing visible text field', dom: createLayoutFormDom({ textInput: false }),
+        code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_MISSING' },
+      { name: 'non-text input stays unrecognized', dom: createLayoutFormDom({ inputType: 'search' }),
         code: 'CREATE_LAYOUT_NON_DIALOG_TEXT_INPUT_MISSING' },
       { name: 'missing exact Create button', dom: createLayoutFormDom({ createButton: false }),
         code: 'CREATE_LAYOUT_NON_DIALOG_BUTTON_COUNT_NOT_ONE' },

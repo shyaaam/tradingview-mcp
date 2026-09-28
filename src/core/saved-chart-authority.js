@@ -20,7 +20,9 @@ const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
       return rect.width > 0 && rect.height > 0;
     }
     function textInputs(root) {
-      return Array.from(root.querySelectorAll('input[type="text"]')).filter(visible);
+      return Array.from(root.querySelectorAll('input')).filter(function(node) {
+        return visible(node) && node.type === 'text';
+      });
     }
     function createButtons(root) {
       return Array.from(root.querySelectorAll('button')).filter(function(node) {
