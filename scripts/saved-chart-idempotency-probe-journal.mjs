@@ -7,6 +7,7 @@ export const PROBE_PROFILE_NAME = 'tv-observer-1';
 
 const HASH = /^[0-9a-f]{64}$/u;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
+const ROUTE_ID = /^[A-Za-z0-9_-]{1,160}$/u;
 const STAGES = new Set([
   'PREPARED',
   'CREATE_ARMED',
@@ -14,6 +15,7 @@ const STAGES = new Set([
   'SECOND_CREATE_ARMED',
   'FIRST_OUTCOME_UNKNOWN',
   'SECOND_OUTCOME_UNKNOWN',
+  'TARGET_RETIREMENT_ARMED',
   'CANDIDATE_UNIQUE',
   'NOT_IDEMPOTENT',
   'CONFLICT',
@@ -113,6 +115,57 @@ export async function recordProbeResponse(path, attempt, response) {
     record.providerResponse.providerManifestSha256 = attemptDiscovery.providerManifestSha256;
   }
   appendEvent(record, 'PROVIDER_RESPONSE_RECORDED');
+  await replaceRecord(path, record);
+  return record;
+}
+
+/** Persist exact stable ownership evidence before the one authorized probe-tab close. */
+export async function armProbeTargetRetirement(path, proof) {
+  const record = await readProbeJournal(path);
+  if (!['CONFLICT', 'TARGET_RETIREMENT_ARMED'].includes(record.stage)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_STAGE_NOT_AUTHORIZED');
+  }
+  const intent = normalizeTargetRetirementIntent(record, proof);
+  if (record.targetRetirement) {
+    if (record.stage !== 'TARGET_RETIREMENT_ARMED'
+      || record.targetRetirement.status !== 'ARMED'
+      || !sameTargetRetirementIntent(record.targetRetirement, intent)) {
+      throw new Error('PROBE_TARGET_RETIREMENT_INTENT_MISMATCH');
+    }
+    return record;
+  }
+  if (record.stage !== 'CONFLICT') throw new Error('PROBE_TARGET_RETIREMENT_INTENT_MISSING');
+  record.targetRetirement = { ...intent, status: 'ARMED', armedAt: new Date().toISOString() };
+  record.stage = 'TARGET_RETIREMENT_ARMED';
+  appendEvent(record, record.stage);
+  await replaceRecord(path, record);
+  return record;
+}
+
+/** Advance only after fresh readback proves the disposable page alone is gone. */
+export async function completeProbeTargetRetirement(path, inventory, disposition) {
+  const record = await readProbeJournal(path);
+  const intent = record.targetRetirement;
+  if (record.stage !== 'TARGET_RETIREMENT_ARMED' || intent?.status !== 'ARMED') {
+    throw new Error('PROBE_TARGET_RETIREMENT_NOT_ARMED');
+  }
+  validateTargetRetirementReadback(record, intent, inventory);
+  if (!['CLOSED_ACKNOWLEDGED', 'CLOSED_BY_READBACK', 'ALREADY_CLOSED_AFTER_RESTART'].includes(disposition)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_DISPOSITION_INVALID');
+  }
+  intent.status = 'COMPLETE';
+  intent.completionDisposition = disposition;
+  intent.completedAt = new Date().toISOString();
+  intent.postTargetCount = requireCount(inventory.targetCount, 'post-close target count');
+  intent.postBlankTargetCount = requireCount(inventory.blankTargetCount, 'post-close blank target count');
+  intent.postInventorySha256 = requireHash(inventory.inventorySha256, 'post-close inventory hash');
+  record.firstSavedChartId = intent.layoutId;
+  record.firstCreateProviderCommit = record.providerCommit;
+  record.firstCreateProviderManifestSha256 = record.providerManifestSha256;
+  record.firstTargetCount = record.preTargetCount;
+  record.firstProbeMarkerTargetCount = record.preProbeMarkerTargetCount;
+  record.stage = 'FIRST_CONFIRMED';
+  appendEvent(record, record.stage);
   await replaceRecord(path, record);
   return record;
 }
@@ -414,9 +467,158 @@ function validateRecord(record) {
     || (record.firstCreateProviderManifestSha256 !== undefined
       && !HASH.test(String(record.firstCreateProviderManifestSha256)))
     || !Number.isSafeInteger(record.preNonProbeLayoutCount) || record.preNonProbeLayoutCount < 0
+    || (record.targetRetirement !== undefined && !validTargetRetirement(record.targetRetirement))
     || !Array.isArray(record.events)) {
     throw new Error('PROBE_JOURNAL_INVALID');
   }
+  if (record.stage === 'TARGET_RETIREMENT_ARMED'
+    && record.targetRetirement?.status !== 'ARMED') throw new Error('PROBE_JOURNAL_INVALID');
+  if (record.targetRetirement && (record.targetRetirement.accountSubjectSha256 !== record.accountSubjectSha256
+    || record.targetRetirement.preTargetCount !== record.preTargetCount + 1
+    || record.targetRetirement.preBlankTargetCount !== record.preBlankTargetCount
+    || record.targetRetirement.preLayoutCount !== record.preInventoryCount + 1
+    || record.targetRetirement.preNonProbeLayoutCount !== record.preNonProbeLayoutCount
+    || record.targetRetirement.preNonProbeInventorySha256 !== record.preNonProbeInventorySha256
+    || (record.targetRetirement.status === 'COMPLETE'
+      && (record.stage !== 'FIRST_CONFIRMED'
+        || record.firstSavedChartId !== record.targetRetirement.layoutId
+        || record.firstTargetCount !== record.preTargetCount)))) {
+    throw new Error('PROBE_JOURNAL_INVALID');
+  }
+}
+
+function normalizeTargetRetirementIntent(record, proof) {
+  const accountSubjectSha256 = requireHash(proof?.accountSubjectSha256, 'retirement account identity hash');
+  const layoutId = requirePattern(proof?.layoutId, 'retirement layout ID');
+  const chartUid = requirePattern(proof?.chartUid, 'retirement chart route ID');
+  const layoutCount = requireCount(proof?.layoutCount, 'retirement layout count');
+  const targetCount = requireCount(proof?.targetCount, 'retirement target count');
+  const blankTargetCount = requireCount(proof?.blankTargetCount, 'retirement blank target count');
+  const inventorySha256 = requireHash(proof?.inventorySha256, 'retirement inventory hash');
+  const nonProbeLayoutCount = requireCount(proof?.nonProbeLayoutCount, 'retirement non-probe layout count');
+  const nonProbeInventorySha256 = requireHash(proof?.nonProbeInventorySha256, 'retirement non-probe inventory hash');
+  const chartRouteUids = validateRouteIds(proof?.chartRouteUids);
+  const preservedChartRouteUids = validateRouteIds(proof?.preservedChartRouteUids);
+  const matchingLayouts = validateLayouts(proof?.layouts).filter((layout) => layout.name === PROBE_MARKER);
+  if (record.stage === 'CONFLICT' && record.targetRetirement !== undefined) {
+    throw new Error('PROBE_TARGET_RETIREMENT_INTENT_MISMATCH');
+  }
+  if (accountSubjectSha256 !== record.accountSubjectSha256
+    || proof?.exactProbeTargetCount !== 1
+    || proof?.pageTargetCount !== targetCount
+    || targetCount !== record.preTargetCount + 1
+    || blankTargetCount !== record.preBlankTargetCount
+    || layoutCount !== record.preInventoryCount + 1
+    || nonProbeLayoutCount !== record.preNonProbeLayoutCount
+    || nonProbeInventorySha256 !== record.preNonProbeInventorySha256
+    || matchingLayouts.length !== 1 || matchingLayouts[0].layoutId !== layoutId
+    || chartRouteUids.length !== targetCount
+    || chartRouteUids.filter((route) => route === chartUid).length !== 1
+    || preservedChartRouteUids.length !== targetCount - 1
+    || preservedChartRouteUids.includes(chartUid)
+    || !sameStrings(chartRouteUids.filter((route) => route !== chartUid), preservedChartRouteUids)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_PRECONDITION_FAILED');
+  }
+  return {
+    accountSubjectSha256,
+    layoutId,
+    chartUid,
+    preservedChartRouteUids,
+    preTargetCount: targetCount,
+    preBlankTargetCount: blankTargetCount,
+    preLayoutCount: layoutCount,
+    preInventorySha256: inventorySha256,
+    preNonProbeLayoutCount: nonProbeLayoutCount,
+    preNonProbeInventorySha256: nonProbeInventorySha256,
+  };
+}
+
+function validateTargetRetirementReadback(record, intent, inventory) {
+  const layouts = validateLayouts(inventory?.layouts);
+  const markerMatches = layouts.filter((layout) => layout.name === PROBE_MARKER);
+  const pageTargets = inventory?.pageTargets;
+  if (inventory?.authenticated !== true
+    || requireHash(inventory?.accountSubjectSha256, 'post-close account identity hash') !== intent.accountSubjectSha256
+    || requireCount(inventory?.targetCount, 'post-close target count') !== record.preTargetCount
+    || requireCount(inventory?.blankTargetCount, 'post-close blank target count') !== record.preBlankTargetCount
+    || requireCount(inventory?.layoutCount, 'post-close layout count') !== intent.preLayoutCount
+    || requireHash(inventory?.inventorySha256, 'post-close inventory hash') !== intent.preInventorySha256
+    || requireCount(inventory?.nonProbeLayoutCount, 'post-close non-probe layout count') !== intent.preNonProbeLayoutCount
+    || requireHash(inventory?.nonProbeInventorySha256, 'post-close non-probe inventory hash') !== intent.preNonProbeInventorySha256
+    || markerMatches.length !== 1 || markerMatches[0].layoutId !== intent.layoutId
+    || !Array.isArray(pageTargets) || pageTargets.length !== record.preTargetCount) {
+    throw new Error('PROBE_TARGET_RETIREMENT_READBACK_MISMATCH');
+  }
+  const remainingRoutes = [];
+  for (const target of pageTargets) {
+    if (target?.urlOrigin !== 'https://www.tradingview.com'
+      || typeof target.urlRouteUid !== 'string' || !ROUTE_ID.test(target.urlRouteUid)
+      || target.currentChartUid !== target.urlRouteUid
+      || target.accountSubjectSha256 !== intent.accountSubjectSha256) {
+      throw new Error('PROBE_TARGET_RETIREMENT_READBACK_MISMATCH');
+    }
+    remainingRoutes.push(target.urlRouteUid);
+  }
+  const routes = validateRouteIds(remainingRoutes);
+  if (routes.includes(intent.chartUid) || !sameStrings(routes, intent.preservedChartRouteUids)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_READBACK_MISMATCH');
+  }
+}
+
+function validTargetRetirement(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const allowed = new Set([
+    'status', 'accountSubjectSha256', 'layoutId', 'chartUid', 'preservedChartRouteUids',
+    'preTargetCount', 'preBlankTargetCount', 'preLayoutCount', 'preInventorySha256',
+    'preNonProbeLayoutCount', 'preNonProbeInventorySha256', 'armedAt',
+    'completionDisposition', 'completedAt',
+    'postTargetCount', 'postBlankTargetCount', 'postInventorySha256',
+  ]);
+  if (Object.keys(value).some((key) => !allowed.has(key))
+    || !['ARMED', 'COMPLETE'].includes(value.status)
+    || !HASH.test(String(value.accountSubjectSha256 || ''))
+    || !ROUTE_ID.test(String(value.layoutId || '')) || !ROUTE_ID.test(String(value.chartUid || ''))
+    || !Array.isArray(value.preservedChartRouteUids)
+    || value.preservedChartRouteUids.some((route) => typeof route !== 'string' || !ROUTE_ID.test(route))
+    || new Set(value.preservedChartRouteUids).size !== value.preservedChartRouteUids.length
+    || value.preservedChartRouteUids.includes(value.chartUid)
+    || !Number.isSafeInteger(value.preTargetCount) || !Number.isSafeInteger(value.preBlankTargetCount)
+    || !Number.isSafeInteger(value.preLayoutCount) || !Number.isSafeInteger(value.preNonProbeLayoutCount)
+    || [value.preTargetCount, value.preBlankTargetCount, value.preLayoutCount, value.preNonProbeLayoutCount]
+      .some((count) => count < 0)
+    || !HASH.test(String(value.preInventorySha256 || ''))
+    || !HASH.test(String(value.preNonProbeInventorySha256 || ''))
+    || typeof value.armedAt !== 'string') return false;
+  if (value.status === 'COMPLETE') {
+    return ['CLOSED_ACKNOWLEDGED', 'CLOSED_BY_READBACK', 'ALREADY_CLOSED_AFTER_RESTART'].includes(value.completionDisposition)
+      && typeof value.completedAt === 'string'
+      && Number.isSafeInteger(value.postTargetCount)
+      && Number.isSafeInteger(value.postBlankTargetCount)
+      && value.postTargetCount >= 0 && value.postBlankTargetCount >= 0
+      && HASH.test(String(value.postInventorySha256 || ''));
+  }
+  return value.completionDisposition === undefined && value.completedAt === undefined
+    && value.postTargetCount === undefined && value.postBlankTargetCount === undefined
+    && value.postInventorySha256 === undefined;
+}
+
+function sameTargetRetirementIntent(existing, next) {
+  return ['accountSubjectSha256', 'layoutId', 'chartUid', 'preTargetCount', 'preBlankTargetCount',
+    'preLayoutCount', 'preInventorySha256', 'preNonProbeLayoutCount', 'preNonProbeInventorySha256']
+    .every((key) => existing[key] === next[key])
+    && sameStrings(existing.preservedChartRouteUids, next.preservedChartRouteUids);
+}
+
+function validateRouteIds(value) {
+  if (!Array.isArray(value)) throw new Error('PROBE_TARGET_RETIREMENT_ROUTES_INVALID');
+  const routes = value.map((route) => requirePattern(route, 'chart route ID'));
+  if (new Set(routes).size !== routes.length) throw new Error('PROBE_TARGET_RETIREMENT_ROUTES_INVALID');
+  return routes.sort();
+}
+
+function sameStrings(left, right) {
+  return Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function validateLayouts(value) {
@@ -456,6 +658,13 @@ function requireCount(value, label) {
 
 function requireText(value, label) {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label.toUpperCase().replaceAll(' ', '_')}_INVALID`);
+  return value;
+}
+
+function requirePattern(value, label) {
+  if (typeof value !== 'string' || value.trim() !== value || !ROUTE_ID.test(value)) {
+    throw new Error(`${label.toUpperCase().replaceAll(' ', '_')}_INVALID`);
+  }
   return value;
 }
 

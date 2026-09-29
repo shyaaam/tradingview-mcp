@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   createSavedChartIdempotencyProbe,
+  closeExactSavedChartIdempotencyProbeTarget,
   ensureSavedChartAuthority,
   inspectSavedChartIdempotencyProbe,
   isExactSavedChartIdempotencyProbeTarget,
@@ -75,6 +76,132 @@ test('probe target ownership uses exact account and route/layout identity, not t
   assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, currentChartUid: 'other-route' }, expected), false);
   assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, exactMarkerLayoutIds: [] }, expected), false);
   assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, exactMarkerLayoutIds: ['other-layout'] }, expected), false);
+});
+
+function exactProbeCloseFixture({ accountHash = ACCOUNT_HASH, layoutId = '206102994', routeUid = 'NCJIp2ky',
+  currentChartUid = routeUid,
+  duplicateProbe = false, closeEffect = true, closeAck = true } = {}) {
+  const profileId = 'ephemeral-profile-263';
+  const cdpUrl = `http://manager.test/api/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = cdpUrl.replace(/^http/u, 'ws');
+  const target = (id, uid, title) => ({
+    id, type: 'page', url: `https://www.tradingview.com/chart/${uid}/`, title,
+    webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${id}`,
+  });
+  const slotA = target('runtime-a-target', 'CWRnK7ji', 'EURUSD - TradingView');
+  const probe = target('runtime-probe-target', routeUid, 'Saved Chart - TradingView');
+  let targets = duplicateProbe ? [slotA, probe, { ...probe, id: 'runtime-probe-duplicate' }] : [slotA, probe];
+  const calls = { closed: [], armed: false, pageConnections: 0 };
+  const fetch = async (value) => {
+    const url = new URL(String(value));
+    let body;
+    if (url.pathname.endsWith('/profiles')) {
+      body = [{ id: profileId, name: PROFILE, status: 'running', cdp_url: cdpUrl }];
+    } else if (url.pathname.endsWith('/json/version')) {
+      body = { webSocketDebuggerUrl: browserWebSocketUrl };
+    } else if (url.pathname.endsWith('/json/list')) {
+      body = targets;
+    } else {
+      throw new Error(`Unexpected probe close URL: ${url.pathname}`);
+    }
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const createWebSocket = () => {
+    const socket = new EventTarget();
+    socket.send = (raw) => {
+      assert.equal(calls.armed, true, 'durable close intent must precede CDP mutation');
+      const request = JSON.parse(raw);
+      assert.equal(request.method, 'Target.closeTarget');
+      calls.closed.push(request.params.targetId);
+      if (closeEffect) targets = targets.filter((entry) => entry.id !== request.params.targetId);
+      queueMicrotask(() => {
+        if (!closeAck) socket.dispatchEvent(new Event('close'));
+        else socket.dispatchEvent(new MessageEvent('message', {
+          data: JSON.stringify({ id: request.id, result: { success: true } }),
+        }));
+      });
+    };
+    socket.close = () => {};
+    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
+    return socket;
+  };
+  const connectTarget = async (webSocketUrl) => {
+    const current = targets.find((entry) => webSocketUrl.endsWith(`/devtools/page/${entry.id}`));
+    const currentUid = current?.url.match(/^https:\/\/www\.tradingview\.com\/chart\/([A-Za-z0-9_-]+)\/$/u)?.[1];
+    calls.pageConnections += 1;
+    return {
+      Runtime: {
+        enable: async () => {},
+        evaluate: async () => ({ result: { value: {
+          authenticated: true,
+          account_subject_sha256: accountHash,
+          layouts: [{ layout_id: layoutId, name: MARKER }],
+          chart_uid: currentChartUid ?? currentUid,
+        } } }),
+      },
+      Page: { enable: async () => {} },
+      close: async () => {},
+    };
+  };
+  return {
+    calls,
+    dependencies: {
+      managerBaseUrl: 'http://manager.test/api',
+      fetch,
+      createWebSocket,
+      connectTarget,
+      sleep: async () => {},
+      beforeClose: async () => { calls.armed = true; },
+    },
+    getTargets: () => targets,
+  };
+}
+
+test('exact probe close checks current account, route, chart UID, and layout; preserves Slot A', async () => {
+  const fixture = exactProbeCloseFixture();
+  const result = await closeExactSavedChartIdempotencyProbeTarget(PROFILE, {
+    accountSubjectSha256: ACCOUNT_HASH, layoutId: '206102994', chartUid: 'NCJIp2ky', marker: MARKER,
+  }, fixture.dependencies);
+
+  assert.deepEqual(result, {
+    action: 'closed', remainingChartTargets: 1, mutationsPerformed: true,
+    closeAcknowledged: true,
+  });
+  assert.deepEqual(fixture.calls.closed, ['runtime-probe-target']);
+  assert.deepEqual(fixture.getTargets().map(({ url }) => url), [
+    'https://www.tradingview.com/chart/CWRnK7ji/',
+  ]);
+  assert.equal(JSON.stringify(result).includes('runtime-probe-target'), false);
+});
+
+test('exact probe close reconciles lost CDP response only after target disappearance', async () => {
+  const fixture = exactProbeCloseFixture({ closeAck: false });
+  const result = await closeExactSavedChartIdempotencyProbeTarget(PROFILE, {
+    accountSubjectSha256: ACCOUNT_HASH, layoutId: '206102994', chartUid: 'NCJIp2ky', marker: MARKER,
+  }, fixture.dependencies);
+  assert.equal(result.closeAcknowledged, false);
+  assert.deepEqual(fixture.getTargets().map(({ url }) => url), [
+    'https://www.tradingview.com/chart/CWRnK7ji/',
+  ]);
+});
+
+test('exact probe close fails closed before mutation on account/layout mismatch or ambiguous target', async (t) => {
+  for (const [name, options, expectedMessage] of [
+    ['wrong account', { accountHash: 'c'.repeat(64) }, /ownership changed/u],
+    ['wrong layout', { layoutId: 'wrong-layout' }, /ownership changed/u],
+    ['wrong route', { routeUid: 'other-route' }, /NOT_OPEN/u],
+    ['wrong current chart UID', { currentChartUid: 'other-chart-uid' }, /ownership changed/u],
+    ['duplicate route target', { duplicateProbe: true }, /AMBIGUOUS/u],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = exactProbeCloseFixture(options);
+      await assert.rejects(closeExactSavedChartIdempotencyProbeTarget(PROFILE, {
+        accountSubjectSha256: ACCOUNT_HASH, layoutId: '206102994', chartUid: 'NCJIp2ky', marker: MARKER,
+      }, fixture.dependencies), expectedMessage);
+      assert.deepEqual(fixture.calls.closed, []);
+      assert.equal(fixture.calls.armed, false);
+    });
+  }
 });
 
 test('probe saved-layout route uses normal discovery and confirms temporary-target close', async () => {

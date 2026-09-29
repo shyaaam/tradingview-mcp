@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   createSavedChartIdempotencyProbe,
+  closeExactSavedChartIdempotencyProbeTarget,
   inspectSavedChartIdempotencyProbe,
   isExactSavedChartIdempotencyProbeTarget,
   preflightSavedChartAuthority,
@@ -16,7 +17,9 @@ import {
   PROBE_MARKER,
   PROBE_PROFILE_NAME,
   armProbeCreate,
+  armProbeTargetRetirement,
   markProbeClickDispatched,
+  completeProbeTargetRetirement,
   prepareProbeJournal,
   readProbeJournal,
   recordProbeDiscovery,
@@ -103,6 +106,11 @@ async function main(command) {
     return;
   }
 
+  if (command === 'close-probe-target') {
+    await closeProbeTarget(journalPath);
+    return;
+  }
+
   const attempt = command === 'create-first' ? 1 : command === 'create-second' ? 2 : null;
   if (attempt === null) throw new Error('PROBE_COMMAND_INVALID');
 
@@ -174,6 +182,137 @@ export async function reconcileProbeDiscovery(journalPath, inventory, identity =
   return await recordProbeDiscovery(journalPath, inventory, identity);
 }
 
+async function closeProbeTarget(journalPath) {
+  const record = await readProbeJournal(journalPath);
+  if (record.marker !== PROBE_MARKER
+    || !['CONFLICT', 'TARGET_RETIREMENT_ARMED'].includes(record.stage)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_STATE_NOT_AUTHORIZED');
+  }
+  const route = await resolveSavedChartIdempotencyProbeRoute(PROBE_PROFILE_NAME, record.accountSubjectSha256);
+  if (route.marker !== PROBE_MARKER || route.accountSubjectSha256 !== record.accountSubjectSha256) {
+    throw new Error('PROBE_ROUTE_AUTHORITY_CHANGED');
+  }
+  const expected = {
+    accountSubjectSha256: record.accountSubjectSha256,
+    layoutId: route.layoutId,
+    chartUid: route.chartUid,
+    marker: PROBE_MARKER,
+  };
+  if (record.targetRetirement && (record.targetRetirement.layoutId !== expected.layoutId
+    || record.targetRetirement.chartUid !== expected.chartUid
+    || record.targetRetirement.accountSubjectSha256 !== expected.accountSubjectSha256)) {
+    throw new Error('PROBE_TARGET_RETIREMENT_AUTHORITY_CHANGED');
+  }
+
+  const before = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
+  const beforeProof = targetRetirementProof(before, expected);
+  if (beforeProof.exactProbeTargetCount === 0 && record.stage === 'TARGET_RETIREMENT_ARMED') {
+    const completed = await completeProbeTargetRetirement(
+      journalPath, before, 'ALREADY_CLOSED_AFTER_RESTART',
+    );
+    printTargetRetirementResult(completed, before, route, 'already-closed-after-restart', false);
+    return;
+  }
+  if (beforeProof.exactProbeTargetCount !== 1) {
+    throw new Error('PROBE_TARGET_OWNERSHIP_NOT_EXACT');
+  }
+
+  let closeResult = null;
+  let closeError = null;
+  try {
+    closeResult = await closeExactSavedChartIdempotencyProbeTarget(PROBE_PROFILE_NAME, expected, {
+      beforeClose: async () => {
+        const current = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
+        const currentProof = targetRetirementProof(current, expected);
+        if (currentProof.exactProbeTargetCount !== 1) {
+          throw new Error('PROBE_TARGET_RETIREMENT_PRESTATE_CHANGED');
+        }
+        await armProbeTargetRetirement(journalPath, currentProof);
+      },
+    });
+  } catch (error) {
+    closeError = error;
+  }
+
+  const after = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
+  const armed = await readProbeJournal(journalPath);
+  if (armed.stage !== 'TARGET_RETIREMENT_ARMED') {
+    if (closeError) throw closeError;
+    throw new Error('PROBE_TARGET_RETIREMENT_INTENT_NOT_DURABLE');
+  }
+  const disposition = closeResult?.closeAcknowledged === true
+    ? 'CLOSED_ACKNOWLEDGED' : 'CLOSED_BY_READBACK';
+  let completed;
+  try {
+    completed = await completeProbeTargetRetirement(journalPath, after, disposition);
+  } catch (readbackError) {
+    if (closeError) throw new Error(`PROBE_TARGET_CLOSE_UNRESOLVED:${safeCode(closeError)}:${safeCode(readbackError)}`);
+    throw readbackError;
+  }
+  printTargetRetirementResult(completed, after, route, closeResult?.action || 'closed-by-readback',
+    closeResult?.closeAcknowledged === true);
+}
+
+function targetRetirementProof(inventory, expected) {
+  if (!inventory?.authenticated || inventory.accountSubjectSha256 !== expected.accountSubjectSha256) {
+    throw new Error('PROBE_TARGET_RETIREMENT_ACCOUNT_MISMATCH');
+  }
+  const pageTargets = inventory.pageTargets;
+  if (!Array.isArray(pageTargets) || pageTargets.length !== inventory.targetCount
+    || new Set(pageTargets.map((target) => target?.targetId)).size !== pageTargets.length
+    || inventory.blankTargetCount !== 0) {
+    throw new Error('PROBE_TARGET_RETIREMENT_INVENTORY_INVALID');
+  }
+  for (const target of pageTargets) {
+    if (typeof target.targetId !== 'string' || target.targetId.length === 0
+      || target.urlOrigin !== 'https://www.tradingview.com'
+      || typeof target.urlRouteUid !== 'string' || target.urlRouteUid !== target.currentChartUid
+      || target.accountSubjectSha256 !== expected.accountSubjectSha256) {
+      throw new Error('PROBE_TARGET_RETIREMENT_PAGE_IDENTITY_NOT_EXACT');
+    }
+  }
+  const exact = pageTargets.filter((target) => isExactSavedChartIdempotencyProbeTarget(target, expected));
+  const chartRouteUids = pageTargets.map((target) => target.urlRouteUid);
+  const preservedChartRouteUids = chartRouteUids.filter((routeUid) => routeUid !== expected.chartUid);
+  return {
+    accountSubjectSha256: inventory.accountSubjectSha256,
+    layoutId: expected.layoutId,
+    chartUid: expected.chartUid,
+    exactProbeTargetCount: exact.length,
+    pageTargetCount: pageTargets.length,
+    chartRouteUids,
+    preservedChartRouteUids,
+    layoutCount: inventory.layoutCount,
+    layouts: inventory.layouts,
+    inventorySha256: inventory.inventorySha256,
+    targetCount: inventory.targetCount,
+    blankTargetCount: inventory.blankTargetCount,
+    nonProbeLayoutCount: inventory.nonProbeLayoutCount,
+    nonProbeInventorySha256: inventory.nonProbeInventorySha256,
+  };
+}
+
+function printTargetRetirementResult(record, inventory, route, action, closeAcknowledged) {
+  print({
+    command: 'close-probe-target',
+    marker: record.marker,
+    stage: record.stage,
+    action,
+    closeAcknowledged,
+    accountSubjectSha256: inventory.accountSubjectSha256,
+    layoutId: route.layoutId,
+    chartUid: route.chartUid,
+    layoutCount: inventory.layoutCount,
+    inventorySha256: inventory.inventorySha256,
+    targetCount: inventory.targetCount,
+    blankTargetCount: inventory.blankTargetCount,
+    nonProbeLayoutCount: inventory.nonProbeLayoutCount,
+    nonProbeInventorySha256: inventory.nonProbeInventorySha256,
+    preservedChartRouteUids: record.targetRetirement.preservedChartRouteUids,
+    persistedRuntimeBrowserIdentity: false,
+  });
+}
+
 export function journalResponseFromResult(response, attempt) {
   const duplicateRejected = attempt === 2 && response?.action === 'duplicate_rejected'
     && response.failureCode === 'SAVED_CHART_NAME_DUPLICATE_REJECTED';
@@ -208,7 +347,7 @@ function currentProviderIdentity() {
 }
 
 export function assertProviderIdentity(record, identity, command) {
-  if (command === 'discover' || command === 'diagnose-targets') return;
+  if (command === 'discover' || command === 'diagnose-targets' || command === 'close-probe-target') return;
   const expected = command === 'create-first'
     ? { providerCommit: record.providerCommit, providerManifestSha256: record.providerManifestSha256 }
     : command === 'create-second'

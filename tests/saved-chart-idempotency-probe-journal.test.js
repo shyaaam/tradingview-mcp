@@ -9,7 +9,9 @@ import test from 'node:test';
 import {
   PROBE_MARKER,
   PROBE_PROFILE_NAME,
+  armProbeTargetRetirement,
   armProbeCreate,
+  completeProbeTargetRetirement,
   markProbeClickDispatched,
   prepareProbeJournal,
   readProbeJournal,
@@ -80,6 +82,125 @@ function discovered(layouts, inventorySha256 = INPUT.preInventorySha256, overrid
     ...overrides,
   };
 }
+
+function retirementProof(overrides = {}) {
+  return {
+    accountSubjectSha256: INPUT.accountSubjectSha256,
+    layoutId: '206102994',
+    chartUid: 'NCJIp2ky',
+    exactProbeTargetCount: 1,
+    pageTargetCount: 2,
+    chartRouteUids: ['NCJIp2ky', 'slot-a-route'],
+    preservedChartRouteUids: ['slot-a-route'],
+    layoutCount: 1,
+    inventorySha256: 'd'.repeat(64),
+    targetCount: 2,
+    blankTargetCount: 0,
+    nonProbeLayoutCount: INPUT.preNonProbeLayoutCount,
+    nonProbeInventorySha256: INPUT.preNonProbeInventorySha256,
+    layouts: [{ layoutId: '206102994', name: PROBE_MARKER }],
+    ...overrides,
+  };
+}
+
+function retirementReadback(overrides = {}) {
+  return {
+    authenticated: true,
+    accountSubjectSha256: INPUT.accountSubjectSha256,
+    layoutCount: 1,
+    inventorySha256: 'd'.repeat(64),
+    targetCount: 1,
+    blankTargetCount: 0,
+    nonProbeLayoutCount: INPUT.preNonProbeLayoutCount,
+    nonProbeInventorySha256: INPUT.preNonProbeInventorySha256,
+    layouts: [{ layoutId: '206102994', name: PROBE_MARKER }],
+    pageTargets: [{
+      targetId: 'runtime-slot-a-only', urlOrigin: 'https://www.tradingview.com',
+      urlRouteUid: 'slot-a-route', currentChartUid: 'slot-a-route',
+      accountSubjectSha256: INPUT.accountSubjectSha256,
+    }],
+    ...overrides,
+  };
+}
+
+test('probe-target close intent survives restart and advances only after exact preserved-state readback', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER],
+    ], 'd'.repeat(64), { targetCount: 2 }));
+
+    const armed = await armProbeTargetRetirement(path, retirementProof());
+    assert.equal(armed.stage, 'TARGET_RETIREMENT_ARMED');
+    assert.deepEqual(recoveryAction(await readProbeJournal(path)), {
+      action: 'DISCOVER', marker: PROBE_MARKER, stage: 'TARGET_RETIREMENT_ARMED',
+    });
+    const durable = JSON.stringify(await readProbeJournal(path));
+    assert.equal(durable.includes('runtime-slot-a-only'), false);
+    assert.equal(durable.includes('runtime-probe-target'), false);
+    assert.equal(durable.includes('profileId'), false);
+    assert.equal(durable.includes('ownerPid'), false);
+
+    const reopenedArm = await armProbeTargetRetirement(path, retirementProof());
+    assert.equal(reopenedArm.stage, 'TARGET_RETIREMENT_ARMED');
+
+    const completed = await completeProbeTargetRetirement(path, retirementReadback(), 'ALREADY_CLOSED_AFTER_RESTART');
+    assert.equal(completed.stage, 'FIRST_CONFIRMED');
+    assert.equal(completed.firstSavedChartId, '206102994');
+    assert.equal(completed.firstTargetCount, INPUT.preTargetCount);
+    assert.equal(completed.firstProbeMarkerTargetCount, INPUT.preProbeMarkerTargetCount);
+    assert.equal(completed.targetRetirement.status, 'COMPLETE');
+    assert.equal(completed.targetRetirement.completionDisposition, 'ALREADY_CLOSED_AFTER_RESTART');
+    assert.equal(completed.targetRetirement.postTargetCount, 1);
+    assert.equal(JSON.stringify(completed).includes('runtime-slot-a-only'), false);
+  });
+});
+
+test('probe-target close readback rejects changed Slot A, layout, account, or leftover target', async (t) => {
+  for (const [name, override] of [
+    ['Slot A route changed', { pageTargets: [{
+      targetId: 'runtime-a', urlOrigin: 'https://www.tradingview.com',
+      urlRouteUid: 'different-route', currentChartUid: 'different-route', accountSubjectSha256: INPUT.accountSubjectSha256,
+    }] }],
+    ['saved layout missing', { layouts: [] }],
+    ['account changed', { accountSubjectSha256: '9'.repeat(64) }],
+    ['target count not back to baseline', { targetCount: 2 }],
+  ]) {
+    await t.test(name, async () => {
+      await withJournal(async (path) => {
+        await prepareProbeJournal(path, INPUT);
+        await recordProbeDiscovery(path, discovered([['206102994', PROBE_MARKER]], 'd'.repeat(64), {
+          targetCount: 2,
+        }));
+        await armProbeTargetRetirement(path, retirementProof());
+        await assert.rejects(
+          completeProbeTargetRetirement(path, retirementReadback(override), 'ALREADY_CLOSED_AFTER_RESTART'),
+          /READBACK_MISMATCH/u,
+        );
+        assert.equal((await readProbeJournal(path)).stage, 'TARGET_RETIREMENT_ARMED');
+      });
+    });
+  }
+});
+
+test('probe-target close intent rejects wrong account, marker layout, or non-probe inventory drift', async (t) => {
+  for (const [name, override] of [
+    ['wrong account', { accountSubjectSha256: '9'.repeat(64) }],
+    ['wrong layout identity', { layoutId: 'different-layout' }],
+    ['non-probe layout drift', { nonProbeInventorySha256: '8'.repeat(64) }],
+  ]) {
+    await t.test(name, async () => {
+      await withJournal(async (path) => {
+        await prepareProbeJournal(path, INPUT);
+        await recordProbeDiscovery(path, discovered([
+          ['206102994', PROBE_MARKER],
+        ], 'd'.repeat(64), { targetCount: 2 }));
+        await assert.rejects(armProbeTargetRetirement(path, retirementProof(override)), /PRECONDITION_FAILED/u);
+        assert.equal((await readProbeJournal(path)).stage, 'CONFLICT');
+      });
+    });
+  }
+});
 
 test('PREPARED recovery discovers exact durable marker before any first create', async () => {
   await withJournal(async (path) => {

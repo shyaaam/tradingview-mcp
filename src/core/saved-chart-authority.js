@@ -5,6 +5,7 @@ import {
   assertExactProfileBrowserWebSocket,
   resolveExactRunningProfile,
 } from './chart-target-open.js';
+import { closeExactOwnedChartTarget } from './chart-target-retirement.js';
 
 const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const TARGET_POLL_ATTEMPTS = 30;
@@ -285,6 +286,61 @@ export function isExactSavedChartIdempotencyProbeTarget(target, expected = {}) {
     && Array.isArray(target.exactMarkerLayoutIds)
     && target.exactMarkerLayoutIds.length === 1
     && target.exactMarkerLayoutIds[0] === expected.layoutId);
+}
+
+/** @internal Issue-263 acceptance caller; closes only the freshly verified fixed probe page. */
+export async function closeExactSavedChartIdempotencyProbeTarget(profileName, expected = {}, dependencies = {}) {
+  if (profileName !== 'tv-observer-1'
+    || !HASH.test(String(expected.accountSubjectSha256 || ''))
+    || typeof expected.layoutId !== 'string' || !CHART_UID.test(expected.layoutId)
+    || typeof expected.chartUid !== 'string' || !CHART_UID.test(expected.chartUid)
+    || expected.marker !== SAVED_CHART_IDEMPOTENCY_PROBE_MARKER
+    || typeof dependencies.beforeClose !== 'function') {
+    throw new Error('PROBE_TARGET_CLOSE_REQUEST_INVALID');
+  }
+  const profile = await resolveExactRunningProfile(profileName, dependencies);
+  const initialTargets = await listTargets(profile.cdpUrl, dependencies);
+  const chartUrl = `https://www.tradingview.com/chart/${expected.chartUid}/`;
+  const matchingTargets = initialTargets.filter((target) => target?.type === 'page'
+    && target?.url === chartUrl);
+  if (matchingTargets.length !== 1) {
+    throw new Error(matchingTargets.length > 1
+      ? 'PROBE_TARGET_ROUTE_AMBIGUOUS' : 'PROBE_TARGET_ROUTE_NOT_OPEN');
+  }
+  const [target] = matchingTargets;
+  const verifyCurrentTarget = async (current) => {
+    const currentProfile = await resolveExactRunningProfile(profileName, dependencies);
+    if (currentProfile.profileId !== profile.profileId || currentProfile.cdpUrl !== profile.cdpUrl) {
+      throw new Error('PROFILE_GENERATION_CHANGED_BEFORE_TARGET_CLOSE');
+    }
+    const page = await connectTarget(current, dependencies);
+    try {
+      await enablePage(page);
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      if (probe?.authenticated !== true || probe.account_subject_sha256 !== expected.accountSubjectSha256
+        || !Array.isArray(probe.layouts) || probe.chart_uid !== expected.chartUid) return false;
+      const layouts = normalizeLayouts(probe.layouts);
+      const evidence = targetPageEvidence(current);
+      evidence.accountSubjectSha256 = probe.account_subject_sha256;
+      evidence.currentChartUid = probe.chart_uid;
+      evidence.exactMarkerLayoutIds = layouts
+        .filter((layout) => layout.name === expected.marker)
+        .map((layout) => layout.layoutId).sort();
+      return isExactSavedChartIdempotencyProbeTarget(evidence, expected);
+    } finally {
+      await closePage(page);
+    }
+  };
+
+  return await closeExactOwnedChartTarget({
+    profileId: profile.profileId,
+    cdpUrl: profile.cdpUrl,
+    targetId: target.id,
+    routeUid: expected.chartUid,
+    chartUrl,
+    initialTargets,
+    verifyCurrentTarget,
+  }, dependencies);
 }
 
 /** One-shot acceptance create using the production UI path and one fixed issue-scoped marker. */
