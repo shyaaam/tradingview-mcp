@@ -8,6 +8,14 @@ export const PROBE_PROFILE_NAME = 'tv-observer-1';
 const HASH = /^[0-9a-f]{64}$/u;
 const COMMIT = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const ROUTE_ID = /^[A-Za-z0-9_-]{1,160}$/u;
+const CONFIRMED_FIRST_CREATE_STAGES = new Set([
+  'FIRST_CONFIRMED',
+  'SECOND_CREATE_ARMED',
+  'SECOND_OUTCOME_UNKNOWN',
+  'CANDIDATE_UNIQUE',
+  'NOT_IDEMPOTENT',
+  'CONFLICT',
+]);
 const STAGES = new Set([
   'PREPARED',
   'CREATE_ARMED',
@@ -466,7 +474,7 @@ function validateRecord(record) {
     || record.targetRetirement.preNonProbeLayoutCount !== record.preNonProbeLayoutCount
     || record.targetRetirement.preNonProbeInventorySha256 !== record.preNonProbeInventorySha256
     || (record.targetRetirement.status === 'COMPLETE'
-      && (record.stage !== 'FIRST_CONFIRMED'
+      && (!CONFIRMED_FIRST_CREATE_STAGES.has(record.stage)
         || record.firstSavedChartId !== record.targetRetirement.layoutId
         || record.firstTargetCount !== record.preTargetCount)))) {
     throw new Error('PROBE_JOURNAL_INVALID');

@@ -156,6 +156,38 @@ test('probe-target close intent survives restart and advances only after exact p
   });
 });
 
+test('completed probe retirement remains valid through second-create journaling and discovery', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER],
+    ], 'd'.repeat(64), { targetCount: 2, probeMarkerTargetCount: 1 }));
+    await armProbeTargetRetirement(path, retirementProof());
+    const firstConfirmed = await completeProbeTargetRetirement(
+      path, retirementReadback(), 'ALREADY_CLOSED_AFTER_RESTART',
+    );
+    assert.equal(firstConfirmed.stage, 'FIRST_CONFIRMED');
+
+    const secondArmed = await armProbeCreate(path, 2);
+    assert.equal(secondArmed.stage, 'SECOND_CREATE_ARMED');
+    assert.equal(secondArmed.clickDispatched, false);
+    assert.equal((await readProbeJournal(path)).targetRetirement.status, 'COMPLETE');
+
+    await markProbeClickDispatched(path, 2);
+    await recordProbeResponse(path, 2, {
+      action: 'duplicate_rejected',
+      failureCode: 'SAVED_CHART_NAME_DUPLICATE_REJECTED',
+      temporaryTargetClosed: true,
+    });
+    const discovery = await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER],
+    ], 'e'.repeat(64), { targetCount: 1 }));
+    assert.equal(discovery.outcome, 'EXPLICIT_DUPLICATE_REJECTION');
+    assert.equal(discovery.record.stage, 'CANDIDATE_UNIQUE');
+    assert.equal(discovery.record.targetRetirement.status, 'COMPLETE');
+  });
+});
+
 test('probe-target close readback rejects changed Slot A, layout, account, or leftover target', async (t) => {
   for (const [name, override] of [
     ['Slot A route changed', { pageTargets: [{
