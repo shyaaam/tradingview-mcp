@@ -199,8 +199,65 @@ test('does not launch when exact profile name is ambiguous', async () => {
       if (init.method === 'POST') launches += 1;
       throw new Error(`unexpected URL: ${url}`);
     },
-  }), /missing or ambiguous/u);
+  }), (error) => error.failureCode === 'PROFILE_NAME_MISSING_OR_AMBIGUOUS');
   assert.equal(launches, 0);
+});
+
+test('Manager transport failure has inventory-unavailable code, not profile-missing code', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => { throw new Error('connection refused'); },
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_UNAVAILABLE');
+});
+
+test('malformed Manager inventory has its own fail-closed code', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => response([{ id: PROFILE_ID, name: PROFILE_NAME }]),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_INVALID');
+});
+
+test('invalid Manager inventory JSON is not mislabeled as missing profile', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('invalid'); } }),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_INVALID');
+});
+
+test('stalled Manager inventory request aborts at its per-request deadline', async () => {
+  let requestSignal;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (_url, init = {}) => await new Promise((_resolve, reject) => {
+      requestSignal = init.signal;
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    }),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_UNAVAILABLE');
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
+});
+
+test('stalled profile CDP request aborts instead of outliving readiness attempts', async () => {
+  let requestSignal;
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status: 'running',
+          cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return await new Promise((_resolve, reject) => {
+          requestSignal = init.signal;
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_CDP_NOT_READY');
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
 });
 
 test('waits on an existing profile start without issuing a second launch', async () => {
