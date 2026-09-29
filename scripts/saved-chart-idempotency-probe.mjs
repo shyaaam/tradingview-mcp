@@ -39,7 +39,8 @@ async function main(command) {
     const inventory = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
     if (!inventory.authenticated || inventory.probeMarkerCount !== 0
       || !Number.isSafeInteger(inventory.targetCount) || inventory.targetCount < 0
-      || !Number.isSafeInteger(inventory.blankTargetCount) || inventory.blankTargetCount < 0) {
+      || !Number.isSafeInteger(inventory.blankTargetCount) || inventory.blankTargetCount < 0
+      || inventory.probeMarkerTargetCount !== 0) {
       throw new Error('PROBE_BASELINE_INVENTORY_NOT_EXACT');
     }
     const record = await prepareProbeJournal(journalPath, {
@@ -50,6 +51,7 @@ async function main(command) {
       preInventorySha256: inventory.inventorySha256,
       preTargetCount: inventory.targetCount,
       preBlankTargetCount: inventory.blankTargetCount,
+      preProbeMarkerTargetCount: inventory.probeMarkerTargetCount,
       preNonProbeLayoutCount: inventory.nonProbeLayoutCount,
       preNonProbeInventorySha256: inventory.nonProbeInventorySha256,
       preExistingProbeNames: inventory.probePrefixNames,
@@ -58,16 +60,18 @@ async function main(command) {
       authenticated: inventory.authenticated, accountSubjectSha256: inventory.accountSubjectSha256,
       layoutCount: inventory.layoutCount, inventorySha256: inventory.inventorySha256,
       targetCount: inventory.targetCount, blankTargetCount: inventory.blankTargetCount,
-      probeMarkerCount: inventory.probeMarkerCount, probePrefixNames: inventory.probePrefixNames,
+      probeMarkerCount: inventory.probeMarkerCount,
+      probeMarkerTargetCount: inventory.probeMarkerTargetCount,
+      probePrefixNames: inventory.probePrefixNames,
       providerCommit: record.providerCommit, providerManifestSha256: record.providerManifestSha256 });
     return;
   }
 
   const record = await readProbeJournal(journalPath);
-  assertProviderIdentity(record, identity);
+  assertProviderIdentity(record, identity, command);
 
   if (command === 'discover') {
-    print(await discover(journalPath));
+    print(await discover(journalPath, identity));
     return;
   }
 
@@ -75,14 +79,15 @@ async function main(command) {
   if (attempt === null) throw new Error('PROBE_COMMAND_INVALID');
 
   const before = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
-  const discovery = await reconcileProbeDiscovery(journalPath, before);
+  const discovery = await reconcileProbeDiscovery(journalPath, before, identity);
   if (!discovery.createAllowed) throw new Error('PROBE_DISCOVERY_REQUIRED_OR_NOT_SAFE');
   const current = discovery.record;
+  const expectedTargetCount = attempt === 2 ? current.firstTargetCount : current.preTargetCount;
   const preflight = await preflightSavedChartAuthority(INPUT, {
     idempotencyProbeMarker: SAVED_CHART_IDEMPOTENCY_PROBE_MARKER,
   });
   if (before.inventorySha256 !== preflight.layout_inventory_sha256
-    || before.layoutCount !== preflight.layout_count || before.targetCount !== current.preTargetCount
+    || before.layoutCount !== preflight.layout_count || before.targetCount !== expectedTargetCount
     || before.blankTargetCount !== current.preBlankTargetCount
     || before.chartTargetCount !== preflight.chart_target_count
     || before.accountSubjectSha256 !== current.accountSubjectSha256) {
@@ -101,7 +106,7 @@ async function main(command) {
       profileName: PROBE_PROFILE_NAME,
       marker: PROBE_MARKER,
       expectedAccountSubjectSha256: current.accountSubjectSha256,
-      expectedProfilePageTargetCount: current.preTargetCount,
+      expectedProfilePageTargetCount: expectedTargetCount,
       expectedBlankPageTargetCount: current.preBlankTargetCount,
       allowExistingMarker: attempt === 2,
     }, {
@@ -129,16 +134,16 @@ async function main(command) {
     temporaryTargetClosed: response.temporaryTargetClosed });
 }
 
-async function discover(journalPath) {
+async function discover(journalPath, identity) {
   const inventory = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
-  return await reconcileProbeDiscovery(journalPath, inventory);
+  return await reconcileProbeDiscovery(journalPath, inventory, identity);
 }
 
-export async function reconcileProbeDiscovery(journalPath, inventory) {
+export async function reconcileProbeDiscovery(journalPath, inventory, identity = undefined) {
   const record = await readProbeJournal(journalPath);
   const action = recoveryAction(record);
   if (action.action !== 'DISCOVER' || action.marker !== PROBE_MARKER) throw new Error('PROBE_RECOVERY_NOT_DISCOVERY');
-  return await recordProbeDiscovery(journalPath, inventory);
+  return await recordProbeDiscovery(journalPath, inventory, identity);
 }
 
 export function journalResponseFromResult(response, attempt) {
@@ -174,9 +179,15 @@ function currentProviderIdentity() {
   return { providerCommit, providerManifestSha256: observerManifestHash };
 }
 
-function assertProviderIdentity(record, identity) {
-  if (record.providerCommit !== identity.providerCommit
-    || record.providerManifestSha256 !== identity.providerManifestSha256) {
+export function assertProviderIdentity(record, identity, command) {
+  if (command === 'discover') return;
+  const expected = command === 'create-first'
+    ? { providerCommit: record.providerCommit, providerManifestSha256: record.providerManifestSha256 }
+    : command === 'create-second'
+      ? record.lastDiscovery
+      : null;
+  if (!expected || expected.providerCommit !== identity.providerCommit
+    || expected.providerManifestSha256 !== identity.providerManifestSha256) {
     throw new Error('PROBE_PROVIDER_IDENTITY_CHANGED');
   }
 }

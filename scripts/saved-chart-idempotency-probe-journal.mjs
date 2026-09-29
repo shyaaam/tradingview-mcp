@@ -31,6 +31,7 @@ export async function prepareProbeJournal(path, input) {
     preInventorySha256: requireHash(input.preInventorySha256, 'inventory hash'),
     preTargetCount: requireCount(input.preTargetCount, 'profile target count'),
     preBlankTargetCount: requireCount(input.preBlankTargetCount, 'blank target count'),
+    preProbeMarkerTargetCount: requireCount(input.preProbeMarkerTargetCount ?? 0, 'probe marker target count'),
     preNonProbeLayoutCount: requireCount(input.preNonProbeLayoutCount, 'non-probe inventory count'),
     preNonProbeInventorySha256: requireHash(input.preNonProbeInventorySha256, 'non-probe inventory hash'),
     preExistingProbeNames: validateProbeNames(input.preExistingProbeNames),
@@ -45,6 +46,8 @@ export async function prepareProbeJournal(path, input) {
 export async function readProbeJournal(path) {
   const record = JSON.parse(await readFile(path, 'utf8'));
   validateRecord(record);
+  // Older v1 journals had no exact-marker target counter; their prepared marker count was zero.
+  record.preProbeMarkerTargetCount ??= 0;
   return record;
 }
 
@@ -59,6 +62,10 @@ export async function armProbeCreate(path, attempt, discovery = undefined) {
   if (expected === null) throw new Error('PROBE_CREATE_STAGE_NOT_AUTHORIZED');
   const initial = await readProbeJournal(path);
   if (initial.stage !== expected) throw new Error('PROBE_CREATE_STAGE_NOT_AUTHORIZED');
+  if (attempt === 2 && (!Number.isSafeInteger(initial.firstTargetCount)
+    || !Number.isSafeInteger(initial.firstProbeMarkerTargetCount))) {
+    throw new Error('PROBE_FIRST_CONFIRMATION_INCOMPLETE');
+  }
   await claimProbeAttempt(path, attempt);
   const record = await readProbeJournal(path);
   if (record.stage !== expected) throw new Error('PROBE_CREATE_STAGE_CHANGED');
@@ -100,18 +107,24 @@ export async function recordProbeResponse(path, attempt, response) {
       ? response.temporaryTargetClosed : null,
     receivedAt: new Date().toISOString(),
   };
+  const attemptDiscovery = record[attempt === 1 ? 'preCreateDiscovery' : 'preSecondCreateDiscovery'];
+  if (attemptDiscovery?.providerCommit && attemptDiscovery?.providerManifestSha256) {
+    record.providerResponse.providerCommit = attemptDiscovery.providerCommit;
+    record.providerResponse.providerManifestSha256 = attemptDiscovery.providerManifestSha256;
+  }
   appendEvent(record, 'PROVIDER_RESPONSE_RECORDED');
   await replaceRecord(path, record);
   return record;
 }
 
-export async function recordProbeDiscovery(path, inventory) {
+export async function recordProbeDiscovery(path, inventory, providerIdentity = undefined) {
   const record = await readProbeJournal(path);
   const claims = await Promise.all([readProbeAttemptClaim(path, 1), readProbeAttemptClaim(path, 2)]);
   if (claims.some((claim) => claim && processIsAlive(claim.ownerPid))) {
     throw new Error('PROBE_CREATE_ATTEMPT_IN_PROGRESS');
   }
   const previousStage = record.stage;
+  const priorDiscovery = record.lastDiscovery;
   if (record.stage === 'PREPARED' && claims[0]) {
     record.stage = 'CREATE_ARMED';
     record.activeAttempt = 1;
@@ -153,27 +166,44 @@ export async function recordProbeDiscovery(path, inventory) {
     layoutCount: layouts.length,
     targetCount: requireCount(inventory.targetCount, 'discovered profile target count'),
     blankTargetCount: requireCount(inventory.blankTargetCount, 'discovered blank target count'),
+    probeMarkerTargetCount: requireCount(inventory.probeMarkerTargetCount ?? 0, 'discovered marker target count'),
     inventorySha256: requireHash(inventory.inventorySha256, 'discovered inventory hash'),
     nonProbeLayoutCount: requireCount(inventory.nonProbeLayoutCount, 'non-probe inventory count'),
     nonProbeInventorySha256: requireHash(inventory.nonProbeInventorySha256, 'non-probe inventory hash'),
     probePrefixNames,
     matchCount: matches.length,
     matchLayoutIds: matchIds,
+    ...(providerIdentity === undefined ? {} : {
+      providerCommit: requireCommit(providerIdentity.providerCommit),
+      providerManifestSha256: requireHash(providerIdentity.providerManifestSha256, 'provider manifest hash'),
+    }),
   };
 
   let outcome;
   let createAllowed = false;
-  if (record.lastDiscovery.nonProbeLayoutCount !== record.preNonProbeLayoutCount
-    || record.lastDiscovery.nonProbeInventorySha256 !== record.preNonProbeInventorySha256) {
+  const nonProbeInventoryStable = record.lastDiscovery.nonProbeLayoutCount === record.preNonProbeLayoutCount
+    && record.lastDiscovery.nonProbeInventorySha256 === record.preNonProbeInventorySha256;
+  const priorTargetConflictMatchesMarker = record.stage === 'CONFLICT'
+    && priorDiscovery?.outcome === 'PROFILE_TARGET_COUNT_CHANGED'
+    && priorDiscovery.targetCount === record.preTargetCount + 1
+    && priorDiscovery.blankTargetCount === record.preBlankTargetCount
+    && priorDiscovery.nonProbeLayoutCount === record.preNonProbeLayoutCount
+    && priorDiscovery.nonProbeInventorySha256 === record.preNonProbeInventorySha256
+    && priorDiscovery.matchCount === 1
+    && priorDiscovery.matchLayoutIds?.length === 1
+    && matches.length === 1
+    && priorDiscovery.matchLayoutIds[0] === matches[0].layoutId;
+  const recoverPriorTargetConflict = priorTargetConflictMatchesMarker
+    && firstEffectTargetState(record, record.lastDiscovery);
+
+  if (!nonProbeInventoryStable) {
     record.stage = 'CONFLICT';
     outcome = 'NON_PROBE_INVENTORY_CHANGED';
-  } else if (record.lastDiscovery.targetCount !== record.preTargetCount
-    || record.lastDiscovery.blankTargetCount !== record.preBlankTargetCount) {
-    record.stage = 'CONFLICT';
-    outcome = 'PROFILE_TARGET_COUNT_CHANGED';
   } else if (record.stage === 'PREPARED') {
-    if (matches.length === 0 && record.lastDiscovery.nonProbeLayoutCount === record.preNonProbeLayoutCount
-      && record.lastDiscovery.nonProbeInventorySha256 === record.preNonProbeInventorySha256) {
+    if (!baselineTargetState(record, record.lastDiscovery)) {
+      outcome = 'PROFILE_TARGET_COUNT_CHANGED';
+      record.stage = 'CONFLICT';
+    } else if (matches.length === 0) {
       outcome = 'PREPARED_NO_REMOTE_EFFECT';
       createAllowed = true;
     } else {
@@ -181,24 +211,43 @@ export async function recordProbeDiscovery(path, inventory) {
       record.stage = 'CONFLICT';
     }
   } else if (record.stage === 'CREATE_ARMED' || record.stage === 'FIRST_OUTCOME_UNKNOWN') {
-    if (matches.length === 1) {
+    if (matches.length === 1 && firstEffectTargetState(record, record.lastDiscovery)) {
       record.firstSavedChartId = requireText(matches[0].layoutId, 'first saved chart ID');
+      record.firstCreateProviderCommit = record.providerCommit;
+      record.firstCreateProviderManifestSha256 = record.providerManifestSha256;
+      record.firstTargetCount = record.lastDiscovery.targetCount;
+      record.firstProbeMarkerTargetCount = record.lastDiscovery.probeMarkerTargetCount;
       record.stage = 'FIRST_CONFIRMED';
       outcome = 'FIRST_CREATE_CONFIRMED';
     } else if (matches.length === 0) {
-      record.stage = 'FIRST_OUTCOME_UNKNOWN';
-      outcome = 'FIRST_CREATE_STILL_AMBIGUOUS';
+      if (baselineTargetState(record, record.lastDiscovery)) {
+        record.stage = 'FIRST_OUTCOME_UNKNOWN';
+        outcome = 'FIRST_CREATE_STILL_AMBIGUOUS';
+      } else {
+        record.stage = 'CONFLICT';
+        outcome = 'PROFILE_TARGET_COUNT_CHANGED';
+      }
     } else {
       record.stage = 'CONFLICT';
-      outcome = 'MULTIPLE_PROBE_LAYOUTS';
+      outcome = matches.length > 1 ? 'MULTIPLE_PROBE_LAYOUTS' : 'PROFILE_TARGET_COUNT_CHANGED';
     }
+  } else if (recoverPriorTargetConflict) {
+    record.firstSavedChartId = requireText(matches[0].layoutId, 'first saved chart ID');
+    record.firstCreateProviderCommit = record.providerCommit;
+    record.firstCreateProviderManifestSha256 = record.providerManifestSha256;
+    record.firstTargetCount = record.lastDiscovery.targetCount;
+    record.firstProbeMarkerTargetCount = record.lastDiscovery.probeMarkerTargetCount;
+    record.stage = 'FIRST_CONFIRMED';
+    outcome = 'FIRST_CREATE_CONFIRMED_AFTER_TARGET_RECONCILIATION';
   } else if (record.stage === 'FIRST_CONFIRMED') {
-    if (matches.length === 1 && matches[0].layoutId === record.firstSavedChartId) {
+    if (matches.length === 1 && matches[0].layoutId === record.firstSavedChartId
+      && firstConfirmationTargetState(record, record.lastDiscovery)) {
       outcome = 'FIRST_CREATE_STILL_CONFIRMED';
-      createAllowed = record.lastDiscovery.targetCount === record.preTargetCount;
+      createAllowed = true;
     } else {
       record.stage = 'CONFLICT';
-      outcome = 'FIRST_AUTHORITY_CHANGED';
+      outcome = matches.length === 1 && matches[0].layoutId === record.firstSavedChartId
+        ? 'PROFILE_TARGET_COUNT_CHANGED' : 'FIRST_AUTHORITY_CHANGED';
     }
   } else if (record.stage === 'SECOND_CREATE_ARMED' || record.stage === 'SECOND_OUTCOME_UNKNOWN') {
     if (matches.length === 2 && new Set(matchIds).size === 2) {
@@ -211,23 +260,61 @@ export async function recordProbeDiscovery(path, inventory) {
         || (record.providerResponse.action === 'duplicate_rejected'
           && record.providerResponse.failureCode === 'SAVED_CHART_NAME_DUPLICATE_REJECTED'))
       && record.providerResponse.temporaryTargetClosed === true
-      && record.lastDiscovery.targetCount === record.preTargetCount
-      && record.lastDiscovery.blankTargetCount === record.preBlankTargetCount) {
+      && firstConfirmationTargetState(record, record.lastDiscovery)) {
       record.stage = 'CANDIDATE_UNIQUE';
       outcome = record.providerResponse.action === 'duplicate_rejected'
         ? 'EXPLICIT_DUPLICATE_REJECTION' : 'ONE_LAYOUT_AFTER_SECOND_CLICK';
     } else {
-      record.stage = 'SECOND_OUTCOME_UNKNOWN';
-      outcome = 'SECOND_CREATE_STILL_AMBIGUOUS';
+      if (secondEffectTargetState(record, record.lastDiscovery)) {
+        record.stage = 'SECOND_OUTCOME_UNKNOWN';
+        outcome = 'SECOND_CREATE_STILL_AMBIGUOUS';
+      } else {
+        record.stage = 'CONFLICT';
+        outcome = 'PROFILE_TARGET_COUNT_CHANGED';
+      }
     }
+  } else if (record.stage === 'CONFLICT') {
+    outcome = priorDiscovery?.outcome || 'CONFLICT';
   } else {
     outcome = record.stage;
   }
 
   record.lastDiscovery.outcome = outcome;
   if (record.stage !== previousStage) appendEvent(record, record.stage);
-  if (record.stage !== previousStage) await replaceRecord(path, record);
+  await replaceRecord(path, record);
   return { record, outcome, createAllowed };
+}
+
+function baselineTargetState(record, discovery) {
+  return discovery.targetCount === record.preTargetCount
+    && discovery.blankTargetCount === record.preBlankTargetCount
+    && discovery.probeMarkerTargetCount === record.preProbeMarkerTargetCount;
+}
+
+function firstEffectTargetState(record, discovery) {
+  const targetDelta = discovery.targetCount - record.preTargetCount;
+  const markerTargetDelta = discovery.probeMarkerTargetCount - record.preProbeMarkerTargetCount;
+  return discovery.blankTargetCount === record.preBlankTargetCount
+    && (targetDelta === 0 || targetDelta === 1)
+    && markerTargetDelta === targetDelta;
+}
+
+function firstConfirmationTargetState(record, discovery) {
+  return Number.isSafeInteger(record.firstTargetCount)
+    && Number.isSafeInteger(record.firstProbeMarkerTargetCount)
+    && discovery.targetCount === record.firstTargetCount
+    && discovery.probeMarkerTargetCount === record.firstProbeMarkerTargetCount
+    && discovery.blankTargetCount === record.preBlankTargetCount;
+}
+
+function secondEffectTargetState(record, discovery) {
+  if (!Number.isSafeInteger(record.firstTargetCount)
+    || !Number.isSafeInteger(record.firstProbeMarkerTargetCount)) return false;
+  const targetDelta = discovery.targetCount - record.firstTargetCount;
+  const markerTargetDelta = discovery.probeMarkerTargetCount - record.firstProbeMarkerTargetCount;
+  return discovery.blankTargetCount === record.preBlankTargetCount
+    && (targetDelta === 0 || targetDelta === 1)
+    && markerTargetDelta === targetDelta;
 }
 
 async function claimProbeAttempt(path, attempt) {
@@ -291,6 +378,10 @@ function snapshotDiscovery(discovery) {
     probePrefixNames: validateProbeNames(discovery.probePrefixNames),
     matchCount: requireCount(discovery.matchCount, 'discovery marker count'),
     matchLayoutIds: validateIds(discovery.matchLayoutIds),
+    ...(discovery.providerCommit === undefined ? {} : {
+      providerCommit: requireCommit(discovery.providerCommit),
+      providerManifestSha256: requireHash(discovery.providerManifestSha256, 'provider manifest hash'),
+    }),
   };
 }
 
@@ -310,6 +401,16 @@ function validateRecord(record) {
     || !Number.isSafeInteger(record.preInventoryCount) || record.preInventoryCount < 0
     || !Number.isSafeInteger(record.preTargetCount) || record.preTargetCount < 0
     || !Number.isSafeInteger(record.preBlankTargetCount) || record.preBlankTargetCount < 0
+    || (record.preProbeMarkerTargetCount !== undefined
+      && (!Number.isSafeInteger(record.preProbeMarkerTargetCount) || record.preProbeMarkerTargetCount < 0))
+    || (record.firstTargetCount !== undefined
+      && (!Number.isSafeInteger(record.firstTargetCount) || record.firstTargetCount < 0))
+    || (record.firstProbeMarkerTargetCount !== undefined
+      && (!Number.isSafeInteger(record.firstProbeMarkerTargetCount) || record.firstProbeMarkerTargetCount < 0))
+    || (record.firstCreateProviderCommit !== undefined
+      && !COMMIT.test(String(record.firstCreateProviderCommit)))
+    || (record.firstCreateProviderManifestSha256 !== undefined
+      && !HASH.test(String(record.firstCreateProviderManifestSha256)))
     || !Number.isSafeInteger(record.preNonProbeLayoutCount) || record.preNonProbeLayoutCount < 0
     || !Array.isArray(record.events)) {
     throw new Error('PROBE_JOURNAL_INVALID');

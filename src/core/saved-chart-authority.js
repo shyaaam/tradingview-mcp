@@ -223,6 +223,8 @@ export async function inspectSavedChartIdempotencyProbe(profileName, dependencie
       blankTargetCount: Number.isSafeInteger(inventory.blankPageTargetCount)
         ? inventory.blankPageTargetCount : 0,
       chartTargetCount: inventory.targets.length,
+      probeMarkerTargetCount: Number.isSafeInteger(inventory.probeMarkerTargetCount)
+        ? inventory.probeMarkerTargetCount : 0,
       inventorySha256: createHash('sha256').update(stableJson(inventory.layouts), 'utf8').digest('hex'),
       nonProbeLayoutCount: nonProbeLayouts.length,
       nonProbeInventorySha256: createHash('sha256').update(stableJson(nonProbeLayouts), 'utf8').digest('hex'),
@@ -559,6 +561,7 @@ async function readProfileInventory(profileName, dependencies) {
   let canonicalLayouts = null;
   let accountSubjectSha256 = null;
   let firstPage = null;
+  let probeMarkerTargetCount = 0;
   for (const target of chartTargets) {
     const page = temporaryTarget?.target.id === target.id
       ? temporaryTarget.page
@@ -571,6 +574,12 @@ async function readProfileInventory(profileName, dependencies) {
         throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
       }
       const layouts = normalizeLayouts(probe.layouts);
+      if (hasExactMarkerTargetTitle(target, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER)
+        && exactMarkerMatches(layouts, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER).length === 1
+        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
+        && chartTargetRouteId(target) === probe.chart_uid) {
+        probeMarkerTargetCount += 1;
+      }
       if (accountSubjectSha256 !== null && accountSubjectSha256 !== probe.account_subject_sha256) {
         throw new Error('PROFILE_TABS_HAVE_DIFFERENT_ACCOUNT_IDENTITIES');
       }
@@ -611,6 +620,7 @@ async function readProfileInventory(profileName, dependencies) {
     targets: chartTargets,
     profilePageTargetCount,
     blankPageTargetCount,
+    probeMarkerTargetCount,
     temporaryTargetCreated: temporaryTarget !== null,
     page: firstPage,
     layouts: canonicalLayouts,
@@ -850,11 +860,15 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   let saved = false;
   let duplicateRejected = false;
   let chartId = null;
+  let createdMarkerTargetId = null;
   let temporaryTargetClosed = true;
+  let originalPageTargetIds = null;
   let operationError = null;
   try {
+    originalPageTargetIds = pageTargetIdSet(await listTargets(profile.cdpUrl, dependencies));
     const created = await browser.Target.createTarget({ url: 'about:blank' });
     targetId = requireText(created?.targetId, 'created target id');
+    if (originalPageTargetIds.has(targetId)) throw new Error('NEW_LAYOUT_TARGET_ID_ALREADY_EXISTS');
     const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
     if (!target || target.type !== 'page' || target.url !== 'about:blank'
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
@@ -911,12 +925,28 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     }
     if (!filledForm.createButtonEnabled) throw new Error('CREATE_LAYOUT_BUTTON_NOT_READY');
     const createCoords = filledForm.createCoords;
+    const beforeClickTargetIds = pageTargetIdSet(await listTargets(profile.cdpUrl, dependencies));
+    const expectedBeforeClickIds = new Set([...originalPageTargetIds, targetId]);
+    if (!sameStringSet(beforeClickTargetIds, expectedBeforeClickIds)) {
+      throw new Error('PROFILE_TARGET_SET_CHANGED_BEFORE_CREATE_CLICK');
+    }
     await onCreateAttempt?.();
     await clickAt(page, createCoords, dependencies);
     await dependencies.afterCreateClick?.({ marker });
     let createdProbe;
     try {
-      createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
+      const result = await waitForCreatedMarkerPageProbe({
+        page,
+        cdpUrl: profile.cdpUrl,
+        originalPageTargetIds,
+        temporaryTargetId: targetId,
+        marker,
+        expectedAccountHash: priorInventory.accountSubjectSha256,
+        sourceChartId,
+        dependencies,
+        onOwnedTarget: (ownedTargetId) => { createdMarkerTargetId = ownedTargetId; },
+      });
+      createdProbe = result.probe;
     } catch (error) {
       if (allowSameNameProbe && error?.message === 'SAVED_CHART_NAME_DUPLICATE_REJECTED') duplicateRejected = true;
       else throw error;
@@ -942,6 +972,16 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   } catch (error) {
     operationError = error;
   } finally {
+    if (createdMarkerTargetId) {
+      try { await browser.Target.closeTarget({ targetId: createdMarkerTargetId }); } catch { /* verify exact close below */ }
+      try {
+        if (!(await waitForTargetClosed(profile.cdpUrl, createdMarkerTargetId, dependencies))) {
+          temporaryTargetClosed = false;
+        }
+      } catch {
+        temporaryTargetClosed = false;
+      }
+    }
     if (page) await closePage(page);
     if (targetId) {
       try {
@@ -950,7 +990,16 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
         // The bounded target-list read below is authoritative if the close response is lost.
       }
       try {
-        temporaryTargetClosed = await waitForTargetClosed(profile.cdpUrl, targetId, dependencies);
+        if (!(await waitForTargetClosed(profile.cdpUrl, targetId, dependencies))) temporaryTargetClosed = false;
+      } catch {
+        temporaryTargetClosed = false;
+      }
+    }
+    if (originalPageTargetIds !== null) {
+      try {
+        if (!sameStringSet(pageTargetIdSet(await listTargets(profile.cdpUrl, dependencies)), originalPageTargetIds)) {
+          temporaryTargetClosed = false;
+        }
       } catch {
         temporaryTargetClosed = false;
       }
@@ -1089,21 +1138,8 @@ async function waitForAccountProbe(page, dependencies) {
 async function waitForMarkerPageProbe(page, marker, expectedAccountHash, dependencies) {
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
-      if (dependencies.allowSameNameIdempotencyProbe === true) {
-        const messages = await evaluate(page, DUPLICATE_LAYOUT_ALERT_PROBE(marker));
-        if (isExplicitSavedChartDuplicateRejection(messages, marker)) {
-          throw new Error('SAVED_CHART_NAME_DUPLICATE_REJECTED');
-        }
-      }
-      if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
-        throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION');
-      }
-      if (probe?.authenticated === true && Array.isArray(probe.layouts)
-        && probe.layouts.filter((layout) => layout.name === marker).length === 1
-        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)) {
-        return { ...probe, layouts: normalizeLayouts(probe.layouts) };
-      }
+      const probe = await readMarkerPageProbe(page, marker, expectedAccountHash, dependencies);
+      if (probe !== null) return probe;
     } catch (error) {
       if (['ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION', 'SAVED_CHART_NAME_DUPLICATE_REJECTED']
         .includes(error.message)) throw error;
@@ -1113,10 +1149,115 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
   throw new Error('SAVED_CHART_CREATE_OR_DISCOVERY_NOT_CONFIRMED');
 }
 
+async function readMarkerPageProbe(page, marker, expectedAccountHash, dependencies) {
+  const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+  if (dependencies.allowSameNameIdempotencyProbe === true) {
+    const messages = await evaluate(page, DUPLICATE_LAYOUT_ALERT_PROBE(marker));
+    if (isExplicitSavedChartDuplicateRejection(messages, marker)) {
+      throw new Error('SAVED_CHART_NAME_DUPLICATE_REJECTED');
+    }
+  }
+  if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+    throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION');
+  }
+  if (probe?.authenticated === true && Array.isArray(probe.layouts)
+    && probe.layouts.filter((layout) => layout.name === marker).length === 1
+    && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)) {
+    return { ...probe, layouts: normalizeLayouts(probe.layouts) };
+  }
+  return null;
+}
+
+async function waitForCreatedMarkerPageProbe({
+  page,
+  cdpUrl,
+  originalPageTargetIds,
+  temporaryTargetId,
+  marker,
+  expectedAccountHash,
+  sourceChartId,
+  dependencies,
+  onOwnedTarget,
+}) {
+  let sourceRouteStillActive = false;
+  let createdRouteNotProven = false;
+  for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      const originalProbe = await readMarkerPageProbe(page, marker, expectedAccountHash, dependencies);
+      if (originalProbe !== null) {
+        if (sourceChartId === null || originalProbe.chart_uid !== sourceChartId) {
+          return { probe: originalProbe };
+        }
+        sourceRouteStillActive = true;
+      }
+    } catch (error) {
+      if (['ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION', 'SAVED_CHART_NAME_DUPLICATE_REJECTED']
+        .includes(error.message)) throw error;
+    }
+
+    const targets = await listTargets(cdpUrl, dependencies);
+    const createdPages = targets.filter((target) => target?.type === 'page'
+      && typeof target.id === 'string' && target.id !== temporaryTargetId
+      && !originalPageTargetIds.has(target.id)
+      && hasExactMarkerTargetTitle(target, marker)
+      && isTradingViewChartTarget(target));
+    const owned = [];
+    for (const target of createdPages) {
+      let createdPage;
+      try {
+        createdPage = await connectTarget(target, dependencies);
+        await enablePage(createdPage);
+        const probe = await evaluate(createdPage, ACCOUNT_LAYOUT_PROBE);
+        if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+          throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION');
+        }
+        if (probe?.authenticated === true && Array.isArray(probe.layouts)) {
+          const layouts = normalizeLayouts(probe.layouts);
+          const markerCount = layouts.filter((layout) => layout.name === marker).length;
+          if (markerCount > 0) owned.push({ target, probe: { ...probe, layouts }, markerCount });
+        }
+      } catch (error) {
+        if (error?.message === 'ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION') throw error;
+      } finally {
+        if (createdPage) await closePage(createdPage);
+      }
+    }
+    if (owned.length > 1) throw new Error('MULTIPLE_CREATED_MARKER_TARGETS');
+    if (owned.length === 1) {
+      const candidate = owned[0];
+      onOwnedTarget(candidate.target.id);
+      if (candidate.markerCount !== 1) throw new Error('CREATED_LAYOUT_MARKER_NOT_UNIQUE');
+      if (typeof candidate.probe.chart_uid === 'string' && CHART_UID.test(candidate.probe.chart_uid)) {
+        if (chartTargetRouteId(candidate.target) !== candidate.probe.chart_uid) {
+          createdRouteNotProven = true;
+        } else if (sourceChartId === null || candidate.probe.chart_uid !== sourceChartId) {
+          return { probe: candidate.probe, targetId: candidate.target.id };
+        } else {
+          sourceRouteStillActive = true;
+        }
+      }
+    }
+    await sleep(dependencies, PAGE_POLL_MS);
+  }
+  throw new Error(sourceRouteStillActive || createdRouteNotProven
+    ? 'NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN' : 'SAVED_CHART_CREATE_OR_DISCOVERY_NOT_CONFIRMED');
+}
+
 async function listTargets(cdpUrl, dependencies) {
   const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies);
   if (!Array.isArray(targets)) throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
   return targets;
+}
+
+function pageTargetIdSet(targets) {
+  const ids = targets.filter((target) => target?.type === 'page')
+    .map((target) => requireText(target.id, 'profile page target ID'));
+  if (new Set(ids).size !== ids.length) throw new Error('PROFILE_PAGE_TARGET_IDS_DUPLICATED');
+  return new Set(ids);
+}
+
+function sameStringSet(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
 async function waitForTarget(cdpUrl, targetId, dependencies) {
@@ -1179,6 +1320,21 @@ function isTradingViewChartTarget(target) {
       && (url.pathname === '/chart/' || /^\/chart\/[A-Za-z0-9_-]+\/?$/u.test(url.pathname));
   } catch {
     return false;
+  }
+}
+
+function hasExactMarkerTargetTitle(target, marker) {
+  const title = typeof target?.title === 'string' ? target.title : '';
+  return title === marker || title.startsWith(`${marker} -`);
+}
+
+function chartTargetRouteId(target) {
+  try {
+    const url = new URL(String(target?.url || ''));
+    if (url.origin !== 'https://www.tradingview.com') return null;
+    return url.pathname.match(/^\/chart\/([A-Za-z0-9_-]{1,160})\/?$/u)?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

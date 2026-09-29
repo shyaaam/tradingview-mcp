@@ -48,6 +48,67 @@ test('read-only acceptance inventory returns marker-prefix evidence without runt
   assert.equal(state.closeCount(), 1);
 });
 
+test('read-only acceptance inventory exposes only verified exact-marker target count', async () => {
+  const state = inventory([{ layoutId: 'saved-one', name: MARKER }]);
+  state.probeMarkerTargetCount = 1;
+  const result = await inspectSavedChartIdempotencyProbe(PROFILE, {
+    readProfileInventory: async () => state,
+  });
+  assert.equal(result.probeMarkerTargetCount, 1);
+  assert.equal('targetIds' in result, false);
+  assert.equal('profileId' in result, false);
+  assert.equal(state.closeCount(), 1);
+});
+
+test('default read-only inventory counts only the exact-marker current-account chart target', async () => {
+  const profileId = 'ephemeral-manager-id';
+  const cdpUrl = `http://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = `ws://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
+  const targets = [
+    {
+      id: 'ordinary-chart', type: 'page', url: 'https://www.tradingview.com/chart/ordinary-route/',
+      title: 'Ordinary chart - TradingView', webSocketDebuggerUrl: `${cdpUrl}/devtools/page/ordinary-chart`,
+    },
+    {
+      id: 'marker-chart', type: 'page', url: 'https://www.tradingview.com/chart/probe-route/',
+      title: `${MARKER} - TradingView`, webSocketDebuggerUrl: `${cdpUrl}/devtools/page/marker-chart`,
+    },
+  ];
+  let pageCloseCount = 0;
+  const result = await inspectSavedChartIdempotencyProbe(PROFILE, {
+    managerBaseUrl: 'http://manager.test/api',
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/profiles')
+        ? [{ id: profileId, name: PROFILE, status: 'running', cdp_url: cdpUrl }]
+        : url.pathname.endsWith('/json/version')
+          ? { webSocketDebuggerUrl: browserWebSocketUrl }
+          : targets;
+      return { ok: true, json: async () => body };
+    },
+    connectTarget: async () => ({
+      Runtime: {
+        enable: async () => {},
+        evaluate: async () => ({ result: { value: {
+          authenticated: true,
+          account_subject_sha256: ACCOUNT_HASH,
+          layouts: [{ layout_id: 'probe-layout-id', name: MARKER }],
+          chart_uid: 'probe-route',
+        } } }),
+      },
+      Page: { enable: async () => {} },
+      close: async () => { pageCloseCount += 1; },
+    }),
+  });
+
+  assert.equal(result.targetCount, 2);
+  assert.equal(result.chartTargetCount, 2);
+  assert.equal(result.probeMarkerCount, 1);
+  assert.equal(result.probeMarkerTargetCount, 1);
+  assert.equal('targetIds' in result, false);
+  assert.equal(pageCloseCount, 2);
+});
+
 test('normal authority discovery can be given only the exact fixed acceptance marker through private dependencies', async () => {
   const result = await ensureSavedChartAuthority({
     profileName: PROFILE,
@@ -95,6 +156,163 @@ test('acceptance create arms durable intent before click callback and allows onl
     'provider-click',
     `clicked:${MARKER}`,
   ]);
+});
+
+async function runSeparateMarkerTargetCreate({ markerTargetCount = 1, failMarkerTargetClose = false } = {}) {
+  const profileId = 'ephemeral-manager-id';
+  const cdpUrl = `http://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = `ws://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
+  const baselineTarget = {
+    id: 'pre-existing-chart-target',
+    type: 'page',
+    url: 'https://www.tradingview.com/chart/existing-route/',
+    title: 'Existing chart',
+    webSocketDebuggerUrl: `${cdpUrl}/devtools/page/pre-existing-chart-target`,
+  };
+  const targets = [baselineTarget];
+  const closedTargetIds = [];
+  let temporaryTargetId = null;
+  let temporaryPageUrl = 'about:blank';
+  let markerTyped = false;
+  let markerCreated = false;
+  let result = null;
+  let error = null;
+
+  const targetPage = (kind, chartUid = 'source-route-uid') => ({
+    Runtime: {
+      enable: async () => {},
+      evaluate: async ({ expression }) => {
+        if (expression.includes('getSavedCharts')) {
+          return { result: { value: {
+            authenticated: true,
+            account_subject_sha256: ACCOUNT_HASH,
+            layouts: kind === 'marker' || markerCreated ? [{ layout_id: 'probe-layout-id', name: MARKER }] : [],
+            chart_uid: chartUid,
+          } } };
+        }
+        if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) {
+          return { result: { value: {
+            rootKind: 'dialog', inputCount: 1, inputMaxLength: -1,
+            inputCoords: { x: 1, y: 1 }, createButtonCount: 1,
+            createCoords: { x: 2, y: 2 }, inputValue: markerTyped ? MARKER : '',
+            createButtonEnabled: true,
+          } } };
+        }
+        if (expression.includes('location.href')) return { result: { value: { url: temporaryPageUrl } } };
+        return { result: { value: { x: 10, y: 10 } } };
+      },
+    },
+    Page: {
+      enable: async () => {},
+      navigate: async ({ url }) => {
+        temporaryPageUrl = url;
+        const target = targets.find((entry) => entry.id === temporaryTargetId);
+        if (target) target.url = url;
+        return {};
+      },
+    },
+    Input: { insertText: async () => {}, dispatchMouseEvent: async () => {} },
+    close: async () => {},
+  });
+
+  await createSavedChartIdempotencyProbe({
+    profileName: PROFILE,
+    marker: MARKER,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    expectedProfilePageTargetCount: 1,
+    expectedBlankPageTargetCount: 0,
+    allowExistingMarker: false,
+  }, {
+    managerBaseUrl: 'http://manager.test/api',
+    readProfileInventory: async () => inventory([]),
+    fetch: async (value) => {
+      const url = String(value);
+      const body = url.endsWith('/profiles')
+        ? [{ id: profileId, name: PROFILE, status: 'running', cdp_url: cdpUrl }]
+        : url.endsWith('/json/version')
+          ? { webSocketDebuggerUrl: browserWebSocketUrl }
+          : targets;
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => ({
+      Target: {
+        createTarget: async ({ url }) => {
+          temporaryTargetId = 'provider-temporary-target';
+          targets.push({ id: temporaryTargetId, type: 'page', url,
+            webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${temporaryTargetId}` });
+          return { targetId: temporaryTargetId };
+        },
+        closeTarget: async ({ targetId }) => {
+          closedTargetIds.push(targetId);
+          if (failMarkerTargetClose && targetId.startsWith('marker-created-target-')) {
+            return { success: false };
+          }
+          const index = targets.findIndex((entry) => entry.id === targetId);
+          if (index >= 0) targets.splice(index, 1);
+          return { success: index >= 0 };
+        },
+      },
+      close: async () => {},
+    }),
+    connectTarget: async (webSocketDebuggerUrl) => {
+      const target = targets.find((entry) => entry.webSocketDebuggerUrl === webSocketDebuggerUrl);
+      const routeId = target?.url.match(/^https:\/\/www\.tradingview\.com\/chart\/([A-Za-z0-9_-]+)\/?$/u)?.[1];
+      return target?.id.startsWith('marker-created-target-')
+        ? targetPage('marker', routeId) : targetPage('temporary');
+    },
+    insertText: async (text) => { assert.equal(text, MARKER); markerTyped = true; },
+    dispatchMouseEvent: async (event) => {
+      if (event.type === 'mouseReleased' && event.x === 2 && markerTyped && !markerCreated) {
+        markerCreated = true;
+        for (let index = 1; index <= markerTargetCount; index += 1) {
+          const id = `marker-created-target-${index}`;
+          targets.push({
+            id,
+            type: 'page',
+            url: `https://www.tradingview.com/chart/probe-route-uid-${index}/`,
+            title: `${MARKER} - TradingView`,
+            webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${id}`,
+          });
+        }
+      }
+    },
+    sleep: async () => {},
+    beforeCreateAttempt: async () => {},
+    afterCreateClick: async () => {},
+  }).then((value) => { result = value; }, (cause) => { error = cause; });
+
+  return { result, error, targets, closedTargetIds };
+}
+
+test('saved-chart create adopts and closes a separate exact-marker page opened by Create', async () => {
+  const { result, error, targets, closedTargetIds } = await runSeparateMarkerTargetCreate();
+  assert.equal(error, null);
+  assert.equal(result.chartId, 'probe-route-uid-1');
+  assert.equal(result.temporaryTargetClosed, true);
+  assert.deepEqual(closedTargetIds.sort(), ['marker-created-target-1', 'provider-temporary-target']);
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].id, 'pre-existing-chart-target');
+  assert.equal(JSON.stringify(result).includes('marker-created-target'), false);
+});
+
+test('saved-chart create fails closed and closes neither when multiple new exact-marker pages appear', async () => {
+  const { result, error, targets, closedTargetIds } = await runSeparateMarkerTargetCreate({ markerTargetCount: 2 });
+  assert.equal(result, null);
+  assert.equal(error.message, 'MULTIPLE_CREATED_MARKER_TARGETS');
+  assert.equal(error.temporaryTargetClosed, false);
+  assert.deepEqual(closedTargetIds, ['provider-temporary-target']);
+  assert.equal(targets.length, 3);
+  assert.equal(targets[0].id, 'pre-existing-chart-target');
+});
+
+test('saved-chart create reports separate marker-page close uncertainty', async () => {
+  const { result, error, targets, closedTargetIds } = await runSeparateMarkerTargetCreate({ failMarkerTargetClose: true });
+  assert.equal(error, null);
+  assert.equal(result.chartId, 'probe-route-uid-1');
+  assert.equal(result.temporaryTargetClosed, false);
+  assert.deepEqual(closedTargetIds, ['marker-created-target-1', 'provider-temporary-target']);
+  assert.equal(targets.length, 2);
+  assert.equal(targets[0].id, 'pre-existing-chart-target');
 });
 
 test('same-name probe create requires exactly one existing marker and never accepts multiple matches', async () => {

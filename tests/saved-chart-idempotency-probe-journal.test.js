@@ -17,6 +17,10 @@ import {
   recordProbeResponse,
   recoveryAction,
 } from '../scripts/saved-chart-idempotency-probe-journal.mjs';
+import {
+  assertProviderIdentity,
+  reconcileProbeDiscovery,
+} from '../scripts/saved-chart-idempotency-probe.mjs';
 
 const INPUT = {
   providerCommit: 'a'.repeat(40),
@@ -27,6 +31,7 @@ const INPUT = {
   preInventorySha256: createHash('sha256').update('[]', 'utf8').digest('hex'),
   preTargetCount: 1,
   preBlankTargetCount: 0,
+  preProbeMarkerTargetCount: 0,
   preNonProbeLayoutCount: 0,
   preNonProbeInventorySha256: createHash('sha256').update('[]', 'utf8').digest('hex'),
   preExistingProbeNames: [],
@@ -61,16 +66,18 @@ async function withJournal(run) {
   try { await run(path); } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-function discovered(layouts, inventorySha256 = INPUT.preInventorySha256) {
+function discovered(layouts, inventorySha256 = INPUT.preInventorySha256, overrides = {}) {
   return {
     accountSubjectSha256: INPUT.accountSubjectSha256,
     inventorySha256,
     targetCount: INPUT.preTargetCount,
     blankTargetCount: INPUT.preBlankTargetCount,
+    probeMarkerTargetCount: 0,
     nonProbeLayoutCount: 0,
     nonProbeInventorySha256: INPUT.preNonProbeInventorySha256,
     probePrefixNames: layouts.filter(([, name]) => name.startsWith('V5_IDEMPOTENCY_PROBE_')).map(([, name]) => name),
     layouts: layouts.map(([layoutId, name]) => ({ layoutId, name })),
+    ...overrides,
   };
 }
 
@@ -161,6 +168,75 @@ test('crash after provider response but before local result journaling still dis
   });
 });
 
+test('fresh exact-marker target readback recovers prior target-count conflict without new create', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    const armed = await runChild(path, `await armProbeCreate(journalPath, 1); await markProbeClickDispatched(journalPath, 1);`);
+    assert.equal(armed.code, 0);
+
+    const oldDiagnostic = await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1 },
+    ));
+    assert.equal(oldDiagnostic.outcome, 'PROFILE_TARGET_COUNT_CHANGED');
+    assert.equal(oldDiagnostic.record.stage, 'CONFLICT');
+
+    const reopened = await readProbeJournal(path);
+    assert.deepEqual(recoveryAction(reopened), {
+      action: 'DISCOVER', marker: PROBE_MARKER, stage: 'CONFLICT',
+    });
+    const reconciled = await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1, probeMarkerTargetCount: 1 },
+    ));
+    assert.equal(reconciled.outcome, 'FIRST_CREATE_CONFIRMED_AFTER_TARGET_RECONCILIATION');
+    assert.equal(reconciled.record.stage, 'FIRST_CONFIRMED');
+    assert.equal(reconciled.record.firstSavedChartId, 'saved-id-1');
+    assert.equal(reconciled.record.firstTargetCount, INPUT.preTargetCount + 1);
+    assert.equal(reconciled.record.firstProbeMarkerTargetCount, 1);
+    assert.equal(reconciled.createAllowed, false);
+
+    const stable = await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1, probeMarkerTargetCount: 1 },
+    ));
+    assert.equal(stable.outcome, 'FIRST_CREATE_STILL_CONFIRMED');
+    assert.equal(stable.createAllowed, true);
+  });
+});
+
+test('prior target-count conflict does not recover when marker page count or layout ID disagrees', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    const armed = await runChild(path, `await armProbeCreate(journalPath, 1); await markProbeClickDispatched(journalPath, 1);`);
+    assert.equal(armed.code, 0);
+    await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1 },
+    ));
+
+    const noMatchingPage = await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1, probeMarkerTargetCount: 0 },
+    ));
+    assert.equal(noMatchingPage.record.stage, 'CONFLICT');
+    assert.equal(noMatchingPage.createAllowed, false);
+
+    const changedLayout = await recordProbeDiscovery(path, discovered(
+      [['different-saved-id', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount + 1, probeMarkerTargetCount: 1 },
+    ));
+    assert.equal(changedLayout.record.stage, 'CONFLICT');
+    assert.equal(changedLayout.createAllowed, false);
+  });
+});
+
 test('same-name second create is armed only after first identity is durably confirmed', async () => {
   await withJournal(async (path) => {
     await prepareProbeJournal(path, INPUT);
@@ -177,6 +253,32 @@ test('same-name second create is armed only after first identity is durably conf
     assert.equal(result.outcome, 'TWO_DISTINCT_LAYOUTS');
     assert.equal(result.record.stage, 'NOT_IDEMPOTENT');
     assert.deepEqual(result.record.lastDiscovery.matchLayoutIds, ['saved-id-1', 'saved-id-2']);
+  });
+});
+
+test('revised provider identity is recorded by discovery before it may run second create', async () => {
+  await withJournal(async (path) => {
+    const firstProvider = { providerCommit: 'a'.repeat(40), providerManifestSha256: 'b'.repeat(64) };
+    const secondProvider = { providerCommit: 'd'.repeat(40), providerManifestSha256: 'e'.repeat(64) };
+    await prepareProbeJournal(path, { ...INPUT, ...firstProvider });
+    const first = await runChild(path, `await armProbeCreate(journalPath, 1); await markProbeClickDispatched(journalPath, 1); await recordProbeResponse(journalPath, 1, { action: 'created', savedChartId: 'saved-id-1' });`);
+    assert.equal(first.code, 0);
+    await recordProbeDiscovery(path, discovered([['saved-id-1', PROBE_MARKER]]), firstProvider);
+
+    const freshDiscovery = await reconcileProbeDiscovery(path, discovered([['saved-id-1', PROBE_MARKER]]), secondProvider);
+    assert.equal(freshDiscovery.record.stage, 'FIRST_CONFIRMED');
+    assert.equal(freshDiscovery.record.lastDiscovery.providerCommit, secondProvider.providerCommit);
+    assert.doesNotThrow(() => assertProviderIdentity(freshDiscovery.record, firstProvider, 'create-first'));
+    assert.throws(() => assertProviderIdentity(freshDiscovery.record, secondProvider, 'create-first'),
+      /PROBE_PROVIDER_IDENTITY_CHANGED/u);
+    assert.doesNotThrow(() => assertProviderIdentity(freshDiscovery.record, secondProvider, 'create-second'));
+    assert.throws(() => assertProviderIdentity(freshDiscovery.record, firstProvider, 'create-second'),
+      /PROBE_PROVIDER_IDENTITY_CHANGED/u);
+    assert.doesNotThrow(() => assertProviderIdentity(freshDiscovery.record, secondProvider, 'discover'));
+
+    const armed = await armProbeCreate(path, 2, freshDiscovery.record.lastDiscovery);
+    assert.equal(armed.preSecondCreateDiscovery.providerCommit, secondProvider.providerCommit);
+    assert.equal(armed.preSecondCreateDiscovery.providerManifestSha256, secondProvider.providerManifestSha256);
   });
 });
 
