@@ -192,6 +192,9 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
       throw new Error('PROFILE_UUID_CHANGED_BEFORE_PREFLIGHT');
     }
   } catch (error) {
+    const cleanup = inventory === undefined
+      ? { failureCode: null }
+      : await closeMismatchedProfileInventory(inventory);
     return preflightResult(normalized, marker, {
       authenticated: false,
       accountSubjectSha256: null,
@@ -201,7 +204,7 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
       createFailureCode: null,
       createInputCount: null,
       createInputMaxLength: null,
-      failureCode: safeFailureCode(error),
+      failureCode: cleanup.failureCode ?? safeFailureCode(error),
     });
   }
 
@@ -242,10 +245,13 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       throw new Error('PROFILE_UUID_CHANGED_BEFORE_ENSURE');
     }
   } catch (error) {
+    const cleanup = inventory === undefined
+      ? { temporaryTargetClosed: temporaryTargetCloseEvidence(error), failureCode: null }
+      : await closeMismatchedProfileInventory(inventory);
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null, accountSubjectSha256: null,
-      mutationsPerformed: false, temporaryTargetClosed: temporaryTargetCloseEvidence(error),
-      failureCode: safeFailureCode(error),
+      mutationsPerformed: false, temporaryTargetClosed: cleanup.temporaryTargetClosed,
+      failureCode: cleanup.failureCode ?? safeFailureCode(error),
     });
   }
   await closeProfileInventory(inventory);
@@ -474,6 +480,7 @@ async function readProfileInventory(profileName, dependencies) {
   return {
     profile,
     targets: chartTargets,
+    temporaryTargetCreated: temporaryTarget !== null,
     page: firstPage,
     layouts: canonicalLayouts,
     accountSubjectSha256,
@@ -567,6 +574,19 @@ async function openTemporaryChartTarget(profile, dependencies, existingTargets) 
 async function closeProfileInventory(inventory) {
   if (typeof inventory.close === 'function') await inventory.close();
   else await closePage(inventory.page);
+}
+
+async function closeMismatchedProfileInventory(inventory) {
+  const temporaryTargetCreated = inventory.temporaryTargetCreated === true;
+  try {
+    await closeProfileInventory(inventory);
+    return { temporaryTargetClosed: true, failureCode: null };
+  } catch {
+    return {
+      temporaryTargetClosed: !temporaryTargetCreated,
+      failureCode: temporaryTargetCreated ? 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED' : null,
+    };
+  }
 }
 
 function normalizeLayouts(layouts) {

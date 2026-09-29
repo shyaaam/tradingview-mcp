@@ -497,14 +497,90 @@ test('form probe accepts only unique fields inside one bounded non-dialog contai
 });
 
 test('preflight refuses stale profile UUID before reporting create capability', async () => {
+  let inventoryCloseCount = 0;
   const result = await preflightSavedChartAuthority(INPUT, {
-    readProfileInventory: async () => ({ ...inventory([]), profile: { ...inventory([]).profile, profileId: 'replacement-id' } }),
+    readProfileInventory: async () => ({
+      ...inventory([]),
+      profile: { ...inventory([]).profile, profileId: 'replacement-id' },
+      temporaryTargetCreated: true,
+      close: async () => { inventoryCloseCount += 1; },
+    }),
     canCreateSavedLayout: async () => assert.fail('must not inspect create UI after UUID mismatch'),
   });
 
   assert.equal(result.authenticated, false);
   assert.equal(result.can_create, false);
   assert.equal(result.failure_code, 'PROFILE_UUID_CHANGED_BEFORE_PREFLIGHT');
+  assert.equal(inventoryCloseCount, 1);
+});
+
+test('ensure closes stale-profile inventory before returning without creating', async () => {
+  let inventoryCloseCount = 0;
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    readProfileInventory: async () => ({
+      ...inventory([]),
+      profile: { ...inventory([]).profile, profileId: 'replacement-id' },
+      temporaryTargetCreated: true,
+      close: async () => { inventoryCloseCount += 1; },
+    }),
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'unknown');
+  assert.equal(result.failure_code, 'PROFILE_UUID_CHANGED_BEFORE_ENSURE');
+  assert.equal(result.mutations_performed, false);
+  assert.equal(result.temporary_target_closed, true);
+  assert.equal(inventoryCloseCount, 1);
+  assert.equal(createCount, 0);
+});
+
+test('profile UUID mismatch reports failed temporary-target cleanup in both endpoints', async (t) => {
+  await t.test('preflight', async () => {
+    let closeCount = 0;
+    const result = await preflightSavedChartAuthority(INPUT, {
+      readProfileInventory: async () => ({
+        ...inventory([]),
+        profile: { ...inventory([]).profile, profileId: 'replacement-id' },
+        temporaryTargetCreated: true,
+        close: async () => { closeCount += 1; throw new Error('close unconfirmed'); },
+      }),
+      canCreateSavedLayout: async () => assert.fail('must not inspect create UI after UUID mismatch'),
+    });
+
+    assert.equal(result.can_create, false);
+    assert.equal(result.failure_code, 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED');
+    assert.equal(closeCount, 1);
+  });
+
+  await t.test('ensure', async () => {
+    let closeCount = 0;
+    let createCount = 0;
+    const result = await ensureSavedChartAuthority({
+      ...INPUT,
+      expectedAccountSubjectSha256: ACCOUNT_HASH,
+      createIfAbsent: true,
+    }, {
+      readProfileInventory: async () => ({
+        ...inventory([]),
+        profile: { ...inventory([]).profile, profileId: 'replacement-id' },
+        temporaryTargetCreated: true,
+        close: async () => { closeCount += 1; throw new Error('close unconfirmed'); },
+      }),
+      createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+    });
+
+    assert.equal(result.action, 'unknown');
+    assert.equal(result.failure_code, 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED');
+    assert.equal(result.mutations_performed, false);
+    assert.equal(result.temporary_target_closed, false);
+    assert.equal(closeCount, 1);
+    assert.equal(createCount, 0);
+  });
 });
 
 test('default profile inventory marks verified current-account tabs authenticated', async () => {
