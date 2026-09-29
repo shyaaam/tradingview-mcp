@@ -80,10 +80,11 @@ test('probe target ownership uses exact account and route/layout identity, not t
 
 function exactProbeCloseFixture({ accountHash = ACCOUNT_HASH, layoutId = '206102994', routeUid = 'NCJIp2ky',
   currentChartUid = routeUid,
-  duplicateProbe = false, closeEffect = true, closeAck = true } = {}) {
-  const profileId = 'ephemeral-profile-263';
-  const cdpUrl = `http://manager.test/api/profiles/${profileId}/cdp`;
-  const browserWebSocketUrl = cdpUrl.replace(/^http/u, 'ws');
+  duplicateProbe = false, closeEffect = true, closeAck = true,
+  afterIntent = null } = {}) {
+  let profileId = 'ephemeral-profile-263';
+  let cdpUrl = `http://manager.test/api/profiles/${profileId}/cdp`;
+  let browserWebSocketUrl = cdpUrl.replace(/^http/u, 'ws');
   const target = (id, uid, title) => ({
     id, type: 'page', url: `https://www.tradingview.com/chart/${uid}/`, title,
     webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${id}`,
@@ -151,7 +152,17 @@ function exactProbeCloseFixture({ accountHash = ACCOUNT_HASH, layoutId = '206102
       createWebSocket,
       connectTarget,
       sleep: async () => {},
-      beforeClose: async () => { calls.armed = true; },
+      beforeClose: async () => {
+        calls.armed = true;
+        afterIntent?.({
+          setTargets: (next) => { targets = next; },
+          setProfileGeneration: (nextId) => {
+            profileId = nextId;
+            cdpUrl = `http://manager.test/api/profiles/${profileId}/cdp`;
+            browserWebSocketUrl = cdpUrl.replace(/^http/u, 'ws');
+          },
+        });
+      },
     },
     getTargets: () => targets,
   };
@@ -183,6 +194,30 @@ test('exact probe close reconciles lost CDP response only after target disappear
   assert.deepEqual(fixture.getTargets().map(({ url }) => url), [
     'https://www.tradingview.com/chart/CWRnK7ji/',
   ]);
+});
+
+test('exact probe close revalidates profile and target after durable intent before CDP mutation', async (t) => {
+  const cases = [
+    ['target changed during intent callback', ({ setTargets }) => {
+      setTargets([
+        { id: 'runtime-a-target', type: 'page', url: 'https://www.tradingview.com/chart/CWRnK7ji/' },
+        { id: 'replacement-target', type: 'page', url: 'https://www.tradingview.com/chart/NCJIp2ky/' },
+      ]);
+    }, /inventory changed after exact target close intent/u],
+    ['profile generation changed during intent callback', ({ setProfileGeneration }) => {
+      setProfileGeneration('replacement-profile-generation');
+    }, /PROFILE_GENERATION_CHANGED_BEFORE_TARGET_CLOSE/u],
+  ];
+  for (const [name, afterIntent, expected] of cases) {
+    await t.test(name, async () => {
+      const fixture = exactProbeCloseFixture({ afterIntent });
+      await assert.rejects(closeExactSavedChartIdempotencyProbeTarget(PROFILE, {
+        accountSubjectSha256: ACCOUNT_HASH, layoutId: '206102994', chartUid: 'NCJIp2ky', marker: MARKER,
+      }, fixture.dependencies), expected);
+      assert.equal(fixture.calls.armed, true);
+      assert.deepEqual(fixture.calls.closed, []);
+    });
+  }
 });
 
 test('exact probe close fails closed before mutation on account/layout mismatch or ambiguous target', async (t) => {

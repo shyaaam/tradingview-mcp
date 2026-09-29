@@ -113,6 +113,17 @@ export async function closeExactOwnedChartTarget(input = {}, dependencies = {}) 
   }
   await dependencies.beforeClose?.({ routeUid, chartUrl });
 
+  // The intent callback may take time or inspect remote state. Rebind exact
+  // target and ownership after it so its snapshot cannot authorize a stale ID.
+  const armedTargets = pageTargets(await requestJson(targetListUrl));
+  const armedExact = armedTargets.filter((target) => target.id === targetId && target.url === chartUrl);
+  if (armedExact.length !== 1 || !sameChartInventory(initialCharts, chartTargets(armedTargets))) {
+    throw new Error('TradingView chart inventory changed after exact target close intent.');
+  }
+  if (await withDeadline(() => input.verifyCurrentTarget(armedExact[0]), deadline) !== true) {
+    throw new Error('Exact target ownership changed after close intent.');
+  }
+
   const version = await requestJson(new URL('json/version', `${input.cdpUrl}/`).toString());
   const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
     version?.webSocketDebuggerUrl,

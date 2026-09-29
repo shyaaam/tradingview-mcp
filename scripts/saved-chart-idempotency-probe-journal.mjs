@@ -173,9 +173,8 @@ export async function completeProbeTargetRetirement(path, inventory, disposition
 export async function recordProbeDiscovery(path, inventory, providerIdentity = undefined) {
   const record = await readProbeJournal(path);
   const claims = await Promise.all([readProbeAttemptClaim(path, 1), readProbeAttemptClaim(path, 2)]);
-  if (claims.some((claim) => claim && processIsAlive(claim.ownerPid))) {
-    throw new Error('PROBE_CREATE_ATTEMPT_IN_PROGRESS');
-  }
+  // Claims are durable at-most-once markers. Reopen always reconciles remote
+  // inventory; never persist or depend on a runtime PID to infer outcome.
   const previousStage = record.stage;
   const priorDiscovery = record.lastDiscovery;
   if (record.stage === 'PREPARED' && claims[0]) {
@@ -379,7 +378,6 @@ async function claimProbeAttempt(path, attempt) {
       schemaVersion: 1,
       marker: PROBE_MARKER,
       attempt,
-      ownerPid: process.pid,
       claimedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -392,7 +390,6 @@ async function readProbeAttemptClaim(path, attempt) {
   try {
     const claim = JSON.parse(await readFile(probeAttemptClaimPath(path, attempt), 'utf8'));
     if (claim?.schemaVersion !== 1 || claim.marker !== PROBE_MARKER || claim.attempt !== attempt
-      || !Number.isSafeInteger(claim.ownerPid) || claim.ownerPid < 1
       || typeof claim.claimedAt !== 'string') {
       throw new Error('PROBE_CREATE_CLAIM_INVALID');
     }
@@ -405,17 +402,6 @@ async function readProbeAttemptClaim(path, attempt) {
 
 function probeAttemptClaimPath(path, attempt) {
   return `${path}.attempt-${attempt}.claim`;
-}
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === 'ESRCH') return false;
-    if (error?.code === 'EPERM') return true;
-    throw new Error('PROBE_CLAIM_OWNER_STATE_UNAVAILABLE');
-  }
 }
 
 function snapshotDiscovery(discovery) {

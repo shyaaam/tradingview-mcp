@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -251,6 +251,10 @@ test('crash after CREATE_ARMED but before click recovers marker and never blindl
     await prepareProbeJournal(path, INPUT);
     const child = await runChild(path, `await armProbeCreate(journalPath, 1);`);
     assert.equal(child.code, 0);
+    const claim = await readFile(`${path}.attempt-1.claim`, 'utf8');
+    assert.equal(claim.includes('ownerPid'), false);
+    assert.equal(claim.includes('targetId'), false);
+    assert.equal(claim.includes('profileId'), false);
 
     const reopened = await readProbeJournal(path);
     assert.deepEqual(recoveryAction(reopened), {
