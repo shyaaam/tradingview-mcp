@@ -315,7 +315,7 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       ? await dependencies.createSavedLayout(normalized.profileName, normalized.expectedProfileId,
         normalized.captureSlotId, marker, inventory, dependencies, onCreateAttempt)
       : await createSavedLayout(normalized.profileName, normalized.expectedProfileId,
-        marker, inventory, dependencies, onCreateAttempt);
+        normalized.captureSlotId, marker, inventory, dependencies, onCreateAttempt);
     temporaryTargetClosed = created.temporaryTargetClosed;
     return ensureResult(normalized, marker, {
       action: 'created', matchCount: 1, savedChartId: created.chartId,
@@ -710,7 +710,8 @@ async function classifyCreateLayoutDialogFailure(page) {
   }
 }
 
-async function createSavedLayout(profileName, expectedProfileId, marker, priorInventory, dependencies, onCreateAttempt) {
+async function createSavedLayout(profileName, expectedProfileId, captureSlotId, marker, priorInventory,
+  dependencies, onCreateAttempt) {
   const profile = await resolveExactRunningProfile(profileName, dependencies);
   if (expectedProfileId !== null && profile.profileId !== expectedProfileId) {
     throw new Error('PROFILE_UUID_CHANGED_BEFORE_LAYOUT_CREATE');
@@ -742,8 +743,23 @@ async function createSavedLayout(profileName, expectedProfileId, marker, priorIn
       throw new Error('ACCOUNT_IDENTITY_CHANGED_BEFORE_LAYOUT_CREATE');
     }
     if (probe.layouts.some((layout) => layout.name === marker)) throw new Error('LAYOUT_MARKER_APPEARED_BEFORE_CREATE');
-    const sourceChartId = probe.chart_uid;
-    if (sourceChartId !== null && !CHART_UID.test(sourceChartId)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
+    const sourceChartIds = new Set();
+    if (probe.chart_uid !== null) {
+      if (!CHART_UID.test(probe.chart_uid)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
+      sourceChartIds.add(probe.chart_uid);
+    }
+    const slotASources = captureSlotId === 'v5-capture-slot-b'
+      ? probe.layouts.filter((layout) => /^V5OBS-A-[A-Za-z0-9_-]{32}$/u.test(layout.name))
+      : [];
+    if (slotASources.length > 1) throw new Error('MULTIPLE_SLOT_A_SOURCE_CHARTS');
+    if (slotASources.length === 1) {
+      // Resolve A on a separate disposable target; never load it into B's create target.
+      const source = await (dependencies.resolveSavedLayoutRoute || resolveSavedLayoutRoute)(
+        profileName, expectedProfileId, slotASources[0], priorInventory.accountSubjectSha256, dependencies);
+      if (source.temporaryTargetClosed !== true) throw new Error('SLOT_A_SOURCE_TARGET_CLOSE_UNCONFIRMED');
+      if (!CHART_UID.test(source.chartId)) throw new Error('SLOT_A_SOURCE_ROUTE_ID_NOT_PROVEN');
+      sourceChartIds.add(source.chartId);
+    }
 
     const before = await waitForAccountProbe(page, dependencies);
     if (stableJson(before.layouts) !== stableJson(priorInventory.layouts)
@@ -769,7 +785,7 @@ async function createSavedLayout(profileName, expectedProfileId, marker, priorIn
     await clickAt(page, createCoords, dependencies);
     const createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
     chartId = createdProbe.chart_uid;
-    if (chartId === null || (sourceChartId !== null && chartId === sourceChartId) || !CHART_UID.test(chartId)) {
+    if (chartId === null || sourceChartIds.has(chartId) || !CHART_UID.test(chartId)) {
       throw new Error('NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
     }
     if (createdProbe.layouts.filter((layout) => layout.name === marker).length !== 1) {

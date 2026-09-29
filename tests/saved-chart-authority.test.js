@@ -814,122 +814,146 @@ test('existing exact marker is mapped to verified route UID without any new save
   assert.equal(createCount, 0);
 });
 
-test('slot B saved-chart creation starts from its fresh generic chart, never slot A layout', async () => {
-  const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
-  const browserWebSocketUrl = 'ws://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
-  const slotAMarker = savedChartLayoutMarker('v5-capture-slot-a', 'a'.repeat(64));
-  const slotBInput = {
-    ...INPUT,
-    captureSlotId: 'v5-capture-slot-b',
-    reconciliationKey: 'c'.repeat(64),
-    expectedAccountSubjectSha256: ACCOUNT_HASH,
-    createIfAbsent: true,
-  };
-  const slotBMarker = savedChartLayoutMarker(slotBInput.captureSlotId, slotBInput.reconciliationKey);
-  const layouts = [
-    { layoutId: 'slot-a-layout', name: slotAMarker, symbol: '', resolution: '' },
-  ];
-  let pageUrl = 'about:blank';
-  let chartUid = null;
-  let loadedSlotA = false;
-  let createdTarget = null;
-  let inputValue = '';
-  const accountProbe = () => ({
-    authenticated: true,
-    account_subject_sha256: ACCOUNT_HASH,
-    layouts: layouts.map(({ layoutId, name, symbol, resolution }) => ({
-      layout_id: layoutId, name, symbol, resolution,
-    })),
-    chart_uid: chartUid,
-  });
-  const page = {
-    Runtime: {
-      enable: async () => {},
-      evaluate: async ({ expression }) => {
-        if (expression === ACCOUNT_LAYOUT_PROBE) return { result: { value: accountProbe() } };
-        if (expression.includes('location.href')) return { result: { value: { url: pageUrl } } };
-        if (expression.includes('loadChartFromServer')) {
-          loadedSlotA = true;
-          chartUid = 'slot-a-route-uid';
-          return { result: { value: { ok: true } } };
-        }
-        if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) {
-          return { result: { value: {
-            rootKind: 'dialog', failureCode: null, inputCount: 1, inputMaxLength: 80,
-            inputValue, inputCoords: { x: 30, y: 30 }, createButtonCount: 1,
-            createButtonEnabled: true, createCoords: { x: 40, y: 40 },
-          } } };
-        }
-        if (expression.includes('save-load-menu')) {
-          return { result: { value: { x: 10, y: 10 } } };
-        }
-        if (expression.includes('Create new layout')) {
-          return { result: { value: { x: 20, y: 20 } } };
-        }
-        return { result: { value: null } };
+test('slot B create resolves Slot A independently and rejects a shared route UID', async (t) => {
+  const runCreate = async (createdChartUid) => {
+    const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
+    const browserWebSocketUrl = 'ws://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
+    const slotAMarker = savedChartLayoutMarker('v5-capture-slot-a', 'a'.repeat(64));
+    const slotBInput = {
+      ...INPUT,
+      captureSlotId: 'v5-capture-slot-b',
+      reconciliationKey: 'c'.repeat(64),
+      expectedAccountSubjectSha256: ACCOUNT_HASH,
+      createIfAbsent: true,
+    };
+    const slotBMarker = savedChartLayoutMarker(slotBInput.captureSlotId, slotBInput.reconciliationKey);
+    const layouts = [{ layoutId: 'slot-a-layout', name: slotAMarker, symbol: '', resolution: '' }];
+    let pageUrl = 'about:blank';
+    let chartUid = null;
+    let loadedSlotA = false;
+    let sourceResolutionCount = 0;
+    let createClickCount = 0;
+    let createdTarget = null;
+    let inputValue = '';
+    const accountProbe = () => ({
+      authenticated: true,
+      account_subject_sha256: ACCOUNT_HASH,
+      layouts: layouts.map(({ layoutId, name, symbol, resolution }) => ({
+        layout_id: layoutId, name, symbol, resolution,
+      })),
+      chart_uid: chartUid,
+    });
+    const page = {
+      Runtime: {
+        enable: async () => {},
+        evaluate: async ({ expression }) => {
+          if (expression === ACCOUNT_LAYOUT_PROBE) return { result: { value: accountProbe() } };
+          if (expression.includes('location.href')) return { result: { value: { url: pageUrl } } };
+          if (expression.includes('loadChartFromServer')) {
+            loadedSlotA = true;
+            chartUid = 'slot-a-route-uid';
+            return { result: { value: { ok: true } } };
+          }
+          if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) {
+            return { result: { value: {
+              rootKind: 'dialog', failureCode: null, inputCount: 1, inputMaxLength: 80,
+              inputValue, inputCoords: { x: 30, y: 30 }, createButtonCount: 1,
+              createButtonEnabled: true, createCoords: { x: 40, y: 40 },
+            } } };
+          }
+          if (expression.includes('save-load-menu')) return { result: { value: { x: 10, y: 10 } } };
+          if (expression.includes('Create new layout')) return { result: { value: { x: 20, y: 20 } } };
+          return { result: { value: null } };
+        },
       },
-    },
-    Page: {
-      enable: async () => {},
-      navigate: async ({ url }) => { pageUrl = url; chartUid = null; return {}; },
-    },
-    close: async () => {},
-  };
-  const browser = {
-    Target: {
-      createTarget: async ({ url }) => {
-        createdTarget = {
-          id: 'slot-b-create-target', type: 'page', url,
-          webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/slot-b-create-target`,
-        };
-        return { targetId: createdTarget.id };
+      Page: {
+        enable: async () => {},
+        navigate: async ({ url }) => { pageUrl = url; chartUid = null; return {}; },
       },
-      closeTarget: async ({ targetId }) => {
-        assert.equal(targetId, 'slot-b-create-target');
-        createdTarget = null;
-        return { success: true };
+      close: async () => {},
+    };
+    const browser = {
+      Target: {
+        createTarget: async ({ url }) => {
+          createdTarget = {
+            id: 'slot-b-create-target', type: 'page', url,
+            webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/slot-b-create-target`,
+          };
+          return { targetId: createdTarget.id };
+        },
+        closeTarget: async ({ targetId }) => {
+          assert.equal(targetId, 'slot-b-create-target');
+          createdTarget = null;
+          return { success: true };
+        },
       },
-    },
-    close: async () => {},
+      close: async () => {},
+    };
+    const result = await ensureSavedChartAuthority(slotBInput, {
+      managerBaseUrl: 'http://manager.test/api',
+      fetch: async (value) => {
+        const url = new URL(String(value));
+        let body;
+        if (url.pathname === '/api/profiles') {
+          body = [{ name: INPUT.profileName, id: INPUT.expectedProfileId, status: 'running', cdp_url: cdpUrl }];
+        } else if (url.pathname.endsWith('/json/version')) {
+          body = { webSocketDebuggerUrl: browserWebSocketUrl };
+        } else if (url.pathname.endsWith('/json/list')) {
+          body = createdTarget === null ? [] : [createdTarget];
+        } else {
+          throw new Error(`unexpected URL ${url}`);
+        }
+        return { ok: true, json: async () => body };
+      },
+      connectBrowser: async () => browser,
+      connectTarget: async () => page,
+      readProfileInventory: async () => inventory(layouts.map((layout) => ({ ...layout }))),
+      resolveSavedLayoutRoute: async (profileName, profileId, layout, accountHash) => {
+        sourceResolutionCount += 1;
+        assert.equal(profileName, INPUT.profileName);
+        assert.equal(profileId, INPUT.expectedProfileId);
+        assert.equal(layout.layoutId, 'slot-a-layout');
+        assert.equal(layout.name, slotAMarker);
+        assert.equal(accountHash, ACCOUNT_HASH);
+        return { chartId: 'slot-a-route-uid', temporaryTargetClosed: true };
+      },
+      dispatchMouseEvent: async (event) => {
+        if (event.type === 'mouseReleased' && event.x === 40 && event.y === 40) {
+          createClickCount += 1;
+          chartUid = createdChartUid;
+          pageUrl = `https://www.tradingview.com/chart/${chartUid}/`;
+          layouts.push({ layoutId: 'slot-b-layout', name: slotBMarker, symbol: '', resolution: '' });
+        }
+      },
+      insertText: async (text) => { inputValue = text; },
+      sleep: async () => {},
+    });
+    return { result, loadedSlotA, sourceResolutionCount, createClickCount, layouts, slotAMarker, slotBMarker };
   };
-  const result = await ensureSavedChartAuthority(slotBInput, {
-    managerBaseUrl: 'http://manager.test/api',
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      let body;
-      if (url.pathname === '/api/profiles') {
-        body = [{ name: INPUT.profileName, id: INPUT.expectedProfileId, status: 'running', cdp_url: cdpUrl }];
-      } else if (url.pathname.endsWith('/json/version')) {
-        body = { webSocketDebuggerUrl: browserWebSocketUrl };
-      } else if (url.pathname.endsWith('/json/list')) {
-        body = createdTarget === null ? [] : [createdTarget];
-      } else {
-        throw new Error(`unexpected URL ${url}`);
-      }
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async () => page,
-    readProfileInventory: async () => inventory(layouts.map((layout) => ({ ...layout }))),
-    dispatchMouseEvent: async (event) => {
-      if (event.type === 'mouseReleased' && event.x === 40 && event.y === 40) {
-        chartUid = loadedSlotA ? 'slot-a-route-uid' : 'fresh-slot-b-route-uid';
-        pageUrl = `https://www.tradingview.com/chart/${chartUid}/`;
-        layouts.push({ layoutId: 'slot-b-layout', name: slotBMarker, symbol: '', resolution: '' });
-      }
-    },
-    insertText: async (text) => { inputValue = text; },
-    sleep: async () => {},
+
+  await t.test('distinct route is accepted without loading Slot A into Slot B target', async () => {
+    const proof = await runCreate('fresh-slot-b-route-uid');
+    assert.equal(proof.result.action, 'created', proof.result.failure_code ?? undefined);
+    assert.equal(proof.result.saved_chart_id, 'fresh-slot-b-route-uid');
+    assert.equal(proof.result.mutations_performed, true);
+    assert.equal(proof.loadedSlotA, false);
+    assert.equal(proof.sourceResolutionCount, 1);
+    assert.equal(proof.createClickCount, 1);
+    assert.deepEqual(proof.layouts.map(({ layoutId, name }) => ({ layoutId, name })), [
+      { layoutId: 'slot-a-layout', name: proof.slotAMarker },
+      { layoutId: 'slot-b-layout', name: proof.slotBMarker },
+    ]);
   });
 
-  assert.equal(result.action, 'created', result.failure_code ?? undefined);
-  assert.equal(result.saved_chart_id, 'fresh-slot-b-route-uid');
-  assert.equal(result.mutations_performed, true);
-  assert.equal(loadedSlotA, false);
-  assert.deepEqual(layouts.map(({ layoutId, name }) => ({ layoutId, name })), [
-    { layoutId: 'slot-a-layout', name: slotAMarker },
-    { layoutId: 'slot-b-layout', name: slotBMarker },
-  ]);
+  await t.test('same route fails closed after exactly one create attempt', async () => {
+    const proof = await runCreate('slot-a-route-uid');
+    assert.equal(proof.result.action, 'unknown');
+    assert.equal(proof.result.failure_code, 'NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
+    assert.equal(proof.result.mutations_performed, true);
+    assert.equal(proof.loadedSlotA, false);
+    assert.equal(proof.sourceResolutionCount, 1);
+    assert.equal(proof.createClickCount, 1);
+  });
 });
 
 test('one-shot create reports exact saved chart UID and preserves unknown outcome for discovery-only retry', async () => {
