@@ -290,7 +290,8 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       return ensureResult(normalized, marker, {
         action: 'unknown', matchCount: 1, savedChartId: null,
         accountSubjectSha256: inventory.accountSubjectSha256,
-        mutationsPerformed: false, temporaryTargetClosed: true, failureCode: safeFailureCode(error),
+        mutationsPerformed: false, temporaryTargetClosed: temporaryTargetCloseEvidence(error),
+        failureCode: safeFailureCode(error),
       });
     }
     return ensureResult(normalized, marker, {

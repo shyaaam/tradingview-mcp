@@ -814,6 +814,30 @@ test('existing exact marker is mapped to verified route UID without any new save
   assert.equal(createCount, 0);
 });
 
+test('exact-marker route discovery preserves failed temporary-target close evidence', async () => {
+  const resolverError = new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN');
+  resolverError.temporaryTargetClosed = false;
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    readProfileInventory: async () => inventory([
+      { layoutId: 'existing-layout', name: MARKER, symbol: '', resolution: '' },
+    ]),
+    resolveSavedLayoutRoute: async () => { throw resolverError; },
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'unknown');
+  assert.equal(result.failure_code, 'DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN');
+  assert.equal(result.temporary_target_closed, false);
+  assert.equal(result.mutations_performed, false);
+  assert.equal(result.match_count, 1);
+  assert.equal(createCount, 0);
+});
+
 test('slot B create resolves Slot A independently and rejects unsafe discovery states', async (t) => {
   const runCreate = async ({ createdChartUid, sourceTargetClosed = true, useDefaultResolver = false,
     sourceTargetCloseSucceeds = true, resolverLoadFails = false }) => {
