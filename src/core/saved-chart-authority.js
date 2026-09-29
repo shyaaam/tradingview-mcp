@@ -510,6 +510,19 @@ function temporaryTargetCloseEvidence(error) {
     : true;
 }
 
+function withTemporaryTargetCloseEvidence(error, closeConfirmed) {
+  const temporaryTargetClosed = temporaryTargetCloseEvidence(error) && closeConfirmed;
+  if (error instanceof Error) {
+    try {
+      error.temporaryTargetClosed = temporaryTargetClosed;
+      return error;
+    } catch { /* wrap immutable provider errors below */ }
+  }
+  const wrapped = new Error(error instanceof Error ? error.message : safeFailureCode(error), { cause: error });
+  wrapped.temporaryTargetClosed = temporaryTargetClosed;
+  return wrapped;
+}
+
 async function openTemporaryChartTarget(profile, dependencies, existingTargets) {
   if (existingTargets.some(isTradingViewLoginTarget)) {
     throw new Error('TRADINGVIEW_LOGIN_TARGET_PRESENT');
@@ -725,6 +738,8 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   let saved = false;
   let chartId = null;
   let closeBrowser;
+  let operationError;
+  let operationFailed = false;
   try {
     const created = await browser.Target.createTarget({ url: 'about:blank' });
     targetId = requireText(created?.targetId, 'created target id');
@@ -803,6 +818,9 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
       throw new Error('EXISTING_SAVED_LAYOUT_INVENTORY_CHANGED');
     }
     saved = true;
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   } finally {
     if (page) await closePage(page);
     if (targetId) {
@@ -814,7 +832,12 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     }
     try { await browser.close?.(); } catch { /* preserve saved-layout result */ }
   }
-  if (!saved || chartId === null) throw new Error('SAVED_LAYOUT_CREATE_NOT_CONFIRMED');
+  if (operationFailed) {
+    throw withTemporaryTargetCloseEvidence(operationError, closeBrowser?.success === true);
+  }
+  if (!saved || chartId === null) {
+    throw withTemporaryTargetCloseEvidence(new Error('SAVED_LAYOUT_CREATE_NOT_CONFIRMED'), closeBrowser?.success === true);
+  }
   return { chartId, temporaryTargetClosed: closeBrowser?.success === true };
 }
 
@@ -830,6 +853,8 @@ async function resolveSavedLayoutRoute(profileName, expectedProfileId, layout, e
   let page;
   let closeResult = null;
   let chartId = null;
+  let operationError;
+  let operationFailed = false;
   try {
     const created = await browser.Target.createTarget({ url: 'about:blank' });
     targetId = requireText(created?.targetId, 'created target id');
@@ -850,6 +875,9 @@ async function resolveSavedLayoutRoute(profileName, expectedProfileId, layout, e
       throw new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN');
     }
     chartId = probe.chart_uid;
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   } finally {
     if (page) await closePage(page);
     if (targetId) {
@@ -857,7 +885,12 @@ async function resolveSavedLayoutRoute(profileName, expectedProfileId, layout, e
     }
     try { await browser.close?.(); } catch { /* preserve discovered result */ }
   }
-  if (chartId === null) throw new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN');
+  if (operationFailed) {
+    throw withTemporaryTargetCloseEvidence(operationError, closeResult?.success === true);
+  }
+  if (chartId === null) {
+    throw withTemporaryTargetCloseEvidence(new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN'), closeResult?.success === true);
+  }
   return { chartId, temporaryTargetClosed: closeResult?.success === true };
 }
 

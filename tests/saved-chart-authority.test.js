@@ -814,8 +814,9 @@ test('existing exact marker is mapped to verified route UID without any new save
   assert.equal(createCount, 0);
 });
 
-test('slot B create resolves Slot A independently and rejects a shared route UID', async (t) => {
-  const runCreate = async ({ createdChartUid, sourceTargetClosed = true }) => {
+test('slot B create resolves Slot A independently and rejects unsafe discovery states', async (t) => {
+  const runCreate = async ({ createdChartUid, sourceTargetClosed = true, useDefaultResolver = false,
+    sourceTargetCloseSucceeds = true, resolverLoadFails = false }) => {
     const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
     const browserWebSocketUrl = 'ws://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
     const slotAMarker = savedChartLayoutMarker('v5-capture-slot-a', 'a'.repeat(64));
@@ -833,7 +834,8 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
     let loadedSlotA = false;
     let sourceResolutionCount = 0;
     let createClickCount = 0;
-    let createdTarget = null;
+    let targetCreateCount = 0;
+    const createdTargets = new Map();
     let inputValue = '';
     const accountProbe = () => ({
       authenticated: true,
@@ -850,6 +852,7 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
           if (expression === ACCOUNT_LAYOUT_PROBE) return { result: { value: accountProbe() } };
           if (expression.includes('location.href')) return { result: { value: { url: pageUrl } } };
           if (expression.includes('loadChartFromServer')) {
+            if (resolverLoadFails) return { result: { value: { ok: false } } };
             loadedSlotA = true;
             chartUid = 'slot-a-route-uid';
             return { result: { value: { ok: true } } };
@@ -875,15 +878,19 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
     const browser = {
       Target: {
         createTarget: async ({ url }) => {
-          createdTarget = {
-            id: 'slot-b-create-target', type: 'page', url,
-            webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/slot-b-create-target`,
-          };
-          return { targetId: createdTarget.id };
+          targetCreateCount += 1;
+          const id = targetCreateCount === 1 ? 'slot-b-create-target' : 'slot-a-discovery-target';
+          createdTargets.set(id, {
+            id, type: 'page', url,
+            webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${id}`,
+          });
+          return { targetId: id };
         },
         closeTarget: async ({ targetId }) => {
-          assert.equal(targetId, 'slot-b-create-target');
-          createdTarget = null;
+          if (targetId === 'slot-a-discovery-target' && !sourceTargetCloseSucceeds) {
+            return { success: false };
+          }
+          createdTargets.delete(targetId);
           return { success: true };
         },
       },
@@ -899,7 +906,7 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
         } else if (url.pathname.endsWith('/json/version')) {
           body = { webSocketDebuggerUrl: browserWebSocketUrl };
         } else if (url.pathname.endsWith('/json/list')) {
-          body = createdTarget === null ? [] : [createdTarget];
+          body = [...createdTargets.values()];
         } else {
           throw new Error(`unexpected URL ${url}`);
         }
@@ -908,15 +915,17 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
       connectBrowser: async () => browser,
       connectTarget: async () => page,
       readProfileInventory: async () => inventory(layouts.map((layout) => ({ ...layout }))),
-      resolveSavedLayoutRoute: async (profileName, profileId, layout, accountHash) => {
-        sourceResolutionCount += 1;
-        assert.equal(profileName, INPUT.profileName);
-        assert.equal(profileId, INPUT.expectedProfileId);
-        assert.equal(layout.layoutId, 'slot-a-layout');
-        assert.equal(layout.name, slotAMarker);
-        assert.equal(accountHash, ACCOUNT_HASH);
-        return { chartId: 'slot-a-route-uid', temporaryTargetClosed: sourceTargetClosed };
-      },
+      ...(useDefaultResolver ? {} : {
+        resolveSavedLayoutRoute: async (profileName, profileId, layout, accountHash) => {
+          sourceResolutionCount += 1;
+          assert.equal(profileName, INPUT.profileName);
+          assert.equal(profileId, INPUT.expectedProfileId);
+          assert.equal(layout.layoutId, 'slot-a-layout');
+          assert.equal(layout.name, slotAMarker);
+          assert.equal(accountHash, ACCOUNT_HASH);
+          return { chartId: 'slot-a-route-uid', temporaryTargetClosed: sourceTargetClosed };
+        },
+      }),
       dispatchMouseEvent: async (event) => {
         if (event.type === 'mouseReleased' && event.x === 40 && event.y === 40) {
           createClickCount += 1;
@@ -928,7 +937,8 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
       insertText: async (text) => { inputValue = text; },
       sleep: async () => {},
     });
-    return { result, loadedSlotA, sourceResolutionCount, createClickCount, layouts, slotAMarker, slotBMarker };
+    return { result, loadedSlotA, sourceResolutionCount, createClickCount, targetCreateCount, layouts,
+      slotAMarker, slotBMarker };
   };
 
   await t.test('distinct route is accepted without loading Slot A into Slot B target', async () => {
@@ -964,6 +974,21 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
     assert.equal(proof.loadedSlotA, false);
     assert.equal(proof.sourceResolutionCount, 1);
     assert.equal(proof.createClickCount, 0);
+    assert.equal(proof.layouts.length, 1);
+  });
+
+  await t.test('resolver error plus failed target close reports false and prevents create', async () => {
+    const proof = await runCreate({
+      createdChartUid: 'unused-route', useDefaultResolver: true,
+      sourceTargetCloseSucceeds: false, resolverLoadFails: true,
+    });
+    assert.equal(proof.result.action, 'unknown');
+    assert.equal(proof.result.failure_code, 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE');
+    assert.equal(proof.result.temporary_target_closed, false);
+    assert.equal(proof.result.mutations_performed, false);
+    assert.equal(proof.loadedSlotA, false);
+    assert.equal(proof.createClickCount, 0);
+    assert.equal(proof.targetCreateCount, 2);
     assert.equal(proof.layouts.length, 1);
   });
 });
