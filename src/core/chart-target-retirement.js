@@ -58,52 +58,136 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   }
   const target = exact[0];
   if (beforeCharts.length <= 1) throw new Error('Cannot retire the last TradingView chart target.');
-  const preClose = pageTargets(await requestJson(new URL('json/list', `${cdpUrl}/`).toString()));
-  const currentExact = preClose.filter((entry) => entry.url === expected.chartUrl);
-  const currentSameSavedChart = preClose.filter((entry) => targetHasSavedChartId(entry, expected.savedChartId));
-  if (currentExact.length !== 1 || currentExact[0].id !== target.id
-    || currentSameSavedChart.length !== 1
-    || !sameChartInventory(beforeCharts, chartTargets(preClose))) {
-    throw new Error('TradingView chart inventory changed before exact saved-chart retirement.');
+  const closed = await closeExactOwnedChartTarget({
+    profileId: expected.profileId,
+    cdpUrl,
+    targetId: target.id,
+    routeUid: expected.savedChartId,
+    chartUrl: expected.chartUrl,
+    initialTargets: before,
+    verifyCurrentTarget: async (current) => current.url === expected.chartUrl
+      && targetHasSavedChartId(current, expected.savedChartId),
+  }, { ...dependencies, deadline });
+  return result(expected, target.id, closed.action, closed.remainingChartTargets, closed.mutationsPerformed);
+}
+
+/** @internal Shared exact-target close core. Caller proves operation-specific ownership. */
+export async function closeExactOwnedChartTarget(input = {}, dependencies = {}) {
+  const profileId = requirePattern(input.profileId, 'profile ID', /^[A-Za-z0-9_-]{1,160}$/u);
+  const targetId = requirePattern(input.targetId, 'CDP target ID', /^[A-Za-z0-9_-]{1,256}$/u);
+  const routeUid = requirePattern(input.routeUid, 'chart route ID', /^[A-Za-z0-9_-]{1,160}$/u);
+  const chartUrl = requireText(input.chartUrl, 'chart URL');
+  const canonicalUrl = `https://www.tradingview.com/chart/${routeUid}/`;
+  if (chartUrl !== canonicalUrl || typeof input.verifyCurrentTarget !== 'function') {
+    throw new Error('Exact-owned target close requires canonical route and fresh ownership verifier.');
   }
-  const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
+  const timeoutMs = boundedPositiveInteger(dependencies.timeoutMs, DEFAULT_TIMEOUT_MS);
+  const now = dependencies.now || (() => performance.now());
+  const deadline = dependencies.deadline || { at: now() + timeoutMs, now, timeoutMs };
+  const fetchImpl = dependencies.fetch || fetch;
+  const requestJson = (url) => fetchJson(url, fetchImpl, deadline);
+  const initial = pageTargets(input.initialTargets);
+  const initialCharts = chartTargets(initial);
+  const initialExact = initial.filter((target) => target.id === targetId && target.url === chartUrl);
+  if (initialExact.length !== 1 || initialCharts.filter((target) => targetHasSavedChartId(target, routeUid)).length !== 1) {
+    throw new Error('Exact-owned target is absent or ambiguous in its initial snapshot.');
+  }
+  if (initialCharts.length <= 1) throw new Error('Cannot close the last TradingView chart target.');
+
+  const targetListUrl = new URL('json/list', `${input.cdpUrl}/`).toString();
+  const current = pageTargets(await requestJson(targetListUrl));
+  const currentExact = current.filter((target) => target.id === targetId && target.url === chartUrl);
+  if (currentExact.length !== 1 || !sameChartInventory(initialCharts, chartTargets(current))) {
+    throw new Error('TradingView chart inventory changed before exact target close.');
+  }
+  if (await withDeadline(() => input.verifyCurrentTarget(currentExact[0]), deadline) !== true) {
+    throw new Error('Exact target ownership changed before close.');
+  }
+  const preClose = pageTargets(await requestJson(targetListUrl));
+  const preCloseExact = preClose.filter((target) => target.id === targetId && target.url === chartUrl);
+  if (preCloseExact.length !== 1 || !sameChartInventory(initialCharts, chartTargets(preClose))) {
+    throw new Error('TradingView chart inventory changed before exact target close.');
+  }
+  if (await withDeadline(() => input.verifyCurrentTarget(preCloseExact[0]), deadline) !== true) {
+    throw new Error('Exact target ownership changed before close.');
+  }
+  await dependencies.beforeClose?.({ routeUid, chartUrl });
+
+  // The intent callback may take time or inspect remote state. Rebind exact
+  // target and ownership after it so its snapshot cannot authorize a stale ID.
+  const armedTargets = pageTargets(await requestJson(targetListUrl));
+  const armedExact = armedTargets.filter((target) => target.id === targetId && target.url === chartUrl);
+  if (armedExact.length !== 1 || !sameChartInventory(initialCharts, chartTargets(armedTargets))) {
+    throw new Error('TradingView chart inventory changed after exact target close intent.');
+  }
+  if (await withDeadline(() => input.verifyCurrentTarget(armedExact[0]), deadline) !== true) {
+    throw new Error('Exact target ownership changed after close intent.');
+  }
+
+  const version = await requestJson(new URL('json/version', `${input.cdpUrl}/`).toString());
   const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
     version?.webSocketDebuggerUrl,
-    cdpUrl,
-    expected.profileId,
+    input.cdpUrl,
+    profileId,
   );
-  const closeResult = await sendBrowserCdpCommand(
-    browserWebSocketUrl,
-    { targetId: target.id },
-    deadline,
-    dependencies.createWebSocket,
-  );
-  if (closeResult?.success !== true) throw new Error('Exact saved-chart target close was not acknowledged.');
+  let closeAcknowledged = false;
+  let closeResponseReceived = false;
+  let closeError = null;
+  try {
+    const response = await sendBrowserCdpCommand(
+      browserWebSocketUrl,
+      { targetId },
+      deadline,
+      dependencies.createWebSocket,
+    );
+    closeResponseReceived = true;
+    closeAcknowledged = response?.success === true;
+  } catch (error) {
+    // A lost CDP response is an unknown outcome; bounded target readback decides.
+    closeError = error;
+  }
 
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  let after = before;
-  let afterTargets = before;
+  let afterTargets = null;
+  let targetGone = false;
+  if (closeResponseReceived && !closeAcknowledged) {
+    afterTargets = await requestJson(targetListUrl);
+    targetGone = !afterTargets.some((entry) => entry?.id === targetId)
+      && !pageTargets(afterTargets).some((target) => targetHasSavedChartId(target, routeUid));
+    if (!targetGone) throw new Error('Exact saved-chart target close was not acknowledged.');
+  }
   while (remainingMs(deadline) > 0) {
-    afterTargets = await requestJson(new URL('json/list', `${cdpUrl}/`).toString());
-    after = pageTargets(afterTargets);
-    const exactTargetRemains = afterTargets.some((entry) => entry?.id === target.id);
-    const savedChartRemains = after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId));
-    if (!exactTargetRemains && !savedChartRemains) break;
-    await withDeadline(
-      () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
-      deadline,
-    );
+    if (targetGone) break;
+    try {
+      afterTargets = await requestJson(targetListUrl);
+      targetGone = !afterTargets.some((entry) => entry?.id === targetId)
+        && !pageTargets(afterTargets).some((target) => targetHasSavedChartId(target, routeUid));
+      if (targetGone) break;
+    } catch {
+      // Keep checking within the same bounded deadline; uncertainty never means success.
+    }
+    if (remainingMs(deadline) > 0) {
+      await withDeadline(() => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))), deadline);
+    }
   }
-  if (afterTargets.some((entry) => entry?.id === target.id)
-    || after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId))) {
-    throw new Error('Exact saved-chart target remained open after bounded close.');
+  if (!targetGone || !Array.isArray(afterTargets)) {
+    if (closeError?.message?.includes(`bounded ${deadline.timeoutMs}ms deadline`)) throw closeError;
+    throw new Error(closeAcknowledged
+      ? 'Exact saved-chart target remained open after bounded close.'
+      : 'Exact saved-chart target close was not acknowledged or confirmed by readback.');
   }
-  const preservedBefore = beforeCharts.filter((entry) => entry.id !== target.id).map(targetIdentity).sort(compareIdentity);
-  const preservedAfter = chartTargets(after).map(targetIdentity).sort(compareIdentity);
+  const preservedBefore = initialCharts.filter((target) => target.id !== targetId)
+    .map(targetIdentity).sort(compareIdentity);
+  const preservedAfter = chartTargets(pageTargets(afterTargets)).map(targetIdentity).sort(compareIdentity);
   if (JSON.stringify(preservedAfter) !== JSON.stringify(preservedBefore)) {
-    throw new Error('Saved-chart retirement changed another TradingView chart target.');
+    throw new Error('Exact target close changed another TradingView chart target.');
   }
-  return result(expected, target.id, 'closed', preservedAfter.length, true);
+  return Object.freeze({
+    action: 'closed',
+    remainingChartTargets: preservedAfter.length,
+    mutationsPerformed: true,
+    closeAcknowledged,
+  });
 }
 
 function normalizeInput(input) {
