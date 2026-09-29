@@ -5,7 +5,9 @@ import {
   createSavedChartIdempotencyProbe,
   ensureSavedChartAuthority,
   inspectSavedChartIdempotencyProbe,
+  isExactSavedChartIdempotencyProbeTarget,
   isExplicitSavedChartDuplicateRejection,
+  resolveSavedChartIdempotencyProbeRoute,
   SAVED_CHART_IDEMPOTENCY_PROBE_MARKER,
   waitForTargetClosed,
 } from '../src/core/saved-chart-authority.js';
@@ -60,7 +62,41 @@ test('read-only acceptance inventory exposes only verified exact-marker target c
   assert.equal(state.closeCount(), 1);
 });
 
-test('default read-only inventory counts only the exact-marker current-account chart target', async () => {
+test('probe target ownership uses exact account and route/layout identity, not title', () => {
+  const target = {
+    targetId: 'marker-chart', title: 'Saved Chart - TradingView',
+    urlRouteUid: 'probe-route', currentChartUid: 'probe-route',
+    accountSubjectSha256: ACCOUNT_HASH, exactMarkerLayoutIds: ['probe-layout-id'],
+  };
+  const expected = { accountSubjectSha256: ACCOUNT_HASH, layoutId: 'probe-layout-id', chartUid: 'probe-route' };
+  assert.equal(isExactSavedChartIdempotencyProbeTarget(target, expected), true);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, accountSubjectSha256: 'c'.repeat(64) }, expected), false);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, urlRouteUid: 'other-route' }, expected), false);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, currentChartUid: 'other-route' }, expected), false);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, exactMarkerLayoutIds: [] }, expected), false);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget({ ...target, exactMarkerLayoutIds: ['other-layout'] }, expected), false);
+});
+
+test('probe saved-layout route uses normal discovery and confirms temporary-target close', async () => {
+  const state = inventory([{ layoutId: 'probe-layout-id', name: MARKER }]);
+  const result = await resolveSavedChartIdempotencyProbeRoute(PROFILE, ACCOUNT_HASH, {
+    readProfileInventory: async () => state,
+    resolveSavedLayoutRoute: async (profileName, profileId, layout, accountHash) => {
+      assert.equal(profileName, PROFILE);
+      assert.equal(profileId, 'ephemeral-profile-id');
+      assert.deepEqual(layout, { layoutId: 'probe-layout-id', name: MARKER });
+      assert.equal(accountHash, ACCOUNT_HASH);
+      return { chartId: 'probe-route-uid', temporaryTargetClosed: true };
+    },
+  });
+  assert.equal(result.layoutId, 'probe-layout-id');
+  assert.equal(result.chartUid, 'probe-route-uid');
+  assert.equal(result.canonicalChartUrl, 'https://www.tradingview.com/chart/probe-route-uid/');
+  assert.equal(result.temporaryTargetClosed, true);
+  assert.equal(state.closeCount(), 1);
+});
+
+test('read-only inventory exposes target identity when page title omits marker', async () => {
   const profileId = 'ephemeral-manager-id';
   const cdpUrl = `http://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
   const browserWebSocketUrl = `ws://127.0.0.1:9222/api/profiles/${profileId}/cdp`;
@@ -71,7 +107,7 @@ test('default read-only inventory counts only the exact-marker current-account c
     },
     {
       id: 'marker-chart', type: 'page', url: 'https://www.tradingview.com/chart/probe-route/',
-      title: `${MARKER} - TradingView`, webSocketDebuggerUrl: `${cdpUrl}/devtools/page/marker-chart`,
+      title: 'Saved Chart - TradingView', webSocketDebuggerUrl: `${cdpUrl}/devtools/page/marker-chart`,
     },
   ];
   let pageCloseCount = 0;
@@ -86,26 +122,41 @@ test('default read-only inventory counts only the exact-marker current-account c
           : targets;
       return { ok: true, json: async () => body };
     },
-    connectTarget: async () => ({
-      Runtime: {
-        enable: async () => {},
-        evaluate: async () => ({ result: { value: {
-          authenticated: true,
-          account_subject_sha256: ACCOUNT_HASH,
-          layouts: [{ layout_id: 'probe-layout-id', name: MARKER }],
-          chart_uid: 'probe-route',
-        } } }),
-      },
-      Page: { enable: async () => {} },
-      close: async () => { pageCloseCount += 1; },
-    }),
+    connectTarget: async (webSocketUrl) => {
+      const target = targets.find((entry) => webSocketUrl.endsWith(`/devtools/page/${entry.id}`));
+      const currentChartUid = new URL(target.url).pathname.match(/^\/chart\/([^/]+)\/?$/u)?.[1] ?? null;
+      return {
+        Runtime: {
+          enable: async () => {},
+          evaluate: async () => ({ result: { value: {
+            authenticated: true,
+            account_subject_sha256: ACCOUNT_HASH,
+            layouts: [{ layout_id: 'probe-layout-id', name: MARKER }],
+            chart_uid: currentChartUid,
+          } } }),
+        },
+        Page: { enable: async () => {} },
+        close: async () => { pageCloseCount += 1; },
+      };
+    },
   });
 
   assert.equal(result.targetCount, 2);
   assert.equal(result.chartTargetCount, 2);
   assert.equal(result.probeMarkerCount, 1);
-  assert.equal(result.probeMarkerTargetCount, 1);
+  assert.equal(result.probeMarkerTargetCount, 0);
   assert.equal('targetIds' in result, false);
+  const markerTarget = result.pageTargets.find((target) => target.targetId === 'marker-chart');
+  assert.equal(markerTarget.title, 'Saved Chart - TradingView');
+  assert.equal(markerTarget.urlRouteUid, 'probe-route');
+  assert.equal(markerTarget.currentChartUid, 'probe-route');
+  assert.equal(markerTarget.accountSubjectSha256, ACCOUNT_HASH);
+  assert.deepEqual(markerTarget.exactMarkerLayoutIds, ['probe-layout-id']);
+  assert.equal(isExactSavedChartIdempotencyProbeTarget(markerTarget, {
+    accountSubjectSha256: ACCOUNT_HASH,
+    layoutId: 'probe-layout-id',
+    chartUid: 'probe-route',
+  }), true);
   assert.equal(pageCloseCount, 2);
 });
 

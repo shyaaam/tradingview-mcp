@@ -109,6 +109,22 @@ test('late old-unknown probe marker is recorded but does not block the fixed new
   });
 });
 
+test('ephemeral page target identities never enter durable probe journal', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    const result = await recordProbeDiscovery(path, discovered([], INPUT.preInventorySha256, {
+      pageTargets: [{
+        targetId: 'ephemeral-cdp-target-only',
+        urlRouteUid: 'route-only',
+        currentChartUid: 'route-only',
+      }],
+    }));
+    assert.equal(result.outcome, 'PREPARED_NO_REMOTE_EFFECT');
+    assert.equal(JSON.stringify(result.record).includes('ephemeral-cdp-target-only'), false);
+    assert.equal(JSON.stringify(result.record).includes('route-only'), false);
+  });
+});
+
 test('crash after CREATE_ARMED but before click recovers marker and never blindly retries', async () => {
   await withJournal(async (path) => {
     await prepareProbeJournal(path, INPUT);

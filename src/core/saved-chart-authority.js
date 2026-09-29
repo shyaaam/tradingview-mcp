@@ -233,10 +233,58 @@ export async function inspectSavedChartIdempotencyProbe(profileName, dependencie
         .filter((layout) => layout.name.startsWith('V5_IDEMPOTENCY_PROBE_'))
         .map((layout) => layout.name).sort(),
       layouts: inventory.layouts.map(({ layoutId, name }) => ({ layoutId, name })),
+      // Ephemeral diagnostics only. Never copy these page identities into the journal.
+      pageTargets: Array.isArray(inventory.pageTargetEvidence) ? inventory.pageTargetEvidence : [],
     };
   } finally {
     await closeProfileInventory(inventory);
   }
+}
+
+/** Resolve the fixed probe layout through the same saved-layout route discovery used by production. */
+export async function resolveSavedChartIdempotencyProbeRoute(profileName, expectedAccountSubjectSha256, dependencies = {}) {
+  if (profileName !== 'tv-observer-1') throw new Error('PROBE_PROFILE_NOT_AUTHORIZED');
+  if (!HASH.test(String(expectedAccountSubjectSha256 || ''))) throw new Error('PROBE_ACCOUNT_IDENTITY_INVALID');
+  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(profileName, dependencies);
+  let profileId;
+  let layout;
+  try {
+    if (!inventory.authenticated || inventory.layouts === null) throw new Error('PROFILE_NOT_AUTHENTICATED');
+    if (inventory.accountSubjectSha256 !== expectedAccountSubjectSha256) throw new Error('ACCOUNT_IDENTITY_CHANGED');
+    const matches = exactMarkerMatches(inventory.layouts, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER);
+    if (matches.length !== 1) throw new Error(matches.length > 1 ? 'MULTIPLE_PROBE_LAYOUTS' : 'PROBE_LAYOUT_NOT_FOUND');
+    profileId = requireText(inventory.profile?.profileId, 'current profile id');
+    [layout] = matches;
+  } finally {
+    await closeProfileInventory(inventory);
+  }
+  const resolved = await (dependencies.resolveSavedLayoutRoute || resolveSavedLayoutRoute)(
+    profileName, profileId, layout, expectedAccountSubjectSha256, dependencies,
+  );
+  if (resolved.temporaryTargetClosed !== true) throw new Error('PROBE_ROUTE_DISCOVERY_TARGET_CLOSE_UNCONFIRMED');
+  return {
+    profileName,
+    accountSubjectSha256: expectedAccountSubjectSha256,
+    layoutId: layout.layoutId,
+    marker: layout.name,
+    chartUid: resolved.chartId,
+    canonicalChartUrl: `https://www.tradingview.com/chart/${resolved.chartId}/`,
+    temporaryTargetClosed: resolved.temporaryTargetClosed,
+  };
+}
+
+/** Title is diagnostic only; ownership requires exact account, route, page, and saved-layout identity. */
+export function isExactSavedChartIdempotencyProbeTarget(target, expected = {}) {
+  return Boolean(target && typeof target.targetId === 'string' && target.targetId.length > 0
+    && HASH.test(String(expected.accountSubjectSha256 || ''))
+    && target.accountSubjectSha256 === expected.accountSubjectSha256
+    && typeof expected.layoutId === 'string' && expected.layoutId.length > 0
+    && typeof expected.chartUid === 'string' && CHART_UID.test(expected.chartUid)
+    && target.urlRouteUid === expected.chartUid
+    && target.currentChartUid === expected.chartUid
+    && Array.isArray(target.exactMarkerLayoutIds)
+    && target.exactMarkerLayoutIds.length === 1
+    && target.exactMarkerLayoutIds[0] === expected.layoutId);
 }
 
 /** One-shot acceptance create using the production UI path and one fixed issue-scoped marker. */
@@ -549,6 +597,10 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
 async function readProfileInventory(profileName, dependencies) {
   const profile = await resolveExactRunningProfile(profileName, dependencies);
   const targets = await listTargets(profile.cdpUrl, dependencies);
+  const pageTargetEvidence = targets.filter((target) => target?.type === 'page').map(targetPageEvidence);
+  const evidenceByTargetId = new Map(pageTargetEvidence
+    .filter((entry) => entry.targetId !== null)
+    .map((entry) => [entry.targetId, entry]));
   const profilePageTargetCount = targets.filter((target) => target?.type === 'page').length;
   const blankPageTargetCount = targets.filter((target) => target?.type === 'page' && target?.url === 'about:blank').length;
   let chartTargets = targets.filter(isTradingViewChartTarget);
@@ -574,6 +626,14 @@ async function readProfileInventory(profileName, dependencies) {
         throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
       }
       const layouts = normalizeLayouts(probe.layouts);
+      const pageEvidence = evidenceByTargetId.get(target.id);
+      if (pageEvidence) {
+        pageEvidence.accountSubjectSha256 = probe.account_subject_sha256;
+        pageEvidence.currentChartUid = typeof probe.chart_uid === 'string' ? probe.chart_uid : null;
+        pageEvidence.exactMarkerLayoutIds = layouts
+          .filter((layout) => layout.name === SAVED_CHART_IDEMPOTENCY_PROBE_MARKER)
+          .map((layout) => layout.layoutId).sort();
+      }
       if (hasExactMarkerTargetTitle(target, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER)
         && exactMarkerMatches(layouts, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER).length === 1
         && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
@@ -618,6 +678,7 @@ async function readProfileInventory(profileName, dependencies) {
   return {
     profile,
     targets: chartTargets,
+    pageTargetEvidence,
     profilePageTargetCount,
     blankPageTargetCount,
     probeMarkerTargetCount,
@@ -630,6 +691,26 @@ async function readProfileInventory(profileName, dependencies) {
       if (temporaryTarget !== null) await temporaryTarget.close();
       else await closePage(firstPage);
     },
+  };
+}
+
+function targetPageEvidence(target) {
+  let urlOrigin = null;
+  let urlPath = null;
+  try {
+    const url = new URL(String(target?.url || ''));
+    urlOrigin = url.origin;
+    urlPath = url.pathname;
+  } catch { /* malformed URLs remain visible as unverified diagnostic entries */ }
+  return {
+    targetId: typeof target?.id === 'string' && target.id.length > 0 ? target.id : null,
+    title: typeof target?.title === 'string' ? target.title.slice(0, 200) : '',
+    urlOrigin,
+    urlPath,
+    urlRouteUid: chartTargetRouteId(target),
+    accountSubjectSha256: null,
+    currentChartUid: null,
+    exactMarkerLayoutIds: [],
   };
 }
 

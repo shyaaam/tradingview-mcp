@@ -6,7 +6,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createSavedChartIdempotencyProbe,
   inspectSavedChartIdempotencyProbe,
+  isExactSavedChartIdempotencyProbeTarget,
   preflightSavedChartAuthority,
+  resolveSavedChartIdempotencyProbeRoute,
   SAVED_CHART_IDEMPOTENCY_PROBE_MARKER,
 } from '../src/core/saved-chart-authority.js';
 import { observerManifestHash } from '../src/release/manifest.js';
@@ -72,6 +74,32 @@ async function main(command) {
 
   if (command === 'discover') {
     print(await discover(journalPath, identity));
+    return;
+  }
+
+  if (command === 'diagnose-targets') {
+    if (record.marker !== PROBE_MARKER || record.stage !== 'CONFLICT') {
+      throw new Error('PROBE_TARGET_DIAGNOSTIC_STATE_NOT_AUTHORIZED');
+    }
+    const before = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
+    const route = await resolveSavedChartIdempotencyProbeRoute(PROBE_PROFILE_NAME, record.accountSubjectSha256);
+    const after = await inspectSavedChartIdempotencyProbe(PROBE_PROFILE_NAME);
+    const probeTargets = after.pageTargets.filter((target) => isExactSavedChartIdempotencyProbeTarget(target, {
+      accountSubjectSha256: record.accountSubjectSha256,
+      layoutId: route.layoutId,
+      chartUid: route.chartUid,
+    }));
+    print({
+      command,
+      marker: record.marker,
+      journalStage: record.stage,
+      route,
+      before: targetDiagnosticInventory(before),
+      after: targetDiagnosticInventory(after),
+      targetSetUnchangedAcrossRouteDiscovery: samePageTargetSet(before.pageTargets, after.pageTargets),
+      exactProbeOwnedTargetCount: probeTargets.length,
+      exactProbeOwnedTargetIds: probeTargets.map((target) => target.targetId),
+    });
     return;
   }
 
@@ -180,7 +208,7 @@ function currentProviderIdentity() {
 }
 
 export function assertProviderIdentity(record, identity, command) {
-  if (command === 'discover') return;
+  if (command === 'discover' || command === 'diagnose-targets') return;
   const expected = command === 'create-first'
     ? { providerCommit: record.providerCommit, providerManifestSha256: record.providerManifestSha256 }
     : command === 'create-second'
@@ -190,6 +218,26 @@ export function assertProviderIdentity(record, identity, command) {
     || expected.providerManifestSha256 !== identity.providerManifestSha256) {
     throw new Error('PROBE_PROVIDER_IDENTITY_CHANGED');
   }
+}
+
+function targetDiagnosticInventory(inventory) {
+  return {
+    accountSubjectSha256: inventory.accountSubjectSha256,
+    layoutCount: inventory.layoutCount,
+    inventorySha256: inventory.inventorySha256,
+    nonProbeLayoutCount: inventory.nonProbeLayoutCount,
+    nonProbeInventorySha256: inventory.nonProbeInventorySha256,
+    targetCount: inventory.targetCount,
+    blankTargetCount: inventory.blankTargetCount,
+    pageTargets: inventory.pageTargets,
+  };
+}
+
+function samePageTargetSet(left, right) {
+  const identity = (targets) => JSON.stringify(targets
+    .map(({ targetId, urlOrigin, urlPath }) => [targetId, urlOrigin, urlPath])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))));
+  return identity(left) === identity(right);
 }
 
 function safeCode(error) {
