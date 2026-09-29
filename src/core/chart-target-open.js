@@ -21,14 +21,22 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
   } catch {
     throw codedError('PROFILE_NAME_MISSING_OR_AMBIGUOUS', 'Exact CloakBrowser profile name is missing or ambiguous.');
   }
-  const wasRunning = ['running', 'active'].includes(String(profile.status).toLowerCase());
-  if (!wasRunning) {
+  const initialStatus = String(profile.status).toLowerCase();
+  const initiallyRunning = ['running', 'active'].includes(initialStatus);
+  const initiallyStopped = ['stopped', 'inactive', 'terminated'].includes(initialStatus);
+  const initiallyStarting = ['starting', 'launching', 'pending', 'restarting'].includes(initialStatus);
+  if (!initiallyRunning && !initiallyStopped && !initiallyStarting) {
+    throw codedError('PROFILE_STATE_UNSUPPORTED', 'Exact CloakBrowser profile state is not safe to start.');
+  }
+  let launchPerformed = false;
+  if (initiallyStopped) {
     try {
       await fetchJson(new URL(`profiles/${encodeURIComponent(profile.profile_id)}/launch`, `${managerBaseUrl}/`).toString(),
         deps, { method: 'POST' });
     } catch {
       throw codedError('PROFILE_LAUNCH_FAILED', 'CloakBrowser Manager could not start the exact configured profile.');
     }
+    launchPerformed = true;
   }
 
   let current = null;
@@ -38,7 +46,11 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     } catch {
       throw codedError('PROFILE_NAME_MISSING_OR_AMBIGUOUS', 'Exact CloakBrowser profile name became missing or ambiguous.');
     }
-    if (['running', 'active'].includes(String(current.status).toLowerCase())) break;
+    const status = String(current.status).toLowerCase();
+    if (['running', 'active'].includes(status)) break;
+    if (!['stopped', 'inactive', 'terminated', 'starting', 'launching', 'pending', 'restarting'].includes(status)) {
+      throw codedError('PROFILE_STATE_UNSUPPORTED', 'Exact CloakBrowser profile entered an unsupported state.');
+    }
     current = null;
     await (deps.sleep || sleep)(POLL_INTERVAL_MS);
   }
@@ -69,7 +81,7 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     success: true,
     profile_name: profileName,
     status: 'running',
-    launch_performed: !wasRunning,
+    launch_performed: launchPerformed,
     cdp_ready: true,
   });
 }

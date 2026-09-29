@@ -203,6 +203,48 @@ test('does not launch when exact profile name is ambiguous', async () => {
   assert.equal(launches, 0);
 });
 
+test('waits on an existing profile start without issuing a second launch', async () => {
+  let status = 'starting';
+  let inventoryReads = 0;
+  let launches = 0;
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  const result = await startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        inventoryReads += 1;
+        if (inventoryReads === 2) status = 'running';
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status, cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return response({ webSocketDebuggerUrl: `ws://manager.test/api/profiles/${PROFILE_ID}/cdp` });
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  assert.equal(result.launch_performed, false);
+  assert.equal(result.status, 'running');
+  assert.equal(launches, 0);
+});
+
+test('unsupported profile state fails closed without launch', async () => {
+  let launches = 0;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status: 'error' }]);
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_STATE_UNSUPPORTED');
+  assert.equal(launches, 0);
+});
+
 test('creates a new generic target without hydrating an existing saved-chart route', async () => {
   const existing = {
     id: 'stale-chart', type: 'page', url: 'https://www.tradingview.com/chart/old-account-id/',
