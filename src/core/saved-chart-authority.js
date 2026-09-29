@@ -310,8 +310,12 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
   let createAttempted = false;
   let temporaryTargetClosed = true;
   try {
-    const created = await (dependencies.createSavedLayout || createSavedLayout)(normalized.profileName, normalized.expectedProfileId,
-      normalized.captureSlotId, marker, inventory, dependencies, () => { createAttempted = true; });
+    const onCreateAttempt = () => { createAttempted = true; };
+    const created = dependencies.createSavedLayout
+      ? await dependencies.createSavedLayout(normalized.profileName, normalized.expectedProfileId,
+        normalized.captureSlotId, marker, inventory, dependencies, onCreateAttempt)
+      : await createSavedLayout(normalized.profileName, normalized.expectedProfileId,
+        marker, inventory, dependencies, onCreateAttempt);
     temporaryTargetClosed = created.temporaryTargetClosed;
     return ensureResult(normalized, marker, {
       action: 'created', matchCount: 1, savedChartId: created.chartId,
@@ -706,7 +710,7 @@ async function classifyCreateLayoutDialogFailure(page) {
   }
 }
 
-async function createSavedLayout(profileName, expectedProfileId, captureSlotId, marker, priorInventory, dependencies, onCreateAttempt) {
+async function createSavedLayout(profileName, expectedProfileId, marker, priorInventory, dependencies, onCreateAttempt) {
   const profile = await resolveExactRunningProfile(profileName, dependencies);
   if (expectedProfileId !== null && profile.profileId !== expectedProfileId) {
     throw new Error('PROFILE_UUID_CHANGED_BEFORE_LAYOUT_CREATE');
@@ -738,20 +742,8 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
       throw new Error('ACCOUNT_IDENTITY_CHANGED_BEFORE_LAYOUT_CREATE');
     }
     if (probe.layouts.some((layout) => layout.name === marker)) throw new Error('LAYOUT_MARKER_APPEARED_BEFORE_CREATE');
-    let sourceChartId = probe.chart_uid;
-    if (probe.chart_uid !== null && !CHART_UID.test(probe.chart_uid)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
-    const createdFromSlotA = captureSlotId === 'v5-capture-slot-b'
-      ? probe.layouts.filter((layout) => /^V5OBS-A-[A-Za-z0-9_-]{32}$/u.test(layout.name))
-      : [];
-    if (createdFromSlotA.length > 1) throw new Error('MULTIPLE_SLOT_A_SOURCE_CHARTS');
-    if (createdFromSlotA.length === 1) {
-      await loadSavedLayout(page, createdFromSlotA[0].layoutId, dependencies);
-      const sourceProbe = await waitForPageProbe(page, dependencies);
-      if (sourceProbe.account_subject_sha256 !== priorInventory.accountSubjectSha256
-        || sourceProbe.layouts.filter((layout) => layout.name === createdFromSlotA[0].name).length !== 1
-        || sourceProbe.chart_uid === null) throw new Error('SLOT_A_SOURCE_CHART_NOT_VERIFIED');
-      sourceChartId = sourceProbe.chart_uid;
-    }
+    const sourceChartId = probe.chart_uid;
+    if (sourceChartId !== null && !CHART_UID.test(sourceChartId)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
 
     const before = await waitForAccountProbe(page, dependencies);
     if (stableJson(before.layouts) !== stableJson(priorInventory.layouts)
@@ -885,20 +877,6 @@ async function pressEscape(page, dependencies) {
   const dispatch = dependencies.dispatchKeyEvent || ((event) => page.Input.dispatchKeyEvent(event));
   await dispatch({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
   await dispatch({ type: 'keyUp', key: 'Escape', code: 'Escape' });
-}
-
-async function waitForPageProbe(page, dependencies) {
-  for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
-    try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
-      if (probe?.authenticated === true && HASH.test(String(probe.account_subject_sha256 || ''))
-        && Array.isArray(probe.layouts) && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)) {
-        return { ...probe, layouts: normalizeLayouts(probe.layouts) };
-      }
-    } catch { /* bounded page readiness poll */ }
-    await sleep(dependencies, PAGE_POLL_MS);
-  }
-  throw new Error('TRADINGVIEW_ACCOUNT_OR_LAYOUT_READINESS_TIMEOUT');
 }
 
 async function waitForAccountProbe(page, dependencies) {
