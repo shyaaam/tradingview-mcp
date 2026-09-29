@@ -13,6 +13,13 @@ const PAGE_POLL_ATTEMPTS = 40;
 const PAGE_POLL_MS = 500;
 const CHART_UID = /^[A-Za-z0-9_-]{1,160}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
+export const SAVED_CHART_IDEMPOTENCY_PROBE_MARKER = 'V5_IDEMPOTENCY_PROBE_263_A';
+export function isExplicitSavedChartDuplicateRejection(messages, marker) {
+  return marker === SAVED_CHART_IDEMPOTENCY_PROBE_MARKER && Array.isArray(messages)
+    && messages.some((message) => typeof message === 'string' && message.length <= 500
+      && /\b(already exists|already in use|already used|duplicate)\b/iu.test(message)
+      && (message.includes(marker) || /\b(layout|chart)\b/iu.test(message)));
+}
 const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
   (function() {
     function visible(node) {
@@ -108,6 +115,23 @@ const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
     };
   })()
 `;
+const DUPLICATE_LAYOUT_ALERT_PROBE = (marker) => `/* V5_DUPLICATE_LAYOUT_ALERT_PROBE */
+  (function() {
+    function visible(node) {
+      var rect = node.getBoundingClientRect();
+      var style = window.getComputedStyle(node);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    }
+    return Array.from(document.querySelectorAll(
+      '[role="alert"], [aria-live="polite"], [aria-live="assertive"], [class*="toast"], [class*="notification"], [class*="error"]'
+    )).filter(visible).map(function(node) {
+      return (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+    }).filter(function(text) {
+      return text.indexOf(${JSON.stringify(marker)}) !== -1
+        && /\\b(already exists|already in use|already used|duplicate)\\b/i.test(text);
+    }).slice(0, 10);
+  })()
+`;
 
 export const ACCOUNT_LAYOUT_PROBE = `
   (async function() {
@@ -181,10 +205,96 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   return `V5OBS-${slot}-${digest}`;
 }
 
+/** Read-only inventory for the bounded issue-263 acceptance probe. Not an MCP tool. */
+export async function inspectSavedChartIdempotencyProbe(profileName, dependencies = {}) {
+  if (profileName !== 'tv-observer-1') throw new Error('PROBE_PROFILE_NOT_AUTHORIZED');
+  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(profileName, dependencies);
+  try {
+    if (!inventory.authenticated || inventory.layouts === null) throw new Error('PROFILE_NOT_AUTHENTICATED');
+    if (!Array.isArray(inventory.targets)) throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
+    const nonProbeLayouts = inventory.layouts.filter((layout) => !layout.name.startsWith('V5_IDEMPOTENCY_PROBE_'));
+    return {
+      profileName,
+      authenticated: true,
+      accountSubjectSha256: inventory.accountSubjectSha256,
+      layoutCount: inventory.layouts.length,
+      targetCount: Number.isSafeInteger(inventory.profilePageTargetCount)
+        ? inventory.profilePageTargetCount : inventory.targets.length,
+      blankTargetCount: Number.isSafeInteger(inventory.blankPageTargetCount)
+        ? inventory.blankPageTargetCount : 0,
+      chartTargetCount: inventory.targets.length,
+      inventorySha256: createHash('sha256').update(stableJson(inventory.layouts), 'utf8').digest('hex'),
+      nonProbeLayoutCount: nonProbeLayouts.length,
+      nonProbeInventorySha256: createHash('sha256').update(stableJson(nonProbeLayouts), 'utf8').digest('hex'),
+      probeMarkerCount: exactMarkerMatches(inventory.layouts, SAVED_CHART_IDEMPOTENCY_PROBE_MARKER).length,
+      probePrefixNames: inventory.layouts
+        .filter((layout) => layout.name.startsWith('V5_IDEMPOTENCY_PROBE_'))
+        .map((layout) => layout.name).sort(),
+      layouts: inventory.layouts.map(({ layoutId, name }) => ({ layoutId, name })),
+    };
+  } finally {
+    await closeProfileInventory(inventory);
+  }
+}
+
+/** One-shot acceptance create using the production UI path and one fixed issue-scoped marker. */
+export async function createSavedChartIdempotencyProbe(input = {}, dependencies = {}) {
+  if (input.profileName !== 'tv-observer-1'
+    || input.marker !== SAVED_CHART_IDEMPOTENCY_PROBE_MARKER
+    || typeof input.allowExistingMarker !== 'boolean'
+    || !Number.isSafeInteger(input.expectedProfilePageTargetCount) || input.expectedProfilePageTargetCount < 0
+    || !Number.isSafeInteger(input.expectedBlankPageTargetCount) || input.expectedBlankPageTargetCount < 0
+    || !HASH.test(String(input.expectedAccountSubjectSha256 || ''))) {
+    throw new Error('IDEMPOTENCY_PROBE_REQUEST_INVALID');
+  }
+  if (typeof dependencies.beforeCreateAttempt !== 'function'
+    || typeof dependencies.afterCreateClick !== 'function') {
+    throw new Error('PROBE_JOURNAL_CALLBACKS_REQUIRED');
+  }
+  const expectedProfileId = input.expectedProfileId ?? null;
+  if (expectedProfileId !== null && (typeof expectedProfileId !== 'string'
+    || expectedProfileId.trim() !== expectedProfileId || expectedProfileId.length < 1 || expectedProfileId.length > 160)) {
+    throw new Error('EXPECTED_PROFILE_ID_INVALID');
+  }
+  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(input.profileName, dependencies);
+  let inventoryClosed = false;
+  try {
+    if (expectedProfileId !== null && inventory.profile.profileId !== expectedProfileId) {
+      throw new Error('PROFILE_UUID_CHANGED_BEFORE_PROBE_CREATE');
+    }
+    if (!inventory.authenticated || inventory.layouts === null) throw new Error('PROFILE_NOT_AUTHENTICATED');
+    if (inventory.accountSubjectSha256 !== input.expectedAccountSubjectSha256) {
+      throw new Error('ACCOUNT_IDENTITY_CHANGED');
+    }
+    const currentPageTargetCount = Number.isSafeInteger(inventory.profilePageTargetCount)
+      ? inventory.profilePageTargetCount : inventory.targets.length;
+    const currentBlankPageTargetCount = Number.isSafeInteger(inventory.blankPageTargetCount)
+      ? inventory.blankPageTargetCount : 0;
+    if (currentPageTargetCount !== input.expectedProfilePageTargetCount
+      || currentBlankPageTargetCount !== input.expectedBlankPageTargetCount) {
+      throw new Error('PROFILE_TARGET_COUNTS_CHANGED_BEFORE_PROBE_CREATE');
+    }
+    const matches = exactMarkerMatches(inventory.layouts, input.marker);
+    if (matches.length !== (input.allowExistingMarker ? 1 : 0)) {
+      throw new Error(matches.length > 1 ? 'MULTIPLE_PROBE_LAYOUTS' : 'PROBE_MARKER_STATE_NOT_EXPECTED');
+    }
+    await closeProfileInventory(inventory);
+    inventoryClosed = true;
+    return await (dependencies.createSavedLayout || createSavedLayout)(input.profileName, expectedProfileId,
+      'v5-idempotency-probe-263', input.marker,
+      inventory, { ...dependencies, allowSameNameIdempotencyProbe: input.allowExistingMarker }, async () => {
+        await dependencies.beforeCreateAttempt?.({ marker: input.marker });
+      });
+  } catch (error) {
+    if (!inventoryClosed) await closeMismatchedProfileInventory(inventory);
+    throw error;
+  }
+}
+
 /** Read-only current-account and exact deterministic-layout preflight. */
 export async function preflightSavedChartAuthority(input = {}, dependencies = {}) {
   const normalized = validateEnsureInput(input);
-  const marker = savedChartLayoutMarker(normalized.captureSlotId, normalized.reconciliationKey);
+  const marker = requestedLayoutMarker(normalized, dependencies);
   let inventory;
   try {
     inventory = await (dependencies.readProfileInventory || readProfileInventory)(normalized.profileName, dependencies);
@@ -237,7 +347,7 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
 /** Create once after durable claim, or discover exact marker after any ambiguous prior outcome. */
 export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
   const normalized = validateEnsureInput(input);
-  const marker = savedChartLayoutMarker(normalized.captureSlotId, normalized.reconciliationKey);
+  const marker = requestedLayoutMarker(normalized, dependencies);
   let inventory;
   try {
     inventory = await (dependencies.readProfileInventory || readProfileInventory)(normalized.profileName, dependencies);
@@ -311,7 +421,10 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
   let temporaryTargetClosed = true;
   try {
     const created = await (dependencies.createSavedLayout || createSavedLayout)(normalized.profileName, normalized.expectedProfileId,
-      normalized.captureSlotId, marker, inventory, dependencies, () => { createAttempted = true; });
+      normalized.captureSlotId, marker, inventory, dependencies, async () => {
+        await dependencies.beforeCreateAttempt?.({ marker });
+        createAttempted = true;
+      });
     temporaryTargetClosed = created.temporaryTargetClosed;
     return ensureResult(normalized, marker, {
       action: 'created', matchCount: 1, savedChartId: created.chartId,
@@ -354,6 +467,20 @@ function preflightResult(input, marker, state) {
     chart_target_count: Number.isSafeInteger(state.chartTargetCount) ? state.chartTargetCount : null,
     failure_code: state.failureCode,
   };
+}
+
+function requestedLayoutMarker(input, dependencies) {
+  const probeMarker = dependencies.idempotencyProbeMarker;
+  if (probeMarker === undefined) {
+    if (dependencies.beforeCreateAttempt || dependencies.afterCreateClick) {
+      throw new Error('IDEMPOTENCY_PROBE_HOOK_NOT_AUTHORIZED');
+    }
+    return savedChartLayoutMarker(input.captureSlotId, input.reconciliationKey);
+  }
+  if (input.profileName !== 'tv-observer-1' || probeMarker !== SAVED_CHART_IDEMPOTENCY_PROBE_MARKER) {
+    throw new Error('IDEMPOTENCY_PROBE_MARKER_NOT_AUTHORIZED');
+  }
+  return SAVED_CHART_IDEMPOTENCY_PROBE_MARKER;
 }
 
 function ensureResult(input, marker, state) {
@@ -420,6 +547,8 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
 async function readProfileInventory(profileName, dependencies) {
   const profile = await resolveExactRunningProfile(profileName, dependencies);
   const targets = await listTargets(profile.cdpUrl, dependencies);
+  const profilePageTargetCount = targets.filter((target) => target?.type === 'page').length;
+  const blankPageTargetCount = targets.filter((target) => target?.type === 'page' && target?.url === 'about:blank').length;
   let chartTargets = targets.filter(isTradingViewChartTarget);
   let temporaryTarget = null;
   if (chartTargets.length === 0) {
@@ -480,6 +609,8 @@ async function readProfileInventory(profileName, dependencies) {
   return {
     profile,
     targets: chartTargets,
+    profilePageTargetCount,
+    blankPageTargetCount,
     temporaryTargetCreated: temporaryTarget !== null,
     page: firstPage,
     layouts: canonicalLayouts,
@@ -717,8 +848,10 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   let targetId;
   let page;
   let saved = false;
+  let duplicateRejected = false;
   let chartId = null;
-  let closeBrowser;
+  let temporaryTargetClosed = true;
+  let operationError = null;
   try {
     const created = await browser.Target.createTarget({ url: 'about:blank' });
     targetId = requireText(created?.targetId, 'created target id');
@@ -737,7 +870,11 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     if (probe.account_subject_sha256 !== priorInventory.accountSubjectSha256) {
       throw new Error('ACCOUNT_IDENTITY_CHANGED_BEFORE_LAYOUT_CREATE');
     }
-    if (probe.layouts.some((layout) => layout.name === marker)) throw new Error('LAYOUT_MARKER_APPEARED_BEFORE_CREATE');
+    const allowSameNameProbe = dependencies.allowSameNameIdempotencyProbe === true
+      && marker === SAVED_CHART_IDEMPOTENCY_PROBE_MARKER;
+    if (probe.layouts.some((layout) => layout.name === marker) && !allowSameNameProbe) {
+      throw new Error('LAYOUT_MARKER_APPEARED_BEFORE_CREATE');
+    }
     let sourceChartId = probe.chart_uid;
     if (probe.chart_uid !== null && !CHART_UID.test(probe.chart_uid)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
     const createdFromSlotA = captureSlotId === 'v5-capture-slot-b'
@@ -758,7 +895,8 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
       && stableJson(before.layouts) !== stableJson(probe.layouts)) {
       throw new Error('SAVED_LAYOUT_INVENTORY_CHANGED_BEFORE_CREATE');
     }
-    if (before.layouts.some((layout) => layout.name === marker)) throw new Error('LAYOUT_MARKER_ALREADY_EXISTS');
+    const beforeMarkerCount = before.layouts.filter((layout) => layout.name === marker).length;
+    if (beforeMarkerCount !== (allowSameNameProbe ? 1 : 0)) throw new Error('LAYOUT_MARKER_ALREADY_EXISTS');
 
     await clickUniqueVisible(page, '[data-name="save-load-menu"]', dependencies, 'SAVE_LAYOUT_MENU_NOT_UNIQUE');
     await clickUniqueVisible(page, '[role="row"][aria-label="Create new layout"]', dependencies, 'CREATE_LAYOUT_ACTION_NOT_UNIQUE');
@@ -773,36 +911,69 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     }
     if (!filledForm.createButtonEnabled) throw new Error('CREATE_LAYOUT_BUTTON_NOT_READY');
     const createCoords = filledForm.createCoords;
-    onCreateAttempt();
+    await onCreateAttempt?.();
     await clickAt(page, createCoords, dependencies);
-    const createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
-    chartId = createdProbe.chart_uid;
-    if (chartId === null || (sourceChartId !== null && chartId === sourceChartId) || !CHART_UID.test(chartId)) {
-      throw new Error('NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
+    await dependencies.afterCreateClick?.({ marker });
+    let createdProbe;
+    try {
+      createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
+    } catch (error) {
+      if (allowSameNameProbe && error?.message === 'SAVED_CHART_NAME_DUPLICATE_REJECTED') duplicateRejected = true;
+      else throw error;
     }
-    if (createdProbe.layouts.filter((layout) => layout.name === marker).length !== 1) {
-      throw new Error('CREATED_LAYOUT_MARKER_NOT_UNIQUE');
+    if (!duplicateRejected) {
+      chartId = createdProbe.chart_uid;
+      if (chartId === null || (sourceChartId !== null && chartId === sourceChartId) || !CHART_UID.test(chartId)) {
+        throw new Error('NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
+      }
+      if (createdProbe.layouts.filter((layout) => layout.name === marker).length !== 1) {
+        throw new Error('CREATED_LAYOUT_MARKER_NOT_UNIQUE');
+      }
+      const priorEntries = createdProbe.layouts.filter((layout) => layout.name !== marker)
+        .map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
+      const expectedEntries = priorInventory.layouts
+        .filter((layout) => !allowSameNameProbe || layout.name !== marker)
+        .map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
+      if (stableJson(priorEntries) !== stableJson(expectedEntries)) {
+        throw new Error('EXISTING_SAVED_LAYOUT_INVENTORY_CHANGED');
+      }
+      saved = true;
     }
-    const priorEntries = createdProbe.layouts.filter((layout) => layout.name !== marker)
-      .map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
-    const expectedEntries = priorInventory.layouts.map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
-    if (stableJson(priorEntries) !== stableJson(expectedEntries)) {
-      throw new Error('EXISTING_SAVED_LAYOUT_INVENTORY_CHANGED');
-    }
-    saved = true;
+  } catch (error) {
+    operationError = error;
   } finally {
     if (page) await closePage(page);
     if (targetId) {
       try {
-        closeBrowser = await browser.Target.closeTarget({ targetId });
+        await browser.Target.closeTarget({ targetId });
       } catch {
-        closeBrowser = null;
+        // The bounded target-list read below is authoritative if the close response is lost.
+      }
+      try {
+        temporaryTargetClosed = await waitForTargetClosed(profile.cdpUrl, targetId, dependencies);
+      } catch {
+        temporaryTargetClosed = false;
       }
     }
     try { await browser.close?.(); } catch { /* preserve saved-layout result */ }
   }
-  if (!saved || chartId === null) throw new Error('SAVED_LAYOUT_CREATE_NOT_CONFIRMED');
-  return { chartId, temporaryTargetClosed: closeBrowser?.success === true };
+  if (operationError) {
+    if (operationError instanceof Error) operationError.temporaryTargetClosed = temporaryTargetClosed;
+    throw operationError;
+  }
+  if (duplicateRejected) {
+    return {
+      action: 'duplicate_rejected',
+      failureCode: 'SAVED_CHART_NAME_DUPLICATE_REJECTED',
+      temporaryTargetClosed,
+    };
+  }
+  if (!saved || chartId === null) {
+    const error = new Error('SAVED_LAYOUT_CREATE_NOT_CONFIRMED');
+    error.temporaryTargetClosed = temporaryTargetClosed;
+    throw error;
+  }
+  return { chartId, temporaryTargetClosed };
 }
 
 async function resolveSavedLayoutRoute(profileName, expectedProfileId, layout, expectedAccountHash, dependencies) {
@@ -919,6 +1090,12 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     try {
       const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      if (dependencies.allowSameNameIdempotencyProbe === true) {
+        const messages = await evaluate(page, DUPLICATE_LAYOUT_ALERT_PROBE(marker));
+        if (isExplicitSavedChartDuplicateRejection(messages, marker)) {
+          throw new Error('SAVED_CHART_NAME_DUPLICATE_REJECTED');
+        }
+      }
       if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
         throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION');
       }
@@ -928,7 +1105,8 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
         return { ...probe, layouts: normalizeLayouts(probe.layouts) };
       }
     } catch (error) {
-      if (error.message === 'ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION') throw error;
+      if (['ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION', 'SAVED_CHART_NAME_DUPLICATE_REJECTED']
+        .includes(error.message)) throw error;
     }
     await sleep(dependencies, PAGE_POLL_MS);
   }
@@ -948,6 +1126,17 @@ async function waitForTarget(cdpUrl, targetId, dependencies) {
     await sleep(dependencies, TARGET_POLL_MS);
   }
   return null;
+}
+
+/** @internal Confirm exact disposable CDP target disappearance after close. */
+export async function waitForTargetClosed(cdpUrl, targetId, dependencies = {}) {
+  for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      if (!(await listTargets(cdpUrl, dependencies)).some((target) => target?.id === targetId)) return true;
+    } catch { /* bounded readback; uncertainty remains false */ }
+    if (attempt + 1 < TARGET_POLL_ATTEMPTS) await sleep(dependencies, TARGET_POLL_MS);
+  }
+  return false;
 }
 
 async function fetchJson(url, dependencies) {
