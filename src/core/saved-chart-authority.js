@@ -509,9 +509,6 @@ async function openTemporaryChartTarget(profile, dependencies, existingTargets) 
   if (existingTargets.some(isTradingViewLoginTarget)) {
     throw new Error('TRADINGVIEW_LOGIN_TARGET_PRESENT');
   }
-  if (existingTargets.some((target) => target?.type === 'page' && String(target.url || '').trim() === 'about:blank')) {
-    throw new Error('AMBIGUOUS_BLANK_TARGET_PRESENT');
-  }
   const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
   const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(

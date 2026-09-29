@@ -710,28 +710,85 @@ test('cold profile preflight opens one exact-profile chart tab, reads current ac
   assert.deepEqual(targets, []);
 });
 
-test('cold profile refuses an unresolved blank tab instead of opening a duplicate target', async () => {
+test('cold profile discovers saved layouts with a blank tab while preserving that tab', async () => {
   const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
+  const blankTarget = { id: 'existing-blank', type: 'page', url: 'about:blank' };
+  const temporaryTargetId = 'temporary-inventory-target';
+  let targets = [blankTarget];
   let createCount = 0;
+  let navigateCount = 0;
+  let targetCloseCount = 0;
+  let pageCloseCount = 0;
+  const page = {
+    Runtime: {
+      enable: async () => {},
+      evaluate: async ({ expression }) => ({ result: { value: expression.includes('location.href')
+        ? { url: 'about:blank' }
+        : {
+          authenticated: true,
+          account_subject_sha256: ACCOUNT_HASH,
+          layouts: [{ layout_id: 'current-account-layout', name: MARKER }],
+          chart_uid: null,
+        } } }),
+    },
+    Page: {
+      enable: async () => {},
+      navigate: async ({ url }) => {
+        navigateCount += 1;
+        targets = targets.map((target) => target.id === temporaryTargetId ? { ...target, url } : target);
+        return {};
+      },
+    },
+    close: async () => { pageCloseCount += 1; },
+  };
+  const browser = {
+    Target: {
+      createTarget: async ({ url }) => {
+        assert.equal(url, 'about:blank');
+        createCount += 1;
+        targets = [...targets, {
+          id: temporaryTargetId,
+          type: 'page',
+          url,
+          webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${temporaryTargetId}`,
+        }];
+        return { targetId: temporaryTargetId };
+      },
+      closeTarget: async ({ targetId }) => {
+        assert.equal(targetId, temporaryTargetId);
+        targetCloseCount += 1;
+        targets = targets.filter((target) => target.id !== targetId);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  };
   const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
     managerBaseUrl: 'http://manager.test/api',
     fetch: async (value) => {
       const url = String(value);
       const body = url.endsWith('/profiles')
         ? [{ id: INPUT.expectedProfileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }]
-        : [{ id: 'existing-blank', type: 'page', url: 'about:blank' }];
+        : url.endsWith('/json/version')
+          ? { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp` }
+          : targets;
       return { ok: true, json: async () => body };
     },
-    connectBrowser: async () => {
-      createCount += 1;
-      return assert.fail('must not create while prior blank target is unresolved');
-    },
+    connectBrowser: async () => browser,
+    connectTarget: async () => page,
+    sleep: async () => {},
   });
 
-  assert.equal(result.authenticated, false);
+  assert.equal(result.authenticated, true);
+  assert.equal(result.layout_count, 1);
+  assert.equal(result.chart_target_count, 1);
+  assert.equal(result.failure_code, null);
   assert.equal(result.can_create, false);
-  assert.equal(result.failure_code, 'AMBIGUOUS_BLANK_TARGET_PRESENT');
-  assert.equal(createCount, 0);
+  assert.equal(createCount, 1);
+  assert.equal(navigateCount, 1);
+  assert.equal(targetCloseCount, 1);
+  assert.equal(pageCloseCount, 1);
+  assert.deepEqual(targets, [blankTarget]);
 });
 
 test('existing exact marker is mapped to verified route UID without any new saved-layout mutation', async () => {
