@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { z } from 'zod';
 
-import { openBootstrapChartTarget } from '../src/core/chart-target-open.js';
+import { openBootstrapChartTarget, startExactProfileByName } from '../src/core/chart-target-open.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
 const BASE_URL = 'http://manager.test/api';
@@ -140,6 +140,67 @@ test('resolves the current UUID from exact profile name instead of reusing a sta
   assert.equal(result.profile_id, currentId);
   assert.equal(harness.calls.browserWebSockets[0], `ws://manager.test/api/profiles/${currentId}/cdp`);
   assert.equal(harness.calls.bound[0].profileId, currentId);
+});
+
+test('starts only exact stable-name profile and returns no runtime UUID', async () => {
+  const calls = [];
+  let status = 'stopped';
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  const result = await startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      calls.push({ url, method: init.method || 'GET' });
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status, cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+        assert.equal(init.method, 'POST');
+        status = 'running';
+        return response({ status: 'running' });
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return response({ webSocketDebuggerUrl: `ws://manager.test/api/profiles/${PROFILE_ID}/cdp` });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  assert.deepEqual(result, {
+    success: true,
+    profile_name: PROFILE_NAME,
+    status: 'running',
+    launch_performed: true,
+    cdp_ready: true,
+  });
+  assert.equal(Object.hasOwn(result, 'profile_id'), false);
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ['GET', `${BASE_URL}/profiles`],
+    ['POST', `${BASE_URL}/profiles/${PROFILE_ID}/launch`],
+    ['GET', `${BASE_URL}/profiles`],
+    ['GET', `${cdpUrl}/json/version`],
+  ]);
+  z.object(observerToolDefinitions.tv_observer_start_profile_by_name_v1.inputSchema)
+    .parse({ profile_name: PROFILE_NAME });
+  z.object(observerToolDefinitions.tv_observer_start_profile_by_name_v1.outputSchema).parse(result);
+});
+
+test('does not launch when exact profile name is ambiguous', async () => {
+  let launches = 0;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([
+          { id: 'first', name: PROFILE_NAME, status: 'stopped' },
+          { id: 'second', name: PROFILE_NAME, status: 'stopped' },
+        ]);
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), /missing or ambiguous/u);
+  assert.equal(launches, 0);
 });
 
 test('creates a new generic target without hydrating an existing saved-chart route', async () => {

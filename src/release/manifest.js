@@ -10,6 +10,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_contract',
   'tv_health_check',
   'tv_observer_prepare',
+  'tv_observer_start_profile_by_name_v1',
   'tv_observer_attach_existing_read_only',
   'chart_runtime_readiness_probe_v1',
   'chart_runtime_wait_ready_v1',

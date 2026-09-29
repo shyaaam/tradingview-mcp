@@ -8,6 +8,72 @@ const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const PROFILE_POLL_ATTEMPTS = 30;
 const POLL_INTERVAL_MS = 250;
 
+/** Start one exact profile selected by stable name; never expose its Manager UUID. */
+export async function startExactProfileByName(profileNameValue, dependencies = {}) {
+  const profileName = requireText(profileNameValue, 'profile_name');
+  const deps = dependencies;
+  const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
+  if (!managerBaseUrl) throw codedError('CLOAK_MANAGER_UNAVAILABLE', 'CloakBrowser Manager is unavailable.');
+
+  let profile;
+  try {
+    profile = await loadExactProfile(managerBaseUrl, profileName, deps);
+  } catch {
+    throw codedError('PROFILE_NAME_MISSING_OR_AMBIGUOUS', 'Exact CloakBrowser profile name is missing or ambiguous.');
+  }
+  const wasRunning = ['running', 'active'].includes(String(profile.status).toLowerCase());
+  if (!wasRunning) {
+    try {
+      await fetchJson(new URL(`profiles/${encodeURIComponent(profile.profile_id)}/launch`, `${managerBaseUrl}/`).toString(),
+        deps, { method: 'POST' });
+    } catch {
+      throw codedError('PROFILE_LAUNCH_FAILED', 'CloakBrowser Manager could not start the exact configured profile.');
+    }
+  }
+
+  let current = null;
+  for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      current = await loadExactProfile(managerBaseUrl, profileName, deps);
+    } catch {
+      throw codedError('PROFILE_NAME_MISSING_OR_AMBIGUOUS', 'Exact CloakBrowser profile name became missing or ambiguous.');
+    }
+    if (['running', 'active'].includes(String(current.status).toLowerCase())) break;
+    current = null;
+    await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+  }
+  if (current === null) {
+    throw codedError('PROFILE_LAUNCH_NOT_CONFIRMED', 'Exact CloakBrowser profile did not reach running state.');
+  }
+
+  const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, current.profile_id, current.cdp_url);
+  assertExactProfileCdpPath(cdpUrl, current.profile_id);
+  let version = null;
+  for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), deps);
+      break;
+    } catch {
+      await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+    }
+  }
+  if (version === null) {
+    throw codedError('PROFILE_CDP_NOT_READY', 'Exact CloakBrowser profile CDP did not become ready.');
+  }
+  try {
+    assertExactProfileBrowserWebSocket(version.webSocketDebuggerUrl, cdpUrl, current.profile_id);
+  } catch {
+    throw codedError('PROFILE_CDP_AUTHORITY_MISMATCH', 'Profile CDP endpoint did not match exact profile authority.');
+  }
+  return Object.freeze({
+    success: true,
+    profile_name: profileName,
+    status: 'running',
+    launch_performed: !wasRunning,
+    cdp_ready: true,
+  });
+}
+
 /** Open one fresh generic chart target in an explicitly named, already-running profile. */
 export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   const profileName = requireText(input.profile_name, 'profile_name');
@@ -255,10 +321,16 @@ async function waitForBootstrapLanding(cdpUrl, targetId, deps) {
   return null;
 }
 
-async function fetchJson(url, deps) {
-  const response = await (deps.fetch || fetch)(url);
+async function fetchJson(url, deps, init = {}) {
+  const response = await (deps.fetch || fetch)(url, init);
   if (!response.ok) throw new Error(`CloakBrowser request failed: ${response.status}.`);
   return response.json();
+}
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.failureCode = code;
+  return error;
 }
 
 function isTradingViewChartTarget(target) {

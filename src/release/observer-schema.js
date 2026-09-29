@@ -582,6 +582,20 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().nullable(),
     },
   },
+  tv_observer_start_profile_by_name_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact stable CloakBrowser profile name; no UUID or profile selection is accepted.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      profile_name: z.string().min(1).max(160),
+      status: z.literal('running'),
+      launch_performed: z.boolean(),
+      cdp_ready: z.literal(true),
+    },
+  },
   tv_observer_attach_existing_read_only: {
     classification: 'read_only',
     inputSchema: {
@@ -1343,7 +1357,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);
