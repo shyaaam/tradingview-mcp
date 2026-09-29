@@ -227,6 +227,15 @@ test('prior target-count conflict does not recover when marker page count or lay
     assert.equal(noMatchingPage.record.stage, 'CONFLICT');
     assert.equal(noMatchingPage.createAllowed, false);
 
+    const markerTabGone = await recordProbeDiscovery(path, discovered(
+      [['saved-id-1', PROBE_MARKER]],
+      'e'.repeat(64),
+      { targetCount: INPUT.preTargetCount, probeMarkerTargetCount: 0 },
+    ));
+    assert.equal(markerTabGone.record.stage, 'CONFLICT');
+    assert.equal(markerTabGone.outcome, 'PROFILE_TARGET_COUNT_CHANGED');
+    assert.equal(markerTabGone.createAllowed, false);
+
     const changedLayout = await recordProbeDiscovery(path, discovered(
       [['different-saved-id', PROBE_MARKER]],
       'e'.repeat(64),

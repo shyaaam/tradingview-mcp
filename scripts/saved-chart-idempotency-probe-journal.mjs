@@ -194,7 +194,9 @@ export async function recordProbeDiscovery(path, inventory, providerIdentity = u
     && matches.length === 1
     && priorDiscovery.matchLayoutIds[0] === matches[0].layoutId;
   const recoverPriorTargetConflict = priorTargetConflictMatchesMarker
-    && firstEffectTargetState(record, record.lastDiscovery);
+    && firstEffectTargetState(record, record.lastDiscovery)
+    && record.lastDiscovery.targetCount === record.preTargetCount + 1
+    && record.lastDiscovery.probeMarkerTargetCount === record.preProbeMarkerTargetCount + 1;
 
   if (!nonProbeInventoryStable) {
     record.stage = 'CONFLICT';
