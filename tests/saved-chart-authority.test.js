@@ -815,7 +815,7 @@ test('existing exact marker is mapped to verified route UID without any new save
 });
 
 test('slot B create resolves Slot A independently and rejects a shared route UID', async (t) => {
-  const runCreate = async (createdChartUid) => {
+  const runCreate = async ({ createdChartUid, sourceTargetClosed = true }) => {
     const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
     const browserWebSocketUrl = 'ws://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
     const slotAMarker = savedChartLayoutMarker('v5-capture-slot-a', 'a'.repeat(64));
@@ -915,7 +915,7 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
         assert.equal(layout.layoutId, 'slot-a-layout');
         assert.equal(layout.name, slotAMarker);
         assert.equal(accountHash, ACCOUNT_HASH);
-        return { chartId: 'slot-a-route-uid', temporaryTargetClosed: true };
+        return { chartId: 'slot-a-route-uid', temporaryTargetClosed: sourceTargetClosed };
       },
       dispatchMouseEvent: async (event) => {
         if (event.type === 'mouseReleased' && event.x === 40 && event.y === 40) {
@@ -932,7 +932,7 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
   };
 
   await t.test('distinct route is accepted without loading Slot A into Slot B target', async () => {
-    const proof = await runCreate('fresh-slot-b-route-uid');
+    const proof = await runCreate({ createdChartUid: 'fresh-slot-b-route-uid' });
     assert.equal(proof.result.action, 'created', proof.result.failure_code ?? undefined);
     assert.equal(proof.result.saved_chart_id, 'fresh-slot-b-route-uid');
     assert.equal(proof.result.mutations_performed, true);
@@ -946,13 +946,25 @@ test('slot B create resolves Slot A independently and rejects a shared route UID
   });
 
   await t.test('same route fails closed after exactly one create attempt', async () => {
-    const proof = await runCreate('slot-a-route-uid');
+    const proof = await runCreate({ createdChartUid: 'slot-a-route-uid' });
     assert.equal(proof.result.action, 'unknown');
     assert.equal(proof.result.failure_code, 'NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
     assert.equal(proof.result.mutations_performed, true);
     assert.equal(proof.loadedSlotA, false);
     assert.equal(proof.sourceResolutionCount, 1);
     assert.equal(proof.createClickCount, 1);
+  });
+
+  await t.test('unconfirmed Slot A discovery close is reported and prevents create', async () => {
+    const proof = await runCreate({ createdChartUid: 'unused-route', sourceTargetClosed: false });
+    assert.equal(proof.result.action, 'unknown');
+    assert.equal(proof.result.failure_code, 'SLOT_A_SOURCE_TARGET_CLOSE_UNCONFIRMED');
+    assert.equal(proof.result.temporary_target_closed, false);
+    assert.equal(proof.result.mutations_performed, false);
+    assert.equal(proof.loadedSlotA, false);
+    assert.equal(proof.sourceResolutionCount, 1);
+    assert.equal(proof.createClickCount, 0);
+    assert.equal(proof.layouts.length, 1);
   });
 });
 

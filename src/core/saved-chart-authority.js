@@ -323,6 +323,7 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       mutationsPerformed: true, temporaryTargetClosed, failureCode: null,
     });
   } catch (error) {
+    temporaryTargetClosed = temporaryTargetCloseEvidence(error);
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null,
       accountSubjectSha256: inventory.accountSubjectSha256,
@@ -756,7 +757,11 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
       // Resolve A on a separate disposable target; never load it into B's create target.
       const source = await (dependencies.resolveSavedLayoutRoute || resolveSavedLayoutRoute)(
         profileName, expectedProfileId, slotASources[0], priorInventory.accountSubjectSha256, dependencies);
-      if (source.temporaryTargetClosed !== true) throw new Error('SLOT_A_SOURCE_TARGET_CLOSE_UNCONFIRMED');
+      if (source.temporaryTargetClosed !== true) {
+        const error = new Error('SLOT_A_SOURCE_TARGET_CLOSE_UNCONFIRMED');
+        error.temporaryTargetClosed = false;
+        throw error;
+      }
       if (!CHART_UID.test(source.chartId)) throw new Error('SLOT_A_SOURCE_ROUTE_ID_NOT_PROVEN');
       sourceChartIds.add(source.chartId);
     }
