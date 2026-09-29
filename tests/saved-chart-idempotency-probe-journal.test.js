@@ -185,6 +185,50 @@ test('completed probe retirement remains valid through second-create journaling 
     assert.equal(discovery.outcome, 'EXPLICIT_DUPLICATE_REJECTION');
     assert.equal(discovery.record.stage, 'CANDIDATE_UNIQUE');
     assert.equal(discovery.record.targetRetirement.status, 'COMPLETE');
+
+    const reopened = await readProbeJournal(path);
+    assert.equal(reopened.stage, 'CANDIDATE_UNIQUE');
+    assert.equal(reopened.targetRetirement.status, 'COMPLETE');
+  });
+});
+
+test('completed probe retirement remains valid in persisted ambiguous, non-idempotent, and conflict stages', async () => {
+  await withJournal(async (path) => {
+    await prepareProbeJournal(path, INPUT);
+    await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER],
+    ], 'd'.repeat(64), { targetCount: 2, probeMarkerTargetCount: 1 }));
+    await armProbeTargetRetirement(path, retirementProof());
+    await completeProbeTargetRetirement(path, retirementReadback(), 'ALREADY_CLOSED_AFTER_RESTART');
+
+    const second = await runChild(path, `await armProbeCreate(journalPath, 2); await markProbeClickDispatched(journalPath, 2);`);
+    assert.equal(second.code, 0);
+
+    const ambiguous = await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER],
+    ]));
+    assert.equal(ambiguous.record.stage, 'SECOND_OUTCOME_UNKNOWN');
+    const reopenedAmbiguous = await readProbeJournal(path);
+    assert.equal(reopenedAmbiguous.stage, 'SECOND_OUTCOME_UNKNOWN');
+    assert.equal(reopenedAmbiguous.targetRetirement.status, 'COMPLETE');
+
+    const nonIdempotent = await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER], ['206128986', PROBE_MARKER],
+    ]));
+    assert.equal(nonIdempotent.outcome, 'TWO_DISTINCT_LAYOUTS');
+    assert.equal(nonIdempotent.record.stage, 'NOT_IDEMPOTENT');
+    const reopenedNonIdempotent = await readProbeJournal(path);
+    assert.equal(reopenedNonIdempotent.stage, 'NOT_IDEMPOTENT');
+    assert.equal(reopenedNonIdempotent.targetRetirement.status, 'COMPLETE');
+
+    const conflict = await recordProbeDiscovery(path, discovered([
+      ['206102994', PROBE_MARKER], ['206128986', PROBE_MARKER],
+    ], INPUT.preInventorySha256, { accountSubjectSha256: '9'.repeat(64) }));
+    assert.equal(conflict.outcome, 'ACCOUNT_IDENTITY_CHANGED');
+    assert.equal(conflict.record.stage, 'CONFLICT');
+    const reopenedConflict = await readProbeJournal(path);
+    assert.equal(reopenedConflict.stage, 'CONFLICT');
+    assert.equal(reopenedConflict.targetRetirement.status, 'COMPLETE');
   });
 });
 
