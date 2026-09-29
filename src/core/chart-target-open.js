@@ -7,6 +7,79 @@ import { resolveManagerCdpUrl } from './manager-cdp.js';
 const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const PROFILE_POLL_ATTEMPTS = 30;
 const POLL_INTERVAL_MS = 250;
+const PROFILE_REQUEST_TIMEOUT_MS = 2_000;
+
+/** Start one exact profile selected by stable name; never expose its Manager UUID. */
+export async function startExactProfileByName(profileNameValue, dependencies = {}) {
+  const profileName = requireText(profileNameValue, 'profile_name');
+  const deps = dependencies;
+  const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
+  if (!managerBaseUrl) throw codedError('CLOAK_MANAGER_UNAVAILABLE', 'CloakBrowser Manager is unavailable.');
+
+  const profile = await loadExactProfile(managerBaseUrl, profileName, deps);
+  const initialStatus = String(profile.status).toLowerCase();
+  const initiallyRunning = ['running', 'active'].includes(initialStatus);
+  const initiallyStopped = ['stopped', 'inactive', 'terminated'].includes(initialStatus);
+  const initiallyStarting = ['starting', 'launching', 'pending', 'restarting'].includes(initialStatus);
+  if (!initiallyRunning && !initiallyStopped && !initiallyStarting) {
+    throw codedError('PROFILE_STATE_UNSUPPORTED', 'Exact CloakBrowser profile state is not safe to start.');
+  }
+  let launchPerformed = false;
+  if (initiallyStopped) {
+    try {
+      await fetchJsonWithDeadline(new URL(`profiles/${encodeURIComponent(profile.profile_id)}/launch`, `${managerBaseUrl}/`).toString(),
+        deps, { method: 'POST' });
+    } catch {
+      throw codedError('PROFILE_LAUNCH_FAILED', 'CloakBrowser Manager could not start the exact configured profile.');
+    }
+    launchPerformed = true;
+  }
+
+  let current = null;
+  for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+    current = await loadExactProfile(managerBaseUrl, profileName, deps);
+    const status = String(current.status).toLowerCase();
+    if (['running', 'active'].includes(status)) break;
+    if (!['stopped', 'inactive', 'terminated', 'starting', 'launching', 'pending', 'restarting'].includes(status)) {
+      throw codedError('PROFILE_STATE_UNSUPPORTED', 'Exact CloakBrowser profile entered an unsupported state.');
+    }
+    current = null;
+    await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+  }
+  if (current === null) {
+    throw codedError('PROFILE_LAUNCH_NOT_CONFIRMED', 'Exact CloakBrowser profile did not reach running state.');
+  }
+
+  const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, current.profile_id, current.cdp_url);
+  assertExactProfileCdpPath(cdpUrl, current.profile_id);
+  let version = null;
+  for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      version = await fetchJsonWithDeadline(new URL('json/version', `${cdpUrl}/`).toString(), deps);
+      break;
+    } catch (error) {
+      if (isRequestDeadlineError(error)) {
+        throw codedError('PROFILE_CDP_NOT_READY', 'Exact profile CDP did not respond before its bounded request deadline.');
+      }
+      await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+    }
+  }
+  if (version === null) {
+    throw codedError('PROFILE_CDP_NOT_READY', 'Exact CloakBrowser profile CDP did not become ready.');
+  }
+  try {
+    assertExactProfileBrowserWebSocket(version.webSocketDebuggerUrl, cdpUrl, current.profile_id);
+  } catch {
+    throw codedError('PROFILE_CDP_AUTHORITY_MISMATCH', 'Profile CDP endpoint did not match exact profile authority.');
+  }
+  return Object.freeze({
+    success: true,
+    profile_name: profileName,
+    status: 'running',
+    launch_performed: launchPerformed,
+    cdp_ready: true,
+  });
+}
 
 /** Open one fresh generic chart target in an explicitly named, already-running profile. */
 export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
@@ -145,12 +218,30 @@ async function bindAndReturn({ managerBaseUrl, profileName, profileId, cdpUrl, t
 }
 
 async function loadExactProfile(managerBaseUrl, profileName, deps) {
-  const payload = await fetchJson(new URL('profiles', `${managerBaseUrl}/`).toString(), deps);
+  let payload;
+  try {
+    payload = await fetchJsonWithDeadline(new URL('profiles', `${managerBaseUrl}/`).toString(), deps);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw codedError('PROFILE_INVENTORY_INVALID', 'CloakBrowser profile inventory response is not valid JSON.');
+    }
+    throw codedError('PROFILE_INVENTORY_UNAVAILABLE', 'CloakBrowser profile inventory request failed or timed out.');
+  }
   const profiles = Array.isArray(payload) ? payload : payload?.profiles;
-  if (!Array.isArray(profiles)) throw new Error('CloakBrowser profile inventory is malformed.');
-  const normalized = profiles.map((entry, index) => normalizeProfileEntry(entry, index));
+  if (!Array.isArray(profiles)) {
+    throw codedError('PROFILE_INVENTORY_INVALID', 'CloakBrowser profile inventory is malformed.');
+  }
+  let normalized;
+  try {
+    normalized = profiles.map((entry, index) => normalizeProfileEntry(entry, index));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'CloakBrowser profile inventory is malformed.';
+    throw codedError('PROFILE_INVENTORY_INVALID', message);
+  }
   const matches = normalized.filter((entry) => entry.profileName === profileName);
-  if (matches.length !== 1) throw new Error('Exact CloakBrowser profile name is missing or ambiguous.');
+  if (matches.length !== 1) {
+    throw codedError('PROFILE_NAME_MISSING_OR_AMBIGUOUS', 'Exact CloakBrowser profile name is missing or ambiguous.');
+  }
   const match = matches[0];
   return {
     name: match.profileName,
@@ -255,10 +346,43 @@ async function waitForBootstrapLanding(cdpUrl, targetId, deps) {
   return null;
 }
 
-async function fetchJson(url, deps) {
-  const response = await (deps.fetch || fetch)(url);
+async function fetchJson(url, deps, init = {}) {
+  const response = await (deps.fetch || fetch)(url, init);
   if (!response.ok) throw new Error(`CloakBrowser request failed: ${response.status}.`);
   return response.json();
+}
+
+async function fetchJsonWithDeadline(url, deps, init = {}) {
+  const controller = new AbortController();
+  let timer;
+  const request = Promise.resolve().then(() => fetchJson(url, deps, {
+    ...init,
+    signal: controller.signal,
+  }));
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      const error = new Error('CloakBrowser request exceeded its bounded deadline.');
+      error.name = 'TimeoutError';
+      reject(error);
+    }, PROFILE_REQUEST_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([request, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRequestDeadlineError(error) {
+  return error !== null && typeof error === 'object'
+    && 'name' in error && ['AbortError', 'TimeoutError'].includes(String(error.name));
+}
+
+function codedError(code, message) {
+  const error = new Error(message);
+  error.failureCode = code;
+  return error;
 }
 
 function isTradingViewChartTarget(target) {

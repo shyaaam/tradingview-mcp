@@ -1,8 +1,24 @@
 import { jsonResult } from './_format.js';
-import { openBootstrapChartTarget, resolveExactRunningProfile } from '../core/chart-target-open.js';
+import { openBootstrapChartTarget, resolveExactRunningProfile, startExactProfileByName } from '../core/chart-target-open.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerChartTargetOpenTool(server) {
+  registerObserverTool(
+    server,
+    'tv_observer_start_profile_by_name_v1',
+    'Start one exact stable-name CloakBrowser profile when stopped and wait for its exact profile CDP endpoint; never opens or mutates chart tabs',
+    async ({ profile_name }) => {
+      try { return jsonResult(await startExactProfileByName(profile_name)); }
+      catch (error) {
+        return jsonResult({
+          success: false,
+          error: error.message,
+          failure_code: error.failureCode || 'PROFILE_START_FAILED',
+        }, true);
+      }
+    },
+  );
+
   registerObserverTool(
     server,
     'tv_observer_resolve_profile_name_v1',

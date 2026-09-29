@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { z } from 'zod';
 
-import { openBootstrapChartTarget } from '../src/core/chart-target-open.js';
+import { openBootstrapChartTarget, startExactProfileByName } from '../src/core/chart-target-open.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
 const BASE_URL = 'http://manager.test/api';
@@ -140,6 +140,166 @@ test('resolves the current UUID from exact profile name instead of reusing a sta
   assert.equal(result.profile_id, currentId);
   assert.equal(harness.calls.browserWebSockets[0], `ws://manager.test/api/profiles/${currentId}/cdp`);
   assert.equal(harness.calls.bound[0].profileId, currentId);
+});
+
+test('starts only exact stable-name profile and returns no runtime UUID', async () => {
+  const calls = [];
+  let status = 'stopped';
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  const result = await startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      calls.push({ url, method: init.method || 'GET' });
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status, cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+        assert.equal(init.method, 'POST');
+        status = 'running';
+        return response({ status: 'running' });
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return response({ webSocketDebuggerUrl: `ws://manager.test/api/profiles/${PROFILE_ID}/cdp` });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  assert.deepEqual(result, {
+    success: true,
+    profile_name: PROFILE_NAME,
+    status: 'running',
+    launch_performed: true,
+    cdp_ready: true,
+  });
+  assert.equal(Object.hasOwn(result, 'profile_id'), false);
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ['GET', `${BASE_URL}/profiles`],
+    ['POST', `${BASE_URL}/profiles/${PROFILE_ID}/launch`],
+    ['GET', `${BASE_URL}/profiles`],
+    ['GET', `${cdpUrl}/json/version`],
+  ]);
+  z.object(observerToolDefinitions.tv_observer_start_profile_by_name_v1.inputSchema)
+    .parse({ profile_name: PROFILE_NAME });
+  z.object(observerToolDefinitions.tv_observer_start_profile_by_name_v1.outputSchema).parse(result);
+});
+
+test('does not launch when exact profile name is ambiguous', async () => {
+  let launches = 0;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([
+          { id: 'first', name: PROFILE_NAME, status: 'stopped' },
+          { id: 'second', name: PROFILE_NAME, status: 'stopped' },
+        ]);
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_NAME_MISSING_OR_AMBIGUOUS');
+  assert.equal(launches, 0);
+});
+
+test('Manager transport failure has inventory-unavailable code, not profile-missing code', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => { throw new Error('connection refused'); },
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_UNAVAILABLE');
+});
+
+test('malformed Manager inventory has its own fail-closed code', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => response([{ id: PROFILE_ID, name: PROFILE_NAME }]),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_INVALID');
+});
+
+test('invalid Manager inventory JSON is not mislabeled as missing profile', async () => {
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('invalid'); } }),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_INVALID');
+});
+
+test('stalled Manager inventory request aborts at its per-request deadline', async () => {
+  let requestSignal;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (_url, init = {}) => await new Promise((_resolve, reject) => {
+      requestSignal = init.signal;
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    }),
+  }), (error) => error.failureCode === 'PROFILE_INVENTORY_UNAVAILABLE');
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
+});
+
+test('stalled profile CDP request aborts instead of outliving readiness attempts', async () => {
+  let requestSignal;
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status: 'running',
+          cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return await new Promise((_resolve, reject) => {
+          requestSignal = init.signal;
+          init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_CDP_NOT_READY');
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
+});
+
+test('waits on an existing profile start without issuing a second launch', async () => {
+  let status = 'starting';
+  let inventoryReads = 0;
+  let launches = 0;
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  const result = await startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        inventoryReads += 1;
+        if (inventoryReads === 2) status = 'running';
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status, cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return response({ webSocketDebuggerUrl: `ws://manager.test/api/profiles/${PROFILE_ID}/cdp` });
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  assert.equal(result.launch_performed, false);
+  assert.equal(result.status, 'running');
+  assert.equal(launches, 0);
+});
+
+test('unsupported profile state fails closed without launch', async () => {
+  let launches = 0;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status: 'error' }]);
+      }
+      if (init.method === 'POST') launches += 1;
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_STATE_UNSUPPORTED');
+  assert.equal(launches, 0);
 });
 
 test('creates a new generic target without hydrating an existing saved-chart route', async () => {
