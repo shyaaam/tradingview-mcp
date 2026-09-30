@@ -1078,7 +1078,7 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
     if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
       throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
     }
-    lastObserved = savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash);
+    lastObserved = savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash, marker, savedLayoutId);
     const activeFailure = savedLayoutPageReadbackFailure(probe, marker, savedLayoutId);
     if (activeFailure !== null) lastFailure = activeFailure;
     if (probe !== null && activeFailure === null) {
@@ -1123,16 +1123,15 @@ function savedLayoutPageReadbackFailure(probe, marker, savedLayoutId) {
   return null;
 }
 
-function savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash) {
-  const identifier = (value) => typeof value === 'string' && value.length > 0
-    ? value.replace(/[^A-Za-z0-9_-]/gu, '_').slice(0, 160)
-    : 'missing';
+function savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash, marker, savedLayoutId) {
+  const routeReadbackMatches = typeof probe?.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
+    && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`;
   return [
     `authenticated=${probe?.authenticated === true}`,
     `account_match=${probe?.account_subject_sha256 === expectedAccountHash}`,
-    `active_id=${identifier(probe?.active_saved_layout_id)}`,
-    `active_name=${identifier(probe?.active_saved_layout_name)}`,
-    `route=${identifier(probe?.chart_uid)}`,
+    `active_id_match=${probe?.active_saved_layout_id === savedLayoutId}`,
+    `active_name_match=${probe?.active_saved_layout_name === marker}`,
+    `route_readback_match=${routeReadbackMatches}`,
   ].join(';');
 }
 

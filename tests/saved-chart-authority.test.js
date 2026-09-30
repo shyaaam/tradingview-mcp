@@ -878,7 +878,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const savedLayoutId = '206000778';
-  const runtimeChartId = 'runtime-route-a';
+  let runtimeChartId = 'runtime-route-a';
   const targetId = 'fresh-layout-target';
   const targets = new Map();
   let loaded = false;
@@ -998,7 +998,9 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(fullLayoutProbeCount, 2);
   assert.equal(targets.has(targetId), true);
 
-  activeSavedLayoutId = '206128986';
+  runtimeChartId = `private-route-${'r'.repeat(146)}`;
+  activeSavedLayoutId = `PRIVATE_LAYOUT_ID_${'x'.repeat(180)}`;
+  activeSavedLayoutName = `PRIVATE_ACCOUNT_LAYOUT_NAME_${'y'.repeat(180)}`;
   await assert.rejects(hydrateSavedChartLayout({
     profileName: INPUT.profileName,
     captureSlotId: INPUT.captureSlotId,
@@ -1022,10 +1024,15 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     sleep: async () => {},
   }), (error) => {
     assert.match(error.message, /SAVED_LAYOUT_LOAD_NOT_CONFIRMED:SAVED_LAYOUT_ACTIVE_ID_MISMATCH/u);
-    assert.match(error.message, /active_id=206128986/u);
-    assert.match(error.message, /active_name=V5OBS-A-/u);
-    assert.match(error.message, /route=runtime-route-a/u);
+    assert.match(error.message, /authenticated=true/u);
+    assert.match(error.message, /account_match=true/u);
+    assert.match(error.message, /active_id_match=false/u);
+    assert.match(error.message, /active_name_match=false/u);
+    assert.match(error.message, /route_readback_match=true/u);
     assert.ok(error.message.length <= 512);
+    assert.ok(!error.message.includes(activeSavedLayoutId));
+    assert.ok(!error.message.includes(activeSavedLayoutName));
+    assert.ok(!error.message.includes(runtimeChartId));
     assert.doesNotMatch(error.message, /https?:\/\//u);
     return true;
   });
