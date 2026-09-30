@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { TextEncoder } from 'node:util';
 
 import {
+  ACTIVE_SAVED_LAYOUT_PROBE,
   ACCOUNT_LAYOUT_PROBE,
   ensureSavedChartAuthority,
   hydrateSavedChartLayout,
@@ -267,6 +268,27 @@ test('saved-layout probe keeps active server ID distinct from non-unique route U
   assert.equal(probe.chart_uid, 'current-route-uid');
   assert.equal(probe.active_saved_layout_id, '206000778');
   assert.equal(probe.active_saved_layout_name, MARKER);
+});
+
+test('active saved-layout poll avoids saved-layout inventory callback', async () => {
+  let inventoryReadCount = 0;
+  const window = {
+    TradingViewApi: {
+      _user: { id: 'current-account' },
+      _chartWidgetCollection: { metaInfo: { id: '206000778', name: MARKER } },
+      getSavedCharts() { inventoryReadCount += 1; throw new Error('inventory must not be polled'); },
+    },
+    crypto: { subtle: { digest: async () => new Uint8Array(32).buffer } },
+    location: { pathname: '/chart/current-route-uid/', href: 'https://www.tradingview.com/chart/current-route-uid/' },
+  };
+
+  const probe = await vm.runInNewContext(ACTIVE_SAVED_LAYOUT_PROBE, { window, TextEncoder });
+
+  assert.equal(probe.authenticated, true);
+  assert.equal(probe.active_saved_layout_id, '206000778');
+  assert.equal(probe.active_saved_layout_name, MARKER);
+  assert.equal(probe.chart_uid, 'current-route-uid');
+  assert.equal(inventoryReadCount, 0);
 });
 
 test('read-only preflight reports current-account marker state and create availability', async () => {
@@ -865,6 +887,8 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   let activeSavedLayoutName = MARKER;
   let targetCloseCount = 0;
   let targetCreateCount = 0;
+  let activeProbeCount = 0;
+  let fullLayoutProbeCount = 0;
   const page = {
     Runtime: {
       enable: async () => {},
@@ -875,6 +899,21 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
           targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
           return { result: { value: { ok: true } } };
         }
+        if (expression === ACTIVE_SAVED_LAYOUT_PROBE) {
+          activeProbeCount += 1;
+          const active = loaded && activeProbeCount >= 3;
+          return { result: { value: {
+            authenticated: true,
+            account_subject_sha256: ACCOUNT_HASH,
+            chart_uid: active ? runtimeChartId : null,
+            current_url: active
+              ? `https://www.tradingview.com/chart/${runtimeChartId}/`
+              : 'https://www.tradingview.com/chart/',
+            active_saved_layout_id: active ? activeSavedLayoutId : null,
+            active_saved_layout_name: active ? activeSavedLayoutName : null,
+          } } };
+        }
+        if (expression === ACCOUNT_LAYOUT_PROBE) fullLayoutProbeCount += 1;
         return { result: { value: {
           authenticated: true,
           account_subject_sha256: ACCOUNT_HASH,
@@ -955,6 +994,8 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(loadedRequestedId, savedLayoutId);
   assert.equal(targetCreateCount, 1);
   assert.equal(targetCloseCount, 0);
+  assert.equal(activeProbeCount, 3);
+  assert.equal(fullLayoutProbeCount, 2);
   assert.equal(targets.has(targetId), true);
 
   activeSavedLayoutId = '206128986';
@@ -979,7 +1020,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     connectBrowser: async () => browser,
     connectTarget: async () => page,
     sleep: async () => {},
-  }), /SAVED_LAYOUT_LOAD_NOT_CONFIRMED/u);
+  }), /SAVED_LAYOUT_LOAD_NOT_CONFIRMED:SAVED_LAYOUT_ACTIVE_ID_MISMATCH/u);
   assert.equal(targetCloseCount, 1);
   assert.equal(targets.has(targetId), false);
 });

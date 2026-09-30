@@ -195,6 +195,63 @@ export const ACCOUNT_LAYOUT_PROBE = `
   })()
 `;
 
+// Poll only active-page identity during hydration; saved-layout inventory has its own bounded callback.
+export const ACTIVE_SAVED_LAYOUT_PROBE = `/* V5_ACTIVE_SAVED_LAYOUT_PROBE */
+  (async function() {
+    function read(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+      } catch { return ''; }
+    }
+    function objectValue(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value && typeof value === 'object' ? value : null;
+      } catch { return null; }
+    }
+    var api = window.TradingViewApi;
+    var collection = api && api._chartWidgetCollection;
+    var metaInfo = objectValue(collection && collection.metaInfo);
+    var activeSavedLayoutId = read(metaInfo && metaInfo.id);
+    var activeSavedLayoutName = read(metaInfo && metaInfo.name);
+    var subjects = [];
+    var candidates = [
+      api && api._user && (api._user.id || api._user.user_id || api._user.username),
+      window.TradingView && window.TradingView.user && (window.TradingView.user.id || window.TradingView.user.user_id || window.TradingView.user.username),
+      collection && collection.metaInfo && collection.metaInfo.username,
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      var value = read(candidates[i]);
+      if (value && subjects.indexOf(value) === -1) subjects.push(value);
+    }
+    if (subjects.length !== 1 || !window.crypto || !window.crypto.subtle) {
+      return {
+        authenticated: false, account_subject_sha256: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
+    }
+    var digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(subjects[0]));
+    var accountHash = Array.prototype.map.call(new Uint8Array(digest), function(byte) {
+      return byte.toString(16).padStart(2, '0');
+    }).join('');
+    var match = String(window.location && window.location.pathname || '').match(/^\\/chart\\/([A-Za-z0-9_-]{1,160})\\/?$/u);
+    return {
+      authenticated: true,
+      account_subject_sha256: accountHash,
+      chart_uid: match ? match[1] : null,
+      current_url: String(window.location && window.location.href || ''),
+      active_saved_layout_id: activeSavedLayoutId || null,
+      active_saved_layout_name: activeSavedLayoutName || null,
+    };
+  })()
+`;
+
 export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   validateEnsureInput({ profileName: 'profile', captureSlotId, reconciliationKey });
   const slot = captureSlotId === 'v5-capture-slot-a' ? 'A' : 'B';
@@ -1011,28 +1068,57 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
 }
 
 async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies) {
+  let lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
+    let probe = null;
     try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
-      if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+      probe = await evaluate(page, ACTIVE_SAVED_LAYOUT_PROBE);
+    } catch { lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE'; }
+    if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+      throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
+    }
+    const activeFailure = savedLayoutPageReadbackFailure(probe, marker, savedLayoutId);
+    if (activeFailure !== null) lastFailure = activeFailure;
+    if (probe !== null && activeFailure === null) {
+      let verified;
+      try {
+        verified = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      } catch {
+        throw new Error('SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE_AFTER_HYDRATION');
+      }
+      if (verified?.authenticated !== true) {
+        throw new Error('SAVED_LAYOUT_ACCOUNT_NOT_AUTHENTICATED_AFTER_HYDRATION');
+      }
+      if (verified.account_subject_sha256 !== expectedAccountHash) {
         throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
       }
-      const exactMarker = Array.isArray(probe?.layouts)
-        ? probe.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker)
-        : [];
-      if (probe?.authenticated === true && exactMarker.length === 1
-        && probe.active_saved_layout_id === savedLayoutId
-        && probe.active_saved_layout_name === marker
-        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
-        && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
-        return probe;
+      if (!Array.isArray(verified.layouts)) {
+        throw new Error('SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE_AFTER_HYDRATION');
       }
-    } catch (error) {
-      if (error.message === 'ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION') throw error;
+      const exactMarker = verified.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker);
+      if (exactMarker.length !== 1) {
+        throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH_AFTER_HYDRATION');
+      }
+      const finalFailure = savedLayoutPageReadbackFailure(verified, marker, savedLayoutId);
+      if (finalFailure !== null) throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${finalFailure}`);
+      return { ...verified, layouts: normalizeLayouts(verified.layouts) };
     }
-    await sleep(dependencies, PAGE_POLL_MS);
+    if (attempt + 1 < PAGE_POLL_ATTEMPTS) await sleep(dependencies, PAGE_POLL_MS);
   }
-  throw new Error('SAVED_LAYOUT_LOAD_NOT_CONFIRMED');
+  throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${lastFailure}`);
+}
+
+function savedLayoutPageReadbackFailure(probe, marker, savedLayoutId) {
+  if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))) {
+    return 'SAVED_LAYOUT_ACCOUNT_NOT_READY';
+  }
+  if (probe.active_saved_layout_id !== savedLayoutId) return 'SAVED_LAYOUT_ACTIVE_ID_MISMATCH';
+  if (probe.active_saved_layout_name !== marker) return 'SAVED_LAYOUT_ACTIVE_NAME_MISMATCH';
+  if (typeof probe.chart_uid !== 'string' || !CHART_UID.test(probe.chart_uid)
+    || probe.current_url !== `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
+    return 'SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH';
+  }
+  return null;
 }
 
 async function listTargets(cdpUrl, dependencies) {
