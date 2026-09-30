@@ -800,7 +800,7 @@ export const observerToolDefinitions = Object.freeze({
       mutations_performed: z.literal(true),
     },
   },
-  tv_observer_retire_saved_chart_v1: {
+  tv_observer_retire_saved_chart_v2: {
     classification: 'bootstrap_mutation',
     inputSchema: {
       profile_name: z.string().min(1).max(160),
@@ -814,7 +814,7 @@ export const observerToolDefinitions = Object.freeze({
     },
     outputSchema: {
       success: z.literal(true),
-      retirement_version: z.literal('saved-layout-retirement-v1'),
+      retirement_version: z.literal('saved-chart-retirement-v2'),
       authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
       authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
       profile_name: z.string().min(1).max(160),
@@ -1387,7 +1387,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_hydrate_saved_layout_v1' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_hydrate_saved_layout_v1' && name !== 'tv_observer_retire_saved_chart_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);

@@ -266,7 +266,7 @@ function normalizeInput(input) {
 function result(expected, targetId, action, remainingChartTargets, mutationsPerformed, accountSubjectSha256) {
   return Object.freeze({
     success: true,
-    retirement_version: 'saved-layout-retirement-v1',
+    retirement_version: 'saved-chart-retirement-v2',
     authority_id: expected.authorityId,
     authority_hash: expected.authorityHash,
     profile_name: expected.profileName,

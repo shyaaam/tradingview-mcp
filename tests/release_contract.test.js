@@ -88,7 +88,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_saved_chart_authority_preflight_v1',
     'tv_observer_ensure_saved_chart_authority_v1',
     'tv_observer_hydrate_saved_layout_v1',
-    'tv_observer_retire_saved_chart_v1',
+    'tv_observer_retire_saved_chart_v2',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -345,9 +345,9 @@ test('observer result fixtures satisfy registered output schemas', () => {
       state: 'hydrated',
       mutations_performed: true,
     },
-    tv_observer_retire_saved_chart_v1: {
+    tv_observer_retire_saved_chart_v2: {
       success: true,
-      retirement_version: 'saved-layout-retirement-v1',
+      retirement_version: 'saved-chart-retirement-v2',
       authority_id: `v5-capture-slot:${'a'.repeat(64)}`,
       authority_hash: 'a'.repeat(64),
       profile_name: 'tv-observer-1',

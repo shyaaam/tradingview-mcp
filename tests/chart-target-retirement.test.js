@@ -331,13 +331,13 @@ test('retirement rejects caller-minted or cross-slot authority before profile ac
 });
 
 test('retirement contract requires stable saved-layout authority', () => {
-  const definition = observerToolDefinitions.tv_observer_retire_saved_chart_v1;
+  const definition = observerToolDefinitions.tv_observer_retire_saved_chart_v2;
   assert.deepEqual(Object.keys(definition.inputSchema).sort(), [
     'allowed_origins', 'authority_hash', 'authority_id', 'capture_slot_id',
     'layout_code', 'profile_name', 'reconciliation_key', 'saved_layout_id',
   ].sort());
-  assert.deepEqual(definition.outputSchema.retirement_version.safeParse('saved-layout-retirement-v1'), {
+  assert.deepEqual(definition.outputSchema.retirement_version.safeParse('saved-chart-retirement-v2'), {
     success: true,
-    data: 'saved-layout-retirement-v1',
+    data: 'saved-chart-retirement-v2',
   });
 });
