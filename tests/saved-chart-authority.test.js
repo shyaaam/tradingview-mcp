@@ -426,6 +426,35 @@ test('create preflight fails closed when disposable chart target cannot be close
   assert.equal(result.create_preflight_failure_code, 'CREATE_PREFLIGHT_TARGET_CLOSE_UNCONFIRMED');
 });
 
+test('create preflight bounds a stalled capability read and closes its exact temporary target', async () => {
+  let closeCount = 0;
+  const result = await preflightSavedChartAuthority(INPUT, {
+    authorityReadTimeoutMs: 25,
+    readProfileInventory: async () => inventory([{
+      layoutId: 'existing-layout', name: 'Existing', symbol: '', resolution: '',
+    }]),
+    openTemporaryChartTarget: async () => {
+      let closed = false;
+      return {
+        target: { id: 'temporary-capability-target', type: 'page', url: 'https://www.tradingview.com/chart/' },
+        page: preflightProbePage([{ layoutId: 'existing-layout', name: 'Existing' }]),
+        close: async () => {
+          if (!closed) {
+            closed = true;
+            closeCount += 1;
+          }
+        },
+      };
+    },
+    canCreateSavedLayout: async () => await new Promise(() => {}),
+  });
+
+  assert.equal(result.authenticated, true);
+  assert.equal(result.can_create, false);
+  assert.equal(result.create_preflight_failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
+  assert.equal(closeCount, 1);
+});
+
 test('read-only preflight diagnoses a marker length limit before any saved-chart create click', async () => {
   const { result, inventoryCloseCount, temporaryTargetCloseCount, pressedClicks } = await runReadOnlyCreateFormPreflight(32);
 
@@ -621,6 +650,40 @@ test('profile UUID mismatch reports failed temporary-target cleanup in both endp
   });
 });
 
+test('successful authority inventory with failed temporary-target cleanup returns durable fail-closed result', async (t) => {
+  const readProfileInventory = async () => ({
+    ...inventory([{ layoutId: 'exact-layout', name: MARKER }]),
+    temporaryTargetCreated: true,
+    close: async () => { throw new Error('temporary target close did not confirm'); },
+  });
+
+  await t.test('preflight', async () => {
+    const result = await preflightSavedChartAuthority(INPUT, { readProfileInventory });
+
+    assert.equal(result.authenticated, true);
+    assert.equal(result.can_create, false);
+    assert.equal(result.failure_code, 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED');
+  });
+
+  await t.test('ensure', async () => {
+    let createCount = 0;
+    const result = await ensureSavedChartAuthority({
+      ...INPUT,
+      expectedAccountSubjectSha256: ACCOUNT_HASH,
+      createIfAbsent: true,
+    }, {
+      readProfileInventory,
+      createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+    });
+
+    assert.equal(result.action, 'unknown');
+    assert.equal(result.failure_code, 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED');
+    assert.equal(result.temporary_target_closed, false);
+    assert.equal(result.mutations_performed, false);
+    assert.equal(createCount, 0);
+  });
+});
+
 test('default profile inventory marks verified current-account tabs authenticated', async () => {
   const target = {
     id: 'ephemeral-chart-target',
@@ -739,6 +802,134 @@ test('read-only authority preflight closes a stalled exact-page CDP read and ret
   assert.equal(result.failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
   assert.equal(pageClosed, true);
   assert.equal(result.can_create, false);
+});
+
+test('cold-profile inventory bounds temporary-target creation and closes exact target after lost response', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const targetId = 'late-temporary-inventory-target';
+  let targets = [];
+  let closedTargetId = null;
+  const browser = {
+    Target: {
+      createTarget: async () => {
+        targets = [{ id: targetId, type: 'page', url: 'about:blank' }];
+        return await new Promise(() => {});
+      },
+      closeTarget: async ({ targetId: id }) => {
+        closedTargetId = id;
+        targets = targets.filter((target) => target.id !== id);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  };
+  const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
+    managerBaseUrl: 'http://manager.test/api',
+    authorityReadTimeoutMs: 25,
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname === '/api/profiles'
+        ? [{ id: profileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }]
+        : url.pathname === `/profiles/${profileId}/cdp/json/version`
+          ? { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` }
+          : targets;
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+  });
+
+  assert.equal(result.authenticated, false);
+  assert.equal(result.failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
+  assert.equal(result.can_create, false);
+  assert.equal(closedTargetId, targetId);
+  assert.deepEqual(targets, []);
+});
+
+test('cold-profile inventory preserves unknown outcome when timed-out target creation has no exact readback', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const browser = {
+    Target: { createTarget: async () => await new Promise(() => {}) },
+    close: async () => {},
+  };
+  const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
+    managerBaseUrl: 'http://manager.test/api',
+    authorityReadTimeoutMs: 25,
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname === '/api/profiles'
+        ? [{ id: profileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }]
+        : url.pathname === `/profiles/${profileId}/cdp/json/version`
+          ? { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` }
+          : [];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+  });
+
+  assert.equal(result.authenticated, false);
+  assert.equal(result.failure_code, 'TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN');
+  assert.equal(result.can_create, false);
+});
+
+test('cold-profile inventory bounds temporary-target navigation and confirms exact cleanup', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const targetId = 'stalled-temporary-inventory-target';
+  let targets = [];
+  let closedTargetId = null;
+  const page = {
+    Runtime: {
+      enable: async () => {},
+      evaluate: async () => ({ result: { value: { url: 'about:blank' } } }),
+    },
+    Page: {
+      enable: async () => {},
+      navigate: async () => await new Promise(() => {}),
+    },
+    close: async () => {},
+  };
+  const browser = {
+    Target: {
+      createTarget: async () => {
+        targets = [{
+          id: targetId,
+          type: 'page',
+          url: 'about:blank',
+          webSocketDebuggerUrl: `${cdpUrl}/devtools/page/${targetId}`,
+        }];
+        return { targetId };
+      },
+      closeTarget: async ({ targetId: id }) => {
+        closedTargetId = id;
+        targets = targets.filter((target) => target.id !== id);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  };
+  const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
+    managerBaseUrl: 'http://manager.test/api',
+    authorityReadTimeoutMs: 25,
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname === '/api/profiles'
+        ? [{ id: profileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }]
+        : url.pathname === `/profiles/${profileId}/cdp/json/version`
+          ? { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` }
+          : targets;
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async () => page,
+  });
+
+  assert.equal(result.authenticated, false);
+  assert.equal(result.failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
+  assert.equal(result.can_create, false);
+  assert.equal(closedTargetId, targetId);
+  assert.deepEqual(targets, []);
 });
 
 test('cold profile preflight opens one exact-profile chart tab, reads current account, and closes it', async () => {
@@ -1337,7 +1528,7 @@ test('inventory WebSocket failure with unconfirmed temporary-target close cannot
   });
 
   assert.equal(result.action, 'unknown');
-  assert.equal(result.failure_code, 'CDP_WEBSOCKET_NOT_OPEN');
+  assert.equal(result.failure_code, 'TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
   assert.equal(result.mutations_performed, false);
   assert.equal(result.temporary_target_closed, false);
   assert.equal(createCount, 0);

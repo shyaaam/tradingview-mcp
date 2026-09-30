@@ -274,7 +274,11 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     }
   } catch (error) {
     const cleanup = inventory === undefined
-      ? { failureCode: null }
+      ? {
+        failureCode: temporaryTargetCloseEvidence(error)
+          || safeFailureCode(error) === 'TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN'
+          ? null : 'TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED',
+      }
       : await closeMismatchedProfileInventory(inventory);
     return preflightResult(normalized, marker, {
       authenticated: false,
@@ -290,6 +294,7 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
   }
 
   let createProbe = { available: false, failureCode: null, inputCount: null, inputMaxLength: null };
+  let inventoryCloseFailureCode = null;
   try {
     if (inventory.authenticated && inventory.layouts !== null
       && exactMarkerMatches(inventory.layouts, marker).length === 0) {
@@ -300,7 +305,14 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
       }
     }
   } finally {
-    await closeProfileInventory(inventory);
+    try {
+      await closeProfileInventory(inventory);
+    } catch {
+      inventoryCloseFailureCode = inventory.temporaryTargetCreated
+        ? 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED'
+        : 'PROFILE_INVENTORY_CLOSE_UNCONFIRMED';
+      createProbe = { available: false, failureCode: inventoryCloseFailureCode, inputCount: null, inputMaxLength: null };
+    }
   }
   return preflightResult(normalized, marker, {
     authenticated: inventory.authenticated,
@@ -311,7 +323,8 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     createFailureCode: createProbe.failureCode,
     createInputCount: createProbe.inputCount,
     createInputMaxLength: createProbe.inputMaxLength,
-    failureCode: inventory.authenticated && inventory.layouts !== null ? null : 'PROFILE_NOT_AUTHENTICATED',
+    failureCode: inventoryCloseFailureCode
+      ?? (inventory.authenticated && inventory.layouts !== null ? null : 'PROFILE_NOT_AUTHENTICATED'),
   });
 }
 
@@ -327,7 +340,12 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
     }
   } catch (error) {
     const cleanup = inventory === undefined
-      ? { temporaryTargetClosed: temporaryTargetCloseEvidence(error), failureCode: null }
+      ? {
+        temporaryTargetClosed: temporaryTargetCloseEvidence(error),
+        failureCode: temporaryTargetCloseEvidence(error)
+          || safeFailureCode(error) === 'TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN'
+          ? null : 'TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED',
+      }
       : await closeMismatchedProfileInventory(inventory);
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null, accountSubjectSha256: null,
@@ -335,7 +353,19 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       failureCode: cleanup.failureCode ?? safeFailureCode(error),
     });
   }
-  await closeProfileInventory(inventory);
+  try {
+    await closeProfileInventory(inventory);
+  } catch {
+    return ensureResult(normalized, marker, {
+      action: 'unknown', matchCount: 0, savedChartId: null,
+      accountSubjectSha256: inventory.accountSubjectSha256,
+      mutationsPerformed: false,
+      temporaryTargetClosed: inventory.temporaryTargetCreated !== true,
+      failureCode: inventory.temporaryTargetCreated === true
+        ? 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED'
+        : 'PROFILE_INVENTORY_CLOSE_UNCONFIRMED',
+    });
+  }
   if (!inventory.authenticated || inventory.layouts === null) {
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null,
@@ -562,14 +592,15 @@ function ensureResult(input, marker, state) {
 }
 
 async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies) {
+  const deadline = createAuthorityReadDeadline(dependencies);
   let temporaryTarget;
   let result = { available: false, failureCode: 'CREATE_PREFLIGHT_NOT_COMPLETED', inputCount: null, inputMaxLength: null };
   let closeFailed = false;
   try {
     temporaryTarget = await (dependencies.openTemporaryChartTarget || openTemporaryChartTarget)(
-      inventory.profile, dependencies, inventory.targets,
+      inventory.profile, dependencies, inventory.allTargets || inventory.targets, deadline,
     );
-    const probe = await evaluate(temporaryTarget.page, ACCOUNT_LAYOUT_PROBE);
+    const probe = await evaluate(temporaryTarget.page, ACCOUNT_LAYOUT_PROBE, deadline);
     if (probe?.authenticated !== true || probe.account_subject_sha256 !== inventory.accountSubjectSha256
       || !Array.isArray(probe.layouts)) {
       throw new Error('CREATE_PREFLIGHT_ACCOUNT_OR_LAYOUT_IDENTITY_MISMATCH');
@@ -581,8 +612,10 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
     if (exactMarkerMatches(layouts, marker).length !== 0) {
       throw new Error('CREATE_PREFLIGHT_MARKER_APPEARED');
     }
-    result = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(
-      temporaryTarget.page, marker, dependencies,
+    result = await withAuthorityReadDeadline(
+      () => (dependencies.canCreateSavedLayout || canCreateSavedLayout)(temporaryTarget.page, marker, dependencies),
+      deadline,
+      () => { void temporaryTarget.close().catch(() => {}); },
     );
   } catch (error) {
     result = { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
@@ -610,7 +643,9 @@ async function readProfileInventory(profileName, dependencies) {
   let chartTargets = targets.filter(isTradingViewChartTarget);
   let temporaryTarget = null;
   if (chartTargets.length === 0) {
-    temporaryTarget = await (dependencies.createInventoryTarget || openTemporaryChartTarget)(profile, dependencies, targets);
+    temporaryTarget = await (dependencies.createInventoryTarget || openTemporaryChartTarget)(
+      profile, dependencies, targets, deadline,
+    );
     chartTargets = [temporaryTarget.target];
   }
 
@@ -666,6 +701,7 @@ async function readProfileInventory(profileName, dependencies) {
   }
   return {
     profile,
+    allTargets: temporaryTarget === null ? targets : [...targets, temporaryTarget.target],
     targets: chartTargets,
     temporaryTargetCreated: temporaryTarget !== null,
     page: firstPage,
@@ -705,66 +741,104 @@ function withTemporaryTargetCloseEvidence(error, closeConfirmed) {
   return wrapped;
 }
 
-async function openTemporaryChartTarget(profile, dependencies, existingTargets) {
+async function openTemporaryChartTarget(profile, dependencies, existingTargets,
+  deadline = createAuthorityReadDeadline(dependencies)) {
   if (existingTargets.some(isTradingViewLoginTarget)) {
     throw new Error('TRADINGVIEW_LOGIN_TARGET_PRESENT');
   }
-  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
+  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies, deadline);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
-  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(
-    version.webSocketDebuggerUrl,
+  const browser = await withAuthorityReadDeadline(
+    () => (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl),
+    deadline,
   );
   let targetId = null;
   let page = null;
-  let closed = false;
+  let targetCreateAttempted = false;
+  let targetCreationResolved = false;
+  let closePromise = null;
   const close = async () => {
-    if (closed) return;
-    closed = true;
-    if (page) {
-      try { await closePage(page); } catch { /* target close below is authoritative */ }
-    }
-    let result = null;
-    if (targetId !== null) {
-      try { result = await browser.Target.closeTarget({ targetId }); } catch { result = null; }
-    }
-    try { await browser.close?.(); } catch { /* exact target close result is authoritative */ }
-    if (targetId === null || result?.success !== true) {
-      throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
-    }
+    if (closePromise) return await closePromise;
+    closePromise = (async () => {
+      const cleanupDeadline = createAuthorityReadDeadline(dependencies);
+      if (page) await closePage(page, cleanupDeadline);
+      let result = null;
+      if (targetId !== null) {
+        try {
+          result = await withAuthorityReadDeadline(
+            () => browser.Target.closeTarget({ targetId }), cleanupDeadline,
+          );
+        } catch { result = null; }
+      }
+      try {
+        await withAuthorityReadDeadline(() => browser.close?.(), cleanupDeadline);
+      } catch { /* exact target close result is authoritative */ }
+      if (targetCreateAttempted && targetId === null && !targetCreationResolved) {
+        throw new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN');
+      }
+      if (targetId !== null && result?.success !== true) {
+        throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
+      }
+    })();
+    return await closePromise;
   };
   try {
-    const created = await browser.Target.createTarget({ url: 'about:blank' });
+    targetCreateAttempted = true;
+    const created = await withAuthorityReadDeadline(
+      () => browser.Target.createTarget({ url: 'about:blank' }), deadline,
+    );
     const createdTargetId = requireText(created?.targetId, 'temporary inventory target id');
     if (existingTargets.some((target) => target?.id === createdTargetId)) {
+      targetCreationResolved = true;
       throw new Error('TEMPORARY_INVENTORY_TARGET_ID_ALREADY_EXISTS');
     }
     targetId = createdTargetId;
-    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    targetCreationResolved = true;
+    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies, deadline);
     if (!target || target.type !== 'page' || target.url !== 'about:blank'
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
       throw new Error('TEMPORARY_INVENTORY_TARGET_NOT_EXACT');
     }
-    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(
-      target.webSocketDebuggerUrl,
-    );
-    await enablePage(page);
-    const before = await evaluate(page, '({ url: location.href })');
+    page = await connectTarget(target, dependencies, deadline);
+    await enablePage(page, deadline);
+    const before = await evaluate(page, '({ url: location.href })', deadline);
     if (before?.url !== 'about:blank') throw new Error('TEMPORARY_INVENTORY_TARGET_LEFT_BLANK');
-    const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    const navigation = await withAuthorityReadDeadline(
+      () => page.Page.navigate({ url: GENERIC_CHART_URL }), deadline,
+      () => { void close().catch(() => {}); },
+    );
     if (navigation?.errorText) throw new Error('TEMPORARY_INVENTORY_NAVIGATION_FAILED');
-    await waitForAccountProbe(page, dependencies);
-    const navigatedTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    await waitForAccountProbe(page, dependencies, deadline);
+    const navigatedTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies, deadline);
     if (!isTradingViewChartTarget(navigatedTarget)) {
       throw new Error('TEMPORARY_INVENTORY_TARGET_ROUTE_NOT_EXACT');
     }
     return { target: navigatedTarget, page, close };
   } catch (error) {
     let temporaryTargetClosed = false;
+    let failure = error;
+    if (targetCreateAttempted && targetId === null && !targetCreationResolved) {
+      try {
+        const cleanupDeadline = createAuthorityReadDeadline(dependencies);
+        const currentTargets = await listTargets(profile.cdpUrl, dependencies, cleanupDeadline);
+        const existingIds = new Set(existingTargets.map((target) => target?.id));
+        const added = currentTargets.filter((target) => !existingIds.has(target?.id));
+        if (added.length === 1 && added[0]?.type === 'page' && added[0]?.url === 'about:blank'
+          && typeof added[0]?.id === 'string' && added[0].id.length > 0) {
+          targetId = added[0].id;
+          targetCreationResolved = true;
+        } else {
+          failure = new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
+        }
+      } catch {
+        failure = new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
+      }
+    }
     try {
       await close();
       temporaryTargetClosed = true;
-    } catch { /* retain close uncertainty for the caller */ }
-    throw inventoryReadFailure(error, temporaryTargetClosed);
+    } catch { /* preserve primary failure; cleanup is separately reported as false */ }
+    throw inventoryReadFailure(failure, temporaryTargetClosed);
   }
 }
 
@@ -1038,16 +1112,17 @@ async function pressEscape(page, dependencies) {
   await dispatch({ type: 'keyUp', key: 'Escape', code: 'Escape' });
 }
 
-async function waitForAccountProbe(page, dependencies) {
+async function waitForAccountProbe(page, dependencies, deadline) {
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
       if (probe?.authenticated === true && HASH.test(String(probe.account_subject_sha256 || ''))
         && Array.isArray(probe.layouts)) {
         return { ...probe, layouts: normalizeLayouts(probe.layouts) };
       }
     } catch { /* bounded page readiness poll */ }
-    await sleep(dependencies, PAGE_POLL_MS);
+    if (deadline === undefined) await sleep(dependencies, PAGE_POLL_MS);
+    else await withAuthorityReadDeadline(() => sleep(dependencies, PAGE_POLL_MS), deadline);
   }
   throw new Error('TRADINGVIEW_ACCOUNT_OR_LAYOUT_READINESS_TIMEOUT');
 }
@@ -1149,7 +1224,8 @@ async function waitForTarget(cdpUrl, targetId, dependencies, deadline) {
   for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
     const target = (await listTargets(cdpUrl, dependencies, deadline)).find((entry) => entry?.id === targetId);
     if (target) return target;
-    await sleep(dependencies, TARGET_POLL_MS);
+    if (deadline === undefined) await sleep(dependencies, TARGET_POLL_MS);
+    else await withAuthorityReadDeadline(() => sleep(dependencies, TARGET_POLL_MS), deadline);
   }
   return null;
 }
