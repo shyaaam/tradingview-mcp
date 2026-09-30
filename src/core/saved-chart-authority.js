@@ -487,16 +487,20 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     await enablePage(page);
     const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
     if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
-    const beforeLoad = await waitForAccountProbe(page, dependencies);
+    const beforeLoadDeadline = createAuthorityReadDeadline(dependencies);
+    const beforeLoad = await waitForAccountProbe(page, dependencies, beforeLoadDeadline);
     if (beforeLoad.account_subject_sha256 !== accountSubjectSha256
       || stableJson(beforeLoad.layouts) !== stableJson(priorLayouts)) {
       throw new Error('SAVED_LAYOUT_ACCOUNT_OR_INVENTORY_CHANGED');
     }
     const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId && layout.name === marker);
     if (exactBeforeLoad.length !== 1) throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
-    await loadSavedLayout(page, savedLayoutId, marker, dependencies);
-    const probe = await waitForSavedLayoutPageProbe(page, marker, savedLayoutId, accountSubjectSha256, dependencies);
-    const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    const hydrationDeadline = createAuthorityReadDeadline(dependencies);
+    await loadSavedLayout(page, savedLayoutId, marker, dependencies, hydrationDeadline);
+    const probe = await waitForSavedLayoutPageProbe(
+      page, marker, savedLayoutId, accountSubjectSha256, dependencies, hydrationDeadline,
+    );
+    const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies, hydrationDeadline);
     const canonicalUrl = `https://www.tradingview.com/chart/${probe.chart_uid}/`;
     if (!currentTarget || currentTarget.url !== canonicalUrl || probe.current_url !== canonicalUrl) {
       throw new Error('SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH');
@@ -1079,9 +1083,8 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   return { savedLayoutId, temporaryTargetClosed: closeBrowser?.success === true };
 }
 
-async function loadSavedLayout(page, layoutId, marker, dependencies) {
-  const deadline = createAuthorityReadDeadline(dependencies);
-  const loadTimeoutMs = Math.max(1, deadline.timeoutMs - 250);
+async function loadSavedLayout(page, layoutId, marker, dependencies, deadline) {
+  const loadTimeoutMs = Math.max(1, Math.floor(deadline.at - performance.now() - 250));
   const expression = `(async function() {
     var api = window.TradingViewApi;
     if (!api || typeof api.getSavedCharts !== 'function' || typeof api.loadChartFromServer !== 'function') {
@@ -1128,14 +1131,14 @@ async function loadSavedLayout(page, layoutId, marker, dependencies) {
         ? 'SAVED_LAYOUT_LOAD_TIMEOUT' : 'SAVED_LAYOUT_LOAD_REJECTED' };
     } finally { clearTimeout(loadTimer); }
   })()`;
-  const result = await withAuthorityReadDeadline(() => evaluate(page, expression), deadline);
+  const result = await evaluate(page, expression, deadline);
   if (result?.ok !== true) {
     const failureCode = typeof result?.error === 'string'
       && /^SAVED_LAYOUT_[A-Z0-9_]{1,64}$/u.test(result.error)
       ? result.error : 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE';
     throw new Error(failureCode);
   }
-  await sleep(dependencies, 1000);
+  await withAuthorityReadDeadline(() => sleep(dependencies, 1000), deadline);
 }
 
 async function clickUniqueVisible(page, selector, dependencies, errorCode) {
@@ -1199,14 +1202,17 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
   throw new Error('SAVED_CHART_CREATE_OR_DISCOVERY_NOT_CONFIRMED');
 }
 
-async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies) {
+async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies, deadline) {
   let lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
   let lastObserved = null;
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     let probe = null;
     try {
-      probe = await evaluate(page, ACTIVE_SAVED_LAYOUT_PROBE);
-    } catch { lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE'; }
+      probe = await evaluate(page, ACTIVE_SAVED_LAYOUT_PROBE, deadline);
+    } catch (error) {
+      if (error?.message === 'SAVED_CHART_AUTHORITY_READ_TIMEOUT') throw error;
+      lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
+    }
     if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
       throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
     }
@@ -1216,8 +1222,9 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
     if (probe !== null && activeFailure === null) {
       let verified;
       try {
-        verified = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
-      } catch {
+        verified = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
+      } catch (error) {
+        if (error?.message === 'SAVED_CHART_AUTHORITY_READ_TIMEOUT') throw error;
         throw new Error('SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE_AFTER_HYDRATION');
       }
       if (verified?.authenticated !== true) {
@@ -1237,7 +1244,9 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
       if (finalFailure !== null) throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${finalFailure}`);
       return { ...verified, layouts: normalizeLayouts(verified.layouts) };
     }
-    if (attempt + 1 < PAGE_POLL_ATTEMPTS) await sleep(dependencies, PAGE_POLL_MS);
+    if (attempt + 1 < PAGE_POLL_ATTEMPTS) {
+      await withAuthorityReadDeadline(() => sleep(dependencies, PAGE_POLL_MS), deadline);
+    }
   }
   throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${lastFailure}:${lastObserved}`);
 }
