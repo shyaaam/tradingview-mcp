@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import CDP from 'chrome-remote-interface';
+import WebSocket from 'ws';
 
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
@@ -41,8 +41,14 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
     cdpUrl,
     profileId,
   );
-  const connectBrowser = dependencies.connectBrowser || ((url) => CDP({ target: url, local: true }));
-  const browser = await connectBrowser(browserWebSocketUrl);
+  const connectBrowser = dependencies.connectBrowser || connectBoundedBrowser;
+  const browser = await withDeadline(
+    () => connectBrowser(browserWebSocketUrl, {
+      maxPayload: MAX_RETIREMENT_READ_BYTES,
+      handshakeTimeoutMs: Math.max(1, Math.floor(remainingMs(deadline) - POLL_INTERVAL_MS)),
+    }),
+    deadline,
+  );
   try {
     return await retireFromProfile({
       expected,
@@ -55,6 +61,110 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   } finally {
     try { await browser.close?.(); } catch { /* preserve retirement outcome */ }
   }
+}
+
+function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
+  if (maxPayload !== MAX_RETIREMENT_READ_BYTES || !Number.isSafeInteger(handshakeTimeoutMs)
+    || handshakeTimeoutMs <= 0) {
+    throw new Error('Browser CDP transport bounds are invalid.');
+  }
+  const socket = new WebSocket(url, {
+    maxPayload,
+    handshakeTimeout: handshakeTimeoutMs,
+    perMessageDeflate: false,
+  });
+  const pending = new Map();
+  let nextId = 1;
+  let opened = false;
+  let rejectOpen;
+  const connected = new Promise((resolve, reject) => {
+    rejectOpen = reject;
+    socket.once('open', () => {
+      opened = true;
+      resolve();
+    });
+  });
+  const failPending = (error) => {
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+  };
+  socket.on('error', (error) => {
+    if (!opened) rejectOpen(handshakeError(error, handshakeTimeoutMs));
+    failPending(transportError(error));
+  });
+  socket.on('close', () => {
+    const error = new Error('Browser CDP WebSocket closed.');
+    if (!opened) rejectOpen(error);
+    failPending(error);
+  });
+  socket.on('message', (data) => {
+    const bytes = Buffer.isBuffer(data) ? data.byteLength : Buffer.byteLength(String(data));
+    if (bytes > maxPayload) {
+      socket.terminate();
+      failPending(new Error(`Browser CDP frame exceeds bounded ${maxPayload}-byte transport limit.`));
+      return;
+    }
+    let message;
+    try {
+      message = JSON.parse(data.toString('utf8'));
+    } catch {
+      socket.terminate();
+      failPending(new Error('Browser CDP returned malformed JSON.'));
+      return;
+    }
+    if (!Number.isSafeInteger(message?.id)) return;
+    const request = pending.get(message.id);
+    if (!request) return;
+    pending.delete(message.id);
+    if (message.error) request.reject(new Error(`Browser CDP command failed: ${String(message.error.message || 'unknown error')}`));
+    else request.resolve(message.result || {});
+  });
+
+  const send = (method, params = {}, sessionId) => {
+    if (socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('Browser CDP WebSocket is not open.'));
+    }
+    const id = nextId++;
+    const message = { id, method, params };
+    if (sessionId) message.sessionId = sessionId;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      socket.send(JSON.stringify(message), (error) => {
+        if (!error) return;
+        pending.delete(id);
+        reject(transportError(error));
+      });
+    });
+  };
+  const browser = {
+    Target: {
+      attachToTarget: (params) => send('Target.attachToTarget', params),
+      detachFromTarget: (params) => send('Target.detachFromTarget', params),
+      closeTarget: (params) => send('Target.closeTarget', params),
+    },
+    send,
+    close: () => {
+      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    },
+  };
+  return connected.then(() => browser, (error) => {
+    socket.terminate();
+    throw error;
+  });
+}
+
+function handshakeError(error, timeoutMs) {
+  if (/handshake.*timed out/iu.test(String(error?.message || ''))) {
+    return new Error(`Browser CDP WebSocket handshake exceeded bounded ${timeoutMs}ms deadline.`);
+  }
+  return error;
+}
+
+function transportError(error) {
+  if (/max payload size exceeded/iu.test(String(error?.message || ''))) {
+    return new Error(`Browser CDP frame exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte transport limit.`);
+  }
+  return error;
 }
 
 async function retireFromProfile({ expected, dependencies, deadline, browser, requestJson, cdpUrl }) {

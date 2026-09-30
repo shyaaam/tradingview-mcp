@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import test from 'node:test';
+import WebSocket from 'ws';
 
 import { retireSavedChartTarget } from '../src/core/chart-target-retirement.js';
 import { savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
@@ -97,6 +99,33 @@ function fixture(initialTargets = [
 
 function ok(value) {
   return new Response(JSON.stringify(value), { status: 200 });
+}
+
+function setLocalCdpEndpoint(deps, port) {
+  const endpoint = `127.0.0.1:${port}/profiles/current-profile/cdp`;
+  deps.calls.profileCdpUrl = `http://${endpoint}`;
+  deps.calls.browserWebSocketUrl = `ws://${endpoint}`;
+  delete deps.connectBrowser;
+}
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+}
+
+function once(emitter, event) {
+  return new Promise((resolve, reject) => {
+    emitter.once(event, resolve);
+    emitter.once('error', reject);
+  });
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
 }
 
 function makeAuthority(overrides = {}) {
@@ -236,6 +265,59 @@ test('retirement requires positive close acknowledgement and exact profile CDP a
     /outside exact Manager profile authority/u,
   );
   assert.deepEqual(wrongEndpoint.calls.close, []);
+});
+
+test('aborts a stalled exact-profile CDP WebSocket handshake within its deadline', async () => {
+  const server = createServer();
+  const sockets = new Set();
+  server.on('upgrade', (_request, socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+  });
+  const port = await listen(server);
+  const deps = fixture();
+  setLocalCdpEndpoint(deps, port);
+  try {
+    await assert.rejects(
+      retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 300 }),
+      /WebSocket handshake exceeded bounded \d+ms deadline/u,
+    );
+    assert.deepEqual(deps.calls.close, []);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await close(server);
+  }
+});
+
+test('rejects oversized CDP frames at WebSocket transport before identity parsing or close', async () => {
+  const server = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  server.on('connection', (socket) => {
+    socket.on('message', (data) => {
+      const request = JSON.parse(data.toString('utf8'));
+      if (request.method === 'Target.attachToTarget') {
+        socket.send(JSON.stringify({ id: request.id, result: { sessionId: 'session-target-a' } }));
+      } else if (request.method === 'Runtime.evaluate') {
+        socket.send(JSON.stringify({
+          id: request.id,
+          result: { result: { type: 'object', value: { padding: 'x'.repeat(140 * 1024) } } },
+        }));
+      }
+    });
+  });
+  const port = server.address().port;
+  const deps = fixture();
+  setLocalCdpEndpoint(deps, port);
+  try {
+    await assert.rejects(
+      retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 2_000 }),
+      /frame exceeds bounded 131072-byte transport limit/u,
+    );
+    assert.deepEqual(deps.calls.close, []);
+  } finally {
+    for (const socket of server.clients) socket.terminate();
+    await close(server);
+  }
 });
 
 test('retirement rejects caller-minted or cross-slot authority before profile access', async () => {
