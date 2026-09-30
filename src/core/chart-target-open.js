@@ -25,14 +25,17 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     throw codedError('PROFILE_STATE_UNSUPPORTED', 'Exact CloakBrowser profile state is not safe to start.');
   }
   let launchPerformed = false;
+  let launchOutcomeUnknown = false;
   if (initiallyStopped) {
     try {
       await fetchJsonWithDeadline(new URL(`profiles/${encodeURIComponent(profile.profile_id)}/launch`, `${managerBaseUrl}/`).toString(),
         deps, { method: 'POST' });
+      launchPerformed = true;
     } catch {
-      throw codedError('PROFILE_LAUNCH_FAILED', 'CloakBrowser Manager could not start the exact configured profile.');
+      // The Manager may have started the profile before its response was lost.
+      // Re-read the exact stable-name authority below; never replay the launch here.
+      launchOutcomeUnknown = true;
     }
-    launchPerformed = true;
   }
 
   let current = null;
@@ -47,7 +50,9 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     await (deps.sleep || sleep)(POLL_INTERVAL_MS);
   }
   if (current === null) {
-    throw codedError('PROFILE_LAUNCH_NOT_CONFIRMED', 'Exact CloakBrowser profile did not reach running state.');
+    throw launchOutcomeUnknown
+      ? codedError('PROFILE_LAUNCH_FAILED', 'CloakBrowser Manager launch outcome remained unconfirmed; exact profile is not running.')
+      : codedError('PROFILE_LAUNCH_NOT_CONFIRMED', 'Exact CloakBrowser profile did not reach running state.');
   }
 
   const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, current.profile_id, current.cdp_url);
