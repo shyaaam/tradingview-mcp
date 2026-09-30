@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
+import CDP from 'chrome-remote-interface';
 
 import { resolveCloakManagerBaseUrl } from './cloak.js';
-import { normalizeChartUrl } from './chart-target-hydration.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
+import { resolveExactRunningProfile } from './chart-target-open.js';
+import { ACCOUNT_LAYOUT_PROBE, savedChartLayoutMarker } from './saved-chart-authority.js';
 
 const CHART_PAGE = /^https:\/\/www\.tradingview\.com\/chart\//u;
 const CHART_ORIGIN = 'https://www.tradingview.com';
-const AUTHORITY_SCHEMA_VERSION = 'v5-capture-slot-authority-v2';
-const DEFAULT_TIMEOUT_MS = 5_000;
+const AUTHORITY_SCHEMA_VERSION = 'v5-capture-slot-authority-v3';
+const DEFAULT_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 100;
 const MAX_RETIREMENT_READ_BYTES = 128 * 1024;
 const MAX_CDP_TARGET_ID_CHARS = 256;
@@ -29,48 +31,39 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   const managerBaseUrl = dependencies.managerBaseUrl
     || await withDeadline(() => resolveCloakManagerBaseUrl({ fetchJson: requestJson }), deadline);
   if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for saved-chart retirement.');
-  const profilePayload = await requestJson(new URL('profiles', `${managerBaseUrl}/`).toString());
-  const profiles = Array.isArray(profilePayload) ? profilePayload : profilePayload?.profiles;
-  const matches = Array.isArray(profiles)
-    ? profiles.filter((profile) => profileIdFromEntry(profile) === expected.profileId)
-    : [];
-  if (matches.length !== 1) throw new Error('Exact Manager profile binding is missing or ambiguous.');
-  const profile = matches[0];
-  if (!['running', 'active'].includes(String(profile.status || profile.state || '').toLowerCase())) {
-    throw new Error('Exact Manager profile is not running.');
-  }
-  const cdpUrl = resolveManagerCdpUrl(
-    managerBaseUrl,
-    expected.profileId,
-    profile.cdp_url || profile.cdp_endpoint || profile.cdpUrl,
-  );
-  const before = pageTargets(await requestJson(new URL('json/list', `${cdpUrl}/`).toString()));
+  const resolveProfile = dependencies.resolveExactRunningProfile || resolveExactRunningProfile;
+  const profile = await resolveProfile(expected.profileName, { ...dependencies, managerBaseUrl });
+  const profileId = requireText(profile.profileId, 'current profile ID');
+  const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
+  const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
+  const before = pageTargets(await requestJson(targetListUrl));
   const beforeCharts = chartTargets(before);
-  if (beforeCharts.length === 0) throw new Error('No TradingView chart target is available for safe retirement.');
-  const exact = before.filter((target) => target.url === expected.chartUrl);
-  const sameSavedChart = before.filter((target) => targetHasSavedChartId(target, expected.savedChartId));
-  if (sameSavedChart.length !== exact.length) {
-    throw new Error('Saved-chart target URL differs from exact authority; refusing retirement.');
-  }
-  if (exact.length > 1) throw new Error('Saved-chart target is ambiguous; refusing retirement.');
+  const beforeViews = await inspectChartTargets(beforeCharts, expected, dependencies, deadline);
+  assertNoConflictingSavedLayoutTarget(beforeViews, expected);
+  const exact = beforeViews.filter((view) => isExactSavedLayout(view, expected));
+  if (exact.length > 1) throw new Error('Exact saved-layout is open in multiple targets; refusing retirement.');
   if (exact.length === 0) {
-    return result(expected, null, 'already-closed', beforeCharts.length, false);
+    return result(expected, null, 'already-closed', beforeCharts.length, false,
+      beforeViews[0]?.accountSubjectSha256 ?? null);
   }
-  const target = exact[0];
-  if (beforeCharts.length <= 1) throw new Error('Cannot retire the last TradingView chart target.');
-  const preClose = pageTargets(await requestJson(new URL('json/list', `${cdpUrl}/`).toString()));
-  const currentExact = preClose.filter((entry) => entry.url === expected.chartUrl);
-  const currentSameSavedChart = preClose.filter((entry) => targetHasSavedChartId(entry, expected.savedChartId));
-  if (currentExact.length !== 1 || currentExact[0].id !== target.id
-    || currentSameSavedChart.length !== 1
-    || !sameChartInventory(beforeCharts, chartTargets(preClose))) {
-    throw new Error('TradingView chart inventory changed before exact saved-chart retirement.');
+  const beforeIdentity = exact[0];
+  const target = beforeIdentity.target;
+  if (before.length <= 1) throw new Error('Cannot retire the last browser page in the exact profile.');
+  const preClose = pageTargets(await requestJson(targetListUrl));
+  const preCloseCharts = chartTargets(preClose);
+  const preCloseViews = await inspectChartTargets(preCloseCharts, expected, dependencies, deadline);
+  assertNoConflictingSavedLayoutTarget(preCloseViews, expected);
+  const currentExact = preCloseViews.filter((view) => isExactSavedLayout(view, expected));
+  if (currentExact.length !== 1 || currentExact[0].target.id !== target.id
+    || !samePageInventory(before, preClose)
+    || !sameChartViews(beforeViews, preCloseViews)) {
+    throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
   }
   const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
   const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
     version?.webSocketDebuggerUrl,
     cdpUrl,
-    expected.profileId,
+    profileId,
   );
   const closeResult = await sendBrowserCdpCommand(
     browserWebSocketUrl,
@@ -82,32 +75,32 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
 
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let after = before;
-  let afterTargets = before;
+  let afterViews = beforeViews;
   while (remainingMs(deadline) > 0) {
-    afterTargets = await requestJson(new URL('json/list', `${cdpUrl}/`).toString());
-    after = pageTargets(afterTargets);
-    const exactTargetRemains = afterTargets.some((entry) => entry?.id === target.id);
-    const savedChartRemains = after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId));
-    if (!exactTargetRemains && !savedChartRemains) break;
+    after = pageTargets(await requestJson(targetListUrl));
+    afterViews = await inspectChartTargets(chartTargets(after), expected, dependencies, deadline);
+    if (!after.some((entry) => entry.id === target.id)
+      && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
     await withDeadline(
       () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
       deadline,
     );
   }
-  if (afterTargets.some((entry) => entry?.id === target.id)
-    || after.some((entry) => targetHasSavedChartId(entry, expected.savedChartId))) {
-    throw new Error('Exact saved-chart target remained open after bounded close.');
+  if (after.some((entry) => entry.id === target.id)
+    || afterViews.some((view) => isExactSavedLayout(view, expected))) {
+    throw new Error('Exact saved-layout target remained open after bounded close.');
   }
-  const preservedBefore = beforeCharts.filter((entry) => entry.id !== target.id).map(targetIdentity).sort(compareIdentity);
-  const preservedAfter = chartTargets(after).map(targetIdentity).sort(compareIdentity);
-  if (JSON.stringify(preservedAfter) !== JSON.stringify(preservedBefore)) {
-    throw new Error('Saved-chart retirement changed another TradingView chart target.');
+  const preservedBefore = beforeViews.filter((view) => view.target.id !== target.id);
+  if (!samePageInventory(before, after, target.id)
+    || !sameChartViews(preservedBefore, afterViews)) {
+    throw new Error('Saved-layout retirement changed another TradingView chart target.');
   }
-  return result(expected, target.id, 'closed', preservedAfter.length, true);
+  return result(expected, target.id, 'closed', chartTargets(after).length, true,
+    beforeIdentity.accountSubjectSha256);
 }
 
 function normalizeInput(input) {
-  const profileId = requireText(input.profile_id, 'profile_id');
+  const profileName = requirePattern(input.profile_name, 'profile_name', /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,159}$/u);
   const captureSlotId = requirePattern(input.capture_slot_id, 'capture_slot_id', /^v5-capture-slot-[ab]$/u);
   const layoutCode = requirePattern(input.layout_code, 'layout_code', /^s$/u);
   const authorityId = requirePattern(input.authority_id, 'authority_id', /^v5-capture-slot:[0-9a-f]{64}$/u);
@@ -115,49 +108,45 @@ function normalizeInput(input) {
   if (authorityId !== `v5-capture-slot:${authorityHash}`) {
     throw new Error('authority_id does not match authority_hash.');
   }
-  const savedChartId = requirePattern(input.saved_chart_id, 'saved_chart_id', /^[A-Za-z0-9_-]{1,160}$/u);
+  const savedLayoutId = requirePattern(input.saved_layout_id, 'saved_layout_id', /^[A-Za-z0-9_-]{1,160}$/u);
+  const reconciliationKey = requirePattern(input.reconciliation_key, 'reconciliation_key', /^[0-9a-f]{64}$/u);
   const allowedOrigins = Array.isArray(input.allowed_origins) ? input.allowed_origins : [];
   if (allowedOrigins.length !== 1 || allowedOrigins[0] !== CHART_ORIGIN) {
     throw new Error('allowed_origins must equal the reviewed TradingView chart origin.');
   }
-  const suppliedChartUrl = requireText(input.chart_url, 'chart_url');
-  if (suppliedChartUrl.includes('?')) {
-    throw new Error('chart_url query parameters are not allowed for saved-chart retirement.');
-  }
-  const chartUrl = normalizeChartUrl(suppliedChartUrl, allowedOrigins, savedChartId);
-  if (chartUrl !== suppliedChartUrl) throw new Error('chart_url must use exact canonical saved-chart URL.');
-  if (!CHART_PAGE.test(chartUrl)) throw new Error('Saved-chart authority must use the canonical TradingView chart origin.');
+  const marker = savedChartLayoutMarker(captureSlotId, reconciliationKey);
   const computedHash = captureSlotAuthorityHash({
     captureSlotId,
-    profileId,
-    savedChartId,
+    profileName,
+    savedLayoutId,
     layoutCode,
-    chartUrl,
     allowedOrigins,
   });
   if (authorityHash !== computedHash || authorityId !== `v5-capture-slot:${computedHash}`) {
-    throw new Error('Capture-slot authority hash does not bind the exact profile and saved chart.');
+    throw new Error('Capture-slot authority hash does not bind the stable profile and saved layout.');
   }
   return Object.freeze({
-    profileId,
+    profileName,
     captureSlotId,
     layoutCode,
     authorityId,
     authorityHash,
-    savedChartId,
-    chartUrl,
+    savedLayoutId,
+    reconciliationKey,
+    marker,
     allowedOrigins: Object.freeze([...allowedOrigins]),
   });
 }
 
-function result(expected, targetId, action, remainingChartTargets, mutationsPerformed) {
+function result(expected, targetId, action, remainingChartTargets, mutationsPerformed, accountSubjectSha256) {
   return Object.freeze({
     success: true,
-    retirement_version: 'saved-chart-retirement-v1',
+    retirement_version: 'saved-layout-retirement-v1',
     authority_id: expected.authorityId,
     authority_hash: expected.authorityHash,
-    profile_id: expected.profileId,
-    saved_chart_id: expected.savedChartId,
+    profile_name: expected.profileName,
+    saved_layout_id: expected.savedLayoutId,
+    account_subject_sha256: accountSubjectSha256,
     chart_target_id: targetId,
     action,
     remaining_chart_targets: remainingChartTargets,
@@ -185,16 +174,132 @@ function chartTargets(targets) {
   return targets.filter((target) => CHART_PAGE.test(target.url));
 }
 
-function targetIdentity(target) {
-  return { id: target.id, url: target.url };
+async function readTargetIdentity(target, dependencies, deadline) {
+  const endpoint = target.webSocketDebuggerUrl;
+  if (typeof endpoint !== 'string' || endpoint.length === 0 || endpoint.length > MAX_CDP_TARGET_URL_CHARS) {
+    throw new Error('Exact TradingView target CDP endpoint is unavailable.');
+  }
+  let parsed;
+  try { parsed = new URL(endpoint); } catch { throw new Error('Exact TradingView target CDP endpoint is malformed.'); }
+  if (!['ws:', 'wss:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('Exact TradingView target CDP endpoint is outside the profile boundary.');
+  }
+  const connectTarget = dependencies.connectTarget || ((url) => CDP({ target: url, local: true }));
+  const page = await connectTarget(endpoint);
+  try {
+    const response = await withDeadline(() => page.Runtime.evaluate({
+      expression: ACCOUNT_LAYOUT_PROBE,
+      awaitPromise: true,
+      returnByValue: true,
+    }), deadline, () => page.close?.());
+    if (response?.exceptionDetails || response?.result?.type !== 'object'
+      || !response.result.value || typeof response.result.value !== 'object') {
+      throw new Error('TradingView saved-layout identity readback failed.');
+    }
+    let encoded;
+    try { encoded = JSON.stringify(response.result.value); } catch { encoded = null; }
+    if (typeof encoded !== 'string' || Buffer.byteLength(encoded, 'utf8') > MAX_RETIREMENT_READ_BYTES) {
+      throw new Error('TradingView saved-layout identity readback is malformed or exceeds its bounded read limit.');
+    }
+    const value = response.result.value;
+    return {
+      href: value.current_url,
+      account_subject_sha256: value.account_subject_sha256,
+      saved_layout_id: value.active_saved_layout_id,
+      saved_layout_name: value.active_saved_layout_name,
+      layouts: Array.isArray(value.layouts)
+        ? value.layouts.map(({ layout_id: layoutId, name }) => ({ layout_id: layoutId, name }))
+        : value.layouts,
+    };
+  } finally {
+    try { await page.close?.(); } catch { /* preserve identity result */ }
+  }
 }
 
-function targetHasSavedChartId(target, savedChartId) {
-  try {
-    const url = new URL(target.url);
-    return url.origin === 'https://www.tradingview.com'
-      && url.pathname.match(/^\/chart\/([A-Za-z0-9_-]+)\/?$/u)?.[1] === savedChartId;
-  } catch { return false; }
+async function inspectChartTargets(targets, expected, dependencies, deadline) {
+  if (targets.length === 0) return Object.freeze([]);
+  const inspect = dependencies.readTargetIdentity || ((target) => readTargetIdentity(target, dependencies, deadline));
+  const views = [];
+  for (const target of targets) {
+    const raw = await withDeadline(() => inspect(target), deadline);
+    views.push(normalizeTargetIdentity(raw, target, expected));
+  }
+  views.sort((left, right) => left.target.id.localeCompare(right.target.id));
+  const accountHashes = new Set(views.map((view) => view.accountSubjectSha256));
+  const inventoryHashes = new Set(views.map((view) => view.layoutInventorySha256));
+  if (accountHashes.size !== 1 || inventoryHashes.size !== 1) {
+    throw new Error('TradingView account or saved-layout inventory changed across exact profile targets.');
+  }
+  return Object.freeze(views);
+}
+
+function normalizeTargetIdentity(value, target, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.href !== target.url
+    || typeof value.account_subject_sha256 !== 'string'
+    || !/^[0-9a-f]{64}$/u.test(value.account_subject_sha256)
+    || typeof value.saved_layout_id !== 'string'
+    || !/^[A-Za-z0-9_-]{1,160}$/u.test(value.saved_layout_id)
+    || typeof value.saved_layout_name !== 'string'
+    || value.saved_layout_name.length < 1 || value.saved_layout_name.length > 160
+    || !Array.isArray(value.layouts)) {
+    throw new Error('TradingView page did not prove authenticated active saved-layout metadata.');
+  }
+  const layouts = value.layouts.map((layout, index) => {
+    if (!layout || typeof layout !== 'object' || Array.isArray(layout)
+      || typeof layout.layout_id !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/u.test(layout.layout_id)
+      || typeof layout.name !== 'string' || layout.name.length === 0 || layout.name.length > 160) {
+      throw new Error(`TradingView saved-layout inventory entry ${index} is malformed.`);
+    }
+    return { layout_id: layout.layout_id, name: layout.name };
+  }).sort((left, right) => left.layout_id.localeCompare(right.layout_id) || left.name.localeCompare(right.name));
+  const exactMarker = layouts.filter((layout) => layout.name === expected.marker);
+  if (exactMarker.length !== 1 || exactMarker[0].layout_id !== expected.savedLayoutId) {
+    throw new Error('Exact saved-layout marker and server ID are missing or ambiguous in current account.');
+  }
+  const activeSavedLayoutId = requirePattern(value.saved_layout_id, 'active saved-layout ID', /^[A-Za-z0-9_-]{1,160}$/u);
+  const activeSavedLayoutName = requireText(value.saved_layout_name, 'active saved-layout name');
+  const layoutInventorySha256 = createHash('sha256').update(JSON.stringify(layouts), 'utf8').digest('hex');
+  return Object.freeze({
+    target,
+    activeSavedLayoutId,
+    activeSavedLayoutName,
+    accountSubjectSha256: value.account_subject_sha256,
+    layoutInventorySha256,
+  });
+}
+
+function isExactSavedLayout(view, expected) {
+  return view.activeSavedLayoutId === expected.savedLayoutId
+    && view.activeSavedLayoutName === expected.marker;
+}
+
+function assertNoConflictingSavedLayoutTarget(views, expected) {
+  if (views.some((view) => (view.activeSavedLayoutId === expected.savedLayoutId
+    || view.activeSavedLayoutName === expected.marker) && !isExactSavedLayout(view, expected))) {
+    throw new Error('Active TradingView page conflicts with exact saved-layout authority identity.');
+  }
+}
+
+function sameChartViews(left, right) {
+  const identity = (views) => views.map((view) => ({
+    target: targetIdentity(view.target),
+    activeSavedLayoutId: view.activeSavedLayoutId,
+    activeSavedLayoutName: view.activeSavedLayoutName,
+    accountSubjectSha256: view.accountSubjectSha256,
+    layoutInventorySha256: view.layoutInventorySha256,
+  })).sort((a, b) => a.target.id.localeCompare(b.target.id));
+  return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
+}
+
+function samePageInventory(left, right, excludedTargetId = null) {
+  const identity = (targets) => targets.filter((target) => target.id !== excludedTargetId)
+    .map(targetIdentity).sort(compareIdentity);
+  return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
+}
+
+function targetIdentity(target) {
+  return { id: target.id, type: target.type, url: target.url };
 }
 
 function requireProfileBrowserWebSocketUrl(value, cdpUrl, profileId) {
@@ -307,10 +412,6 @@ function compareIdentity(left, right) {
   return left.id.localeCompare(right.id) || left.url.localeCompare(right.url);
 }
 
-function profileIdFromEntry(profile) {
-  return String(profile?.profile_id || profile?.id || profile?.profileId || '');
-}
-
 async function fetchJson(url, fetchImpl, deadline) {
   const controller = new AbortController();
   return withDeadline(async () => {
@@ -392,29 +493,24 @@ function readReviewedAuthority() {
 }
 
 function sameAuthority(left, right) {
-  return left.profileId === right.profileId
+  return left.profileName === right.profileName
     && left.captureSlotId === right.captureSlotId
     && left.layoutCode === right.layoutCode
     && left.authorityId === right.authorityId
     && left.authorityHash === right.authorityHash
-    && left.savedChartId === right.savedChartId
-    && left.chartUrl === right.chartUrl
+    && left.savedLayoutId === right.savedLayoutId
+    && left.reconciliationKey === right.reconciliationKey
+    && left.marker === right.marker
     && JSON.stringify(left.allowedOrigins) === JSON.stringify(right.allowedOrigins);
 }
 
-function sameChartInventory(left, right) {
-  const identities = (targets) => targets.map(targetIdentity).sort(compareIdentity);
-  return JSON.stringify(identities(left)) === JSON.stringify(identities(right));
-}
-
-function captureSlotAuthorityHash({ captureSlotId, profileId, savedChartId, layoutCode, chartUrl, allowedOrigins }) {
+function captureSlotAuthorityHash({ captureSlotId, profileName, savedLayoutId, layoutCode, allowedOrigins }) {
   const canonical = JSON.stringify({
     allowedOrigins,
     captureSlotId,
-    chartId: savedChartId,
-    chartUrl,
     layoutCode,
-    profileId,
+    profileId: profileName,
+    savedLayoutId,
     schemaVersion: AUTHORITY_SCHEMA_VERSION,
   });
   return createHash('sha256').update(canonical, 'utf8').digest('hex');

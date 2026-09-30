@@ -115,11 +115,23 @@ export const ACCOUNT_LAYOUT_PROBE = `
       try {
         if (typeof value === 'function') value = value();
         if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
         return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
       } catch { return ''; }
     }
+    function objectValue(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value && typeof value === 'object' ? value : null;
+      } catch { return null; }
+    }
     var api = window.TradingViewApi;
     var collection = api && api._chartWidgetCollection;
+    var metaInfo = objectValue(collection && collection.metaInfo);
+    var activeSavedLayoutId = read(metaInfo && metaInfo.id);
+    var activeSavedLayoutName = read(metaInfo && metaInfo.name);
     var subjects = [];
     var candidates = [
       api && api._user && (api._user.id || api._user.user_id || api._user.username),
@@ -131,14 +143,22 @@ export const ACCOUNT_LAYOUT_PROBE = `
       if (value && subjects.indexOf(value) === -1) subjects.push(value);
     }
     if (subjects.length !== 1 || !window.crypto || !window.crypto.subtle) {
-      return { authenticated: false, account_subject_sha256: null, layouts: null, chart_uid: null };
+      return {
+        authenticated: false, account_subject_sha256: null, layouts: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
     }
     var digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(subjects[0]));
     var accountHash = Array.prototype.map.call(new Uint8Array(digest), function(byte) {
       return byte.toString(16).padStart(2, '0');
     }).join('');
     if (!api || typeof api.getSavedCharts !== 'function') {
-      return { authenticated: true, account_subject_sha256: accountHash, layouts: null, chart_uid: null };
+      return {
+        authenticated: true, account_subject_sha256: accountHash, layouts: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
     }
     var layouts = await new Promise(function(resolve) {
       var settled = false;
@@ -169,6 +189,8 @@ export const ACCOUNT_LAYOUT_PROBE = `
       layouts: layouts,
       chart_uid: match ? match[1] : null,
       current_url: String(window.location && window.location.href || ''),
+      active_saved_layout_id: activeSavedLayoutId || null,
+      active_saved_layout_name: activeSavedLayoutName || null,
     };
   })()
 `;
@@ -999,6 +1021,8 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
         ? probe.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker)
         : [];
       if (probe?.authenticated === true && exactMarker.length === 1
+        && probe.active_saved_layout_id === savedLayoutId
+        && probe.active_saved_layout_name === marker
         && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
         && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
         return probe;
