@@ -11,6 +11,7 @@ const TARGET_POLL_ATTEMPTS = 30;
 const TARGET_POLL_MS = 250;
 const PAGE_POLL_ATTEMPTS = 40;
 const PAGE_POLL_MS = 500;
+const DEFAULT_AUTHORITY_READ_TIMEOUT_MS = 15_000;
 const CHART_UID = /^[A-Za-z0-9_-]{1,160}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
 const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
@@ -601,8 +602,11 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
 }
 
 async function readProfileInventory(profileName, dependencies) {
-  const profile = await resolveExactRunningProfile(profileName, dependencies);
-  const targets = await listTargets(profile.cdpUrl, dependencies);
+  const deadline = createAuthorityReadDeadline(dependencies);
+  const profile = await withAuthorityReadDeadline(
+    () => resolveExactRunningProfile(profileName, dependencies), deadline,
+  );
+  const targets = await listTargets(profile.cdpUrl, dependencies, deadline);
   let chartTargets = targets.filter(isTradingViewChartTarget);
   let temporaryTarget = null;
   if (chartTargets.length === 0) {
@@ -616,10 +620,10 @@ async function readProfileInventory(profileName, dependencies) {
   for (const target of chartTargets) {
     const page = temporaryTarget?.target.id === target.id
       ? temporaryTarget.page
-      : await connectTarget(target, dependencies);
+      : await connectTarget(target, dependencies, deadline);
     try {
-      await enablePage(page);
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      await enablePage(page, deadline);
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
       if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))
         || !Array.isArray(probe.layouts)) {
         throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
@@ -634,7 +638,7 @@ async function readProfileInventory(profileName, dependencies) {
       accountSubjectSha256 = probe.account_subject_sha256;
       canonicalLayouts = layouts;
       firstPage ??= page;
-      if (page !== firstPage) await closePage(page);
+      if (page !== firstPage) await closePage(page, deadline);
     } catch (error) {
       let temporaryTargetClosed = temporaryTarget === null;
       if (temporaryTarget !== null) {
@@ -645,10 +649,10 @@ async function readProfileInventory(profileName, dependencies) {
           temporaryTargetClosed = false;
         }
       } else {
-        try { await closePage(page); } catch { /* preserve inventory failure */ }
+        try { await closePage(page, deadline); } catch { /* preserve inventory failure */ }
       }
       if (firstPage !== null && firstPage !== page && firstPage !== temporaryTarget?.page) {
-        try { await closePage(firstPage); } catch { /* preserve inventory failure */ }
+        try { await closePage(firstPage, deadline); } catch { /* preserve inventory failure */ }
       }
       throw inventoryReadFailure(error, temporaryTargetClosed);
     }
@@ -670,7 +674,7 @@ async function readProfileInventory(profileName, dependencies) {
     authenticated: true,
     close: async () => {
       if (temporaryTarget !== null) await temporaryTarget.close();
-      else await closePage(firstPage);
+      else await closePage(firstPage, deadline);
     },
   };
 }
@@ -1135,47 +1139,94 @@ function savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash, marker, s
   ].join(';');
 }
 
-async function listTargets(cdpUrl, dependencies) {
-  const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies);
+async function listTargets(cdpUrl, dependencies, deadline) {
+  const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies, deadline);
   if (!Array.isArray(targets)) throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
   return targets;
 }
 
-async function waitForTarget(cdpUrl, targetId, dependencies) {
+async function waitForTarget(cdpUrl, targetId, dependencies, deadline) {
   for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
-    const target = (await listTargets(cdpUrl, dependencies)).find((entry) => entry?.id === targetId);
+    const target = (await listTargets(cdpUrl, dependencies, deadline)).find((entry) => entry?.id === targetId);
     if (target) return target;
     await sleep(dependencies, TARGET_POLL_MS);
   }
   return null;
 }
 
-async function fetchJson(url, dependencies) {
-  const response = await (dependencies.fetch || fetch)(url);
-  if (!response.ok) throw new Error(`CLOAK_REQUEST_${response.status}`);
-  return await response.json();
+async function fetchJson(url, dependencies, deadline) {
+  const request = async (signal) => {
+    const response = await (dependencies.fetch || fetch)(url, signal ? { signal } : undefined);
+    if (!response.ok) throw new Error(`CLOAK_REQUEST_${response.status}`);
+    return await response.json();
+  };
+  if (deadline === undefined) return await request(undefined);
+  const controller = new AbortController();
+  return await withAuthorityReadDeadline(() => request(controller.signal), deadline, () => controller.abort());
 }
 
-async function connectTarget(target, dependencies) {
+async function connectTarget(target, dependencies, deadline) {
   if (typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
     throw new Error('EXACT_CHART_TARGET_WEBSOCKET_UNAVAILABLE');
   }
-  return await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+  const connect = () => (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(
+    target.webSocketDebuggerUrl,
+  );
+  return deadline === undefined ? await connect() : await withAuthorityReadDeadline(connect, deadline);
 }
 
-async function enablePage(page) {
-  await page.Runtime.enable();
-  await page.Page.enable();
+async function enablePage(page, deadline) {
+  const enable = (operation) => deadline === undefined
+    ? operation()
+    : withAuthorityReadDeadline(operation, deadline, () => closePage(page));
+  await enable(() => page.Runtime.enable());
+  await enable(() => page.Page.enable());
 }
 
-async function evaluate(page, expression) {
-  const response = await page.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
+async function evaluate(page, expression, deadline) {
+  const operation = () => page.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
+  const response = deadline === undefined
+    ? await operation()
+    : await withAuthorityReadDeadline(operation, deadline, () => closePage(page));
   if (response.exceptionDetails) throw new Error('TRADINGVIEW_PAGE_EVALUATION_FAILED');
   return response.result?.value;
 }
 
-async function closePage(page) {
-  try { await page.close?.(); } catch { /* preserve authoritative operation result */ }
+async function closePage(page, deadline) {
+  try {
+    const closing = Promise.resolve().then(() => page.close?.());
+    if (deadline === undefined) await closing;
+    else await withAuthorityReadDeadline(() => closing, deadline);
+  } catch { /* preserve authoritative operation result */ }
+}
+
+function createAuthorityReadDeadline(dependencies) {
+  const timeoutMs = dependencies.authorityReadTimeoutMs ?? DEFAULT_AUTHORITY_READ_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw new Error('SAVED_CHART_AUTHORITY_READ_TIMEOUT_INVALID');
+  }
+  return Object.freeze({ at: performance.now() + timeoutMs, timeoutMs });
+}
+
+function withAuthorityReadDeadline(operation, deadline, onTimeout = () => {}) {
+  const remaining = deadline.at - performance.now();
+  if (remaining <= 0) {
+    try { onTimeout(); } catch { /* preserve timeout */ }
+    return Promise.reject(authorityReadTimeoutError());
+  }
+  let timer;
+  const work = Promise.resolve().then(operation);
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout(); } catch { /* preserve timeout */ }
+      reject(authorityReadTimeoutError());
+    }, remaining);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+function authorityReadTimeoutError() {
+  return new Error('SAVED_CHART_AUTHORITY_READ_TIMEOUT');
 }
 
 async function sleep(dependencies, milliseconds) {

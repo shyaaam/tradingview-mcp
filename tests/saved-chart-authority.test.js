@@ -671,6 +671,76 @@ test('default profile inventory marks verified current-account tabs authenticate
   assert.equal(result.failure_code, null);
 });
 
+test('read-only authority preflight aborts a stalled profile target inventory with a stable failure code', async () => {
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp`;
+  let targetInventoryAborted = false;
+  const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
+    managerBaseUrl: 'http://manager.test/api',
+    authorityReadTimeoutMs: 25,
+    fetch: async (value, options) => {
+      const url = new URL(String(value));
+      if (url.pathname === '/api/profiles') {
+        return { ok: true, json: async () => [{
+          id: INPUT.expectedProfileId,
+          name: INPUT.profileName,
+          status: 'running',
+          cdp_url: cdpUrl,
+        }] };
+      }
+      assert.equal(url.pathname, `/profiles/${INPUT.expectedProfileId}/cdp/json/list`);
+      return await new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          targetInventoryAborted = true;
+          reject(new Error('request aborted'));
+        }, { once: true });
+      });
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.authenticated, false);
+  assert.equal(result.failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
+  assert.equal(targetInventoryAborted, true);
+  assert.equal(result.can_create, false);
+});
+
+test('read-only authority preflight closes a stalled exact-page CDP read and returns bounded failure', async () => {
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp`;
+  let pageClosed = false;
+  const target = {
+    id: 'stalled-inventory-page',
+    type: 'page',
+    url: 'https://www.tradingview.com/chart/current-route/',
+    webSocketDebuggerUrl: `${cdpUrl}/devtools/page/stalled-inventory-page`,
+  };
+  const page = {
+    Runtime: {
+      enable: async () => {},
+      evaluate: async () => await new Promise(() => {}),
+    },
+    Page: { enable: async () => {} },
+    close: async () => { pageClosed = true; },
+  };
+  const result = await preflightSavedChartAuthority({ ...INPUT, expectedProfileId: undefined }, {
+    managerBaseUrl: 'http://manager.test/api',
+    authorityReadTimeoutMs: 25,
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname === '/api/profiles'
+        ? [{ id: INPUT.expectedProfileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }]
+        : [target];
+      return { ok: true, json: async () => body };
+    },
+    connectTarget: async () => page,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.authenticated, false);
+  assert.equal(result.failure_code, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
+  assert.equal(pageClosed, true);
+  assert.equal(result.can_create, false);
+});
+
 test('cold profile preflight opens one exact-profile chart tab, reads current account, and closes it', async () => {
   const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
   let targets = [];
