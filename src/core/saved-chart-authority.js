@@ -494,7 +494,7 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     }
     const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId && layout.name === marker);
     if (exactBeforeLoad.length !== 1) throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
-    await loadSavedLayout(page, savedLayoutId, dependencies);
+    await loadSavedLayout(page, savedLayoutId, marker, dependencies);
     const probe = await waitForSavedLayoutPageProbe(page, marker, savedLayoutId, accountSubjectSha256, dependencies);
     const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
     const canonicalUrl = `https://www.tradingview.com/chart/${probe.chart_uid}/`;
@@ -1073,15 +1073,51 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   return { savedLayoutId, temporaryTargetClosed: closeBrowser?.success === true };
 }
 
-async function loadSavedLayout(page, layoutId, dependencies) {
-  const expression = `(function() {
+async function loadSavedLayout(page, layoutId, marker, dependencies) {
+  const expression = `(async function() {
     var api = window.TradingViewApi;
-    if (!api || typeof api.loadChartFromServer !== 'function') return { ok: false };
-    try { api.loadChartFromServer(${JSON.stringify(layoutId)}); return { ok: true }; }
-    catch { return { ok: false }; }
+    if (!api || typeof api.getSavedCharts !== 'function' || typeof api.loadChartFromServer !== 'function') {
+      return { ok: false, error: 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE' };
+    }
+    var records = await new Promise(function(resolve) {
+      var settled = false;
+      var timer = setTimeout(function() {
+        if (!settled) { settled = true; resolve(null); }
+      }, 5000);
+      function finish(value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(Array.isArray(value) ? value : null);
+      }
+      try {
+        var returned = api.getSavedCharts(finish);
+        if (returned && typeof returned.then === 'function') returned.then(finish, function() { finish(null); });
+      } catch { finish(null); }
+    });
+    if (!Array.isArray(records)) return { ok: false, error: 'SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE' };
+    var matches = records.filter(function(record) {
+      var id = record && (record.id ?? record.chartId ?? record.chart_id);
+      var name = record && (record.name ?? record.title);
+      return id !== null && id !== undefined && String(id) === ${JSON.stringify(layoutId)}
+        && name === ${JSON.stringify(marker)};
+    });
+    if (matches.length !== 1) {
+      return { ok: false, error: matches.length === 0
+        ? 'SAVED_LAYOUT_RECORD_NOT_FOUND' : 'SAVED_LAYOUT_RECORD_AMBIGUOUS' };
+    }
+    try {
+      await api.loadChartFromServer(matches[0]);
+      return { ok: true };
+    } catch { return { ok: false, error: 'SAVED_LAYOUT_LOAD_REJECTED' }; }
   })()`;
   const result = await evaluate(page, expression);
-  if (result?.ok !== true) throw new Error('SAVED_LAYOUT_LOAD_API_UNAVAILABLE');
+  if (result?.ok !== true) {
+    const failureCode = typeof result?.error === 'string'
+      && /^SAVED_LAYOUT_[A-Z0-9_]{1,64}$/u.test(result.error)
+      ? result.error : 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE';
+    throw new Error(failureCode);
+  }
   await sleep(dependencies, 1000);
 }
 

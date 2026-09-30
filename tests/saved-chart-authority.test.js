@@ -1143,9 +1143,17 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   const targetId = 'fresh-layout-target';
   const targets = new Map();
   let loaded = false;
-  let loadedRequestedId = null;
-  let activeSavedLayoutId = savedLayoutId;
-  let activeSavedLayoutName = MARKER;
+  let loadedRequestedRecord = null;
+  let activeSavedLayoutId = 'default-layout-id';
+  let activeSavedLayoutName = 'Default chart';
+  let simulateMismatchedActiveReadback = false;
+  const savedChartRecord = Object.freeze({
+    id: savedLayoutId,
+    name: MARKER,
+    symbol: 'FX:EURUSD',
+    resolution: '1D',
+    serverState: Object.freeze({ reviewed: true }),
+  });
   let targetCloseCount = 0;
   let targetCreateCount = 0;
   let activeProbeCount = 0;
@@ -1155,10 +1163,23 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
       enable: async () => {},
       evaluate: async ({ expression }) => {
         if (expression.includes('loadChartFromServer')) {
-          loadedRequestedId = savedLayoutId;
-          loaded = true;
-          targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
-          return { result: { value: { ok: true } } };
+          const chartApi = {
+            getSavedCharts(callback) { callback([savedChartRecord]); },
+            async loadChartFromServer(record) {
+              loadedRequestedRecord = record;
+              await new Promise((resolve) => setTimeout(resolve, 10));
+              loaded = true;
+              if (!simulateMismatchedActiveReadback) {
+                activeSavedLayoutId = String(record.id);
+                activeSavedLayoutName = record.name;
+              }
+              targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
+            },
+          };
+          const value = await vm.runInNewContext(expression, {
+            window: { TradingViewApi: chartApi }, setTimeout, clearTimeout,
+          });
+          return { result: { value } };
         }
         if (expression === ACTIVE_SAVED_LAYOUT_PROBE) {
           activeProbeCount += 1;
@@ -1252,7 +1273,8 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(result.runtime_chart_id, runtimeChartId);
   assert.equal(result.target_url, `https://www.tradingview.com/chart/${runtimeChartId}/`);
   assert.equal(result.mutations_performed, true);
-  assert.equal(loadedRequestedId, savedLayoutId);
+  assert.equal(loadedRequestedRecord, savedChartRecord);
+  assert.equal(loaded, true, 'hydration must await TradingView loadChartFromServer completion');
   assert.equal(targetCreateCount, 1);
   assert.equal(targetCloseCount, 0);
   assert.equal(activeProbeCount, 3);
@@ -1262,6 +1284,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   runtimeChartId = `private-route-${'r'.repeat(146)}`;
   activeSavedLayoutId = `PRIVATE_LAYOUT_ID_${'x'.repeat(180)}`;
   activeSavedLayoutName = `PRIVATE_ACCOUNT_LAYOUT_NAME_${'y'.repeat(180)}`;
+  simulateMismatchedActiveReadback = true;
   await assert.rejects(hydrateSavedChartLayout({
     profileName: INPUT.profileName,
     captureSlotId: INPUT.captureSlotId,
