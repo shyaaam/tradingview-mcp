@@ -107,12 +107,12 @@ describe('scoped mutation target authority', () => {
   });
 });
 
-function makeDeps({ studies = [], failActivation = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
+function makeDeps({ studies = [], hiddenStudyIds = [], failActivation = false, failFocus = false, canonicalPriceStudy = false, canonicalSourceCount = 1, fallbackNameOverride, fallbackPaneOffset = 0 } = {}) {
   const state = {
     studies: studies.map(study => ({ id: study.id, indicatorId: study.indicatorId || study.id, name: study.name, isPriceStudy: study.isPriceStudy === true, inputs: (study.inputs || []).map(input => ({ ...input })), values: study.values ? { ...study.values } : undefined })),
     tabTargets: [{ index: 0, id: 'other-target' }, { index: 1, id: 'target-1' }],
     selectedTargetId: null, activatedTargetIds: [], switchedTabs: [], focusedPanes: [], created: [], evaluateCalls: [], evaluateOptions: [], canonicalPriceStudy,
-    canonicalSourceCount, fallbackNameOverride, fallbackPaneOffset, byNameCreateCalls: 0, activePane: null,
+    canonicalSourceCount, fallbackNameOverride, fallbackPaneOffset, hiddenStudyIds: [...hiddenStudyIds], byNameCreateCalls: 0, activePane: null,
   };
   return {
     state,
@@ -141,11 +141,26 @@ function makeDeps({ studies = [], failActivation = false, failFocus = false, can
         state.evaluateOptions.push(options);
         if (expression.includes('getAllStudies') && expression.includes('return null')) {
           const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
-          const matching = state.studies.filter(study => (study.pane_index === undefined || study.pane_index === state.activePane)
+          const matching = state.studies.filter(study => !state.hiddenStudyIds.includes(study.id)
+            && (study.pane_index === undefined || study.pane_index === state.activePane)
             && study.name.toLowerCase() === name);
           if (matching.length > 1) return { error: `scoped indicator mutation found duplicate matching studies: ${name}` };
           const found = matching[0];
-          return found ? { id: found.id, name: found.name, inputs: found.inputs, values: found.values } : null;
+          if (found) return { id: found.id, name: found.name, inputs: found.inputs, values: found.values };
+          if (!expression.includes('var exactStudy = chart.getStudyById')) return null;
+        }
+        if (expression.includes('var exactStudy = chart.getStudyById')) {
+          const name = expression.match(/name === "([^"]+)"/)?.[1] || '';
+          const expectedId = expression.match(/return id === "([^"]+)";/)?.[1] || '';
+          const namedSources = state.studies.filter((study) =>
+            (study.pane_index === undefined || study.pane_index === state.activePane)
+            && study.name.toLowerCase() === name);
+          const exactSources = namedSources.filter((study) => study.id === expectedId);
+          if (namedSources.length !== 1 || exactSources.length !== 1) {
+            return namedSources.length === 0 ? null : { error: 'scoped indicator removal exact source identity is ambiguous' };
+          }
+          const found = exactSources[0];
+          return { id: found.id, name: found.name, inputs: found.inputs, values: found.values };
         }
         if (expression.includes('var canonicalMatches')) {
           const name = expression.match(/chart\.createStudy\("([^"]+)"/)?.[1]
@@ -446,6 +461,43 @@ describe('scoped indicator plan primitives', () => {
     assert.equal(result.action, 'remove_indicator');
     assert.equal(result.post_mutation_indicator, null);
     assert.equal(state.studies.length, 0);
+  });
+  it('removes hidden study only through exact pane source and entity identity', async () => {
+    const { deps, state } = makeDeps({
+      studies: [{ id: 'native-hidden', name: 'Dividends', inputs: [] }],
+      hiddenStudyIds: ['native-hidden'],
+    });
+    const result = await removeScopedIndicator({
+      profile_id: 'profile-a', tab_index: 0, pane_index: 0,
+      indicator_name: 'Dividends', expected_chart_target_id: 'target-1',
+      expected_chart_id: 'chart-1', expected_layout_id: '8',
+      expected_pane_signature: 'a'.repeat(64), expected_entity_id: 'native-hidden', _deps: deps,
+    });
+    assert.equal(result.action, 'remove_indicator');
+    assert.equal(result.post_mutation_indicator, null);
+    assert.equal(state.studies.length, 0);
+    assert.ok(state.evaluateCalls.some((expression) => expression.includes('dataSources')));
+  });
+  it('does not remove hidden study when exact entity ID or name differs', async () => {
+    for (const [indicator_name, expected_entity_id] of [
+      ['Dividends', 'wrong-entity'],
+      ['Earnings', 'native-hidden'],
+    ]) {
+      const { deps, state } = makeDeps({
+        studies: [{ id: 'native-hidden', name: 'Dividends', inputs: [] }],
+        hiddenStudyIds: ['native-hidden'],
+      });
+      await assert.rejects(
+        () => removeScopedIndicator({
+          profile_id: 'profile-a', tab_index: 0, pane_index: 0, indicator_name,
+          expected_chart_target_id: 'target-1', expected_chart_id: 'chart-1', expected_layout_id: '8',
+          expected_pane_signature: 'a'.repeat(64), expected_entity_id, _deps: deps,
+        }),
+        /not found for removal|exact source identity is ambiguous/,
+      );
+      assert.equal(state.studies.length, 1);
+      assert.equal(state.evaluateCalls.some((expression) => expression.includes('removeEntity')), false);
+    }
   });
   it('removes exact study from pane 1 after focusing pane 1', async () => {
     const { deps, state } = makeDeps({ studies: [{ id: 'volume-pane-1', name: 'Volume', pane_index: 1 }] });

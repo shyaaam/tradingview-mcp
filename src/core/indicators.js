@@ -119,8 +119,51 @@ async function _selectScopedChart({ expected_chart_target_id, pane_index, _deps 
   return focusResult || { success: true, focused_index: pane_index };
 }
 
-async function _getStudyByName({ indicator_name, _deps }) {
+async function _getStudyByName({ indicator_name, expected_entity_id, allow_hidden_exact_entity = false, _deps }) {
   const { evaluate } = _resolve(_deps);
+  const hiddenExactEntityLookup = allow_hidden_exact_entity && expected_entity_id
+    ? `
+      var collection = ${CHART_COLLECTION};
+      var charts = collection && typeof collection.getAll === 'function' ? collection.getAll() : [];
+      var activeChartWidget = window.TradingViewApi && window.TradingViewApi._activeChartWidgetWV
+        && typeof window.TradingViewApi._activeChartWidgetWV.value === 'function'
+        ? window.TradingViewApi._activeChartWidgetWV.value()
+        : null;
+      var activeWidget = activeChartWidget && activeChartWidget._chartWidget;
+      var matchingWidgets = charts.filter(function(widget) { return widget === activeWidget; });
+      if (matchingWidgets.length !== 1) return { error: 'scoped indicator removal active pane identity is unavailable' };
+      var widgetModel = typeof matchingWidgets[0].model === 'function' ? matchingWidgets[0].model() : null;
+      var paneModel = widgetModel && typeof widgetModel.model === 'function' ? widgetModel.model() : null;
+      var sources = paneModel && typeof paneModel.dataSources === 'function' ? paneModel.dataSources() : null;
+      if (!Array.isArray(sources)) return { error: 'scoped indicator removal source inventory is unavailable' };
+      var namedSources = sources.filter(function(source) {
+        if (!source || typeof source.metaInfo !== 'function') return false;
+        var meta = source.metaInfo();
+        var name = String(meta && (meta.description || meta.shortDescription || meta.id) || '').trim();
+        return name.toLowerCase() === ${safeString(indicator_name.trim().toLowerCase())};
+      });
+      var exactSources = namedSources.filter(function(source) {
+        var id = '';
+        try {
+          if (typeof source.id === 'function') id = String(source.id() || '').trim();
+          if (!id && source._id !== undefined) id = String(source._id || '').trim();
+        } catch (_) {}
+        return id === ${safeString(expected_entity_id)};
+      });
+      if (namedSources.length !== 1 || exactSources.length !== 1) {
+        return namedSources.length === 0 ? null : { error: 'scoped indicator removal exact source identity is ambiguous' };
+      }
+      var exactStudy = chart.getStudyById ? chart.getStudyById(${safeString(expected_entity_id)}) : null;
+      if (!exactStudy) return null;
+      var exactMeta = exactSources[0].metaInfo();
+      return {
+        id: ${safeString(expected_entity_id)},
+        name: String(exactMeta.description || exactMeta.shortDescription || exactMeta.id),
+        inputs: exactStudy.getInputValues ? exactStudy.getInputValues() : [],
+        values: null,
+      };
+    `
+    : '';
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -137,6 +180,7 @@ async function _getStudyByName({ indicator_name, _deps }) {
       }
       if (matches.length > 1) return { error: 'scoped indicator mutation found duplicate matching studies: ' + ${safeString(indicator_name)} };
       if (matches.length === 1) return matches[0];
+      ${hiddenExactEntityLookup}
       return null;
     })()
   `);
@@ -548,7 +592,12 @@ export async function applyScopedPlanItem({ profile_id, tab_index, pane_index, i
     : _parseObject(expectedSettingsRaw, 'expected_settings', { allowEmpty: action === 'apply_indicator' });
   await _resolve(_deps).verifyMutationAuthority(scope, { action, _deps });
   const focusResult = await _selectScopedChart({ ...scope, _deps });
-  const existingStudy = await _getStudyByName({ indicator_name: scope.indicator_name, _deps });
+  const existingStudy = await _getStudyByName({
+    indicator_name: scope.indicator_name,
+    expected_entity_id: scope.expected_entity_id,
+    allow_hidden_exact_entity: action === 'remove_indicator',
+    _deps,
+  });
   if (existingStudy?.error) throw new Error(existingStudy.error);
   if (existingStudy && scope.expected_entity_id !== undefined && existingStudy.id !== scope.expected_entity_id) {
     throw new Error('scoped indicator mutation entity ID does not match reviewed entity');
