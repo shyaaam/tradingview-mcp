@@ -11,6 +11,7 @@ const TARGET_POLL_ATTEMPTS = 30;
 const TARGET_POLL_MS = 250;
 const PAGE_POLL_ATTEMPTS = 40;
 const PAGE_POLL_MS = 500;
+const DEFAULT_AUTHORITY_READ_TIMEOUT_MS = 15_000;
 const CHART_UID = /^[A-Za-z0-9_-]{1,160}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
 const CREATE_LAYOUT_FORM_PROBE = `/* V5_CREATE_LAYOUT_FORM_PROBE */
@@ -115,11 +116,23 @@ export const ACCOUNT_LAYOUT_PROBE = `
       try {
         if (typeof value === 'function') value = value();
         if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
         return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
       } catch { return ''; }
     }
+    function objectValue(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value && typeof value === 'object' ? value : null;
+      } catch { return null; }
+    }
     var api = window.TradingViewApi;
     var collection = api && api._chartWidgetCollection;
+    var metaInfo = objectValue(collection && collection.metaInfo);
+    var activeSavedLayoutId = read(metaInfo && metaInfo.id);
+    var activeSavedLayoutName = read(metaInfo && metaInfo.name);
     var subjects = [];
     var candidates = [
       api && api._user && (api._user.id || api._user.user_id || api._user.username),
@@ -131,14 +144,22 @@ export const ACCOUNT_LAYOUT_PROBE = `
       if (value && subjects.indexOf(value) === -1) subjects.push(value);
     }
     if (subjects.length !== 1 || !window.crypto || !window.crypto.subtle) {
-      return { authenticated: false, account_subject_sha256: null, layouts: null, chart_uid: null };
+      return {
+        authenticated: false, account_subject_sha256: null, layouts: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
     }
     var digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(subjects[0]));
     var accountHash = Array.prototype.map.call(new Uint8Array(digest), function(byte) {
       return byte.toString(16).padStart(2, '0');
     }).join('');
     if (!api || typeof api.getSavedCharts !== 'function') {
-      return { authenticated: true, account_subject_sha256: accountHash, layouts: null, chart_uid: null };
+      return {
+        authenticated: true, account_subject_sha256: accountHash, layouts: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
     }
     var layouts = await new Promise(function(resolve) {
       var settled = false;
@@ -169,6 +190,65 @@ export const ACCOUNT_LAYOUT_PROBE = `
       layouts: layouts,
       chart_uid: match ? match[1] : null,
       current_url: String(window.location && window.location.href || ''),
+      active_saved_layout_id: activeSavedLayoutId || null,
+      active_saved_layout_name: activeSavedLayoutName || null,
+    };
+  })()
+`;
+
+// Poll only active-page identity during hydration; saved-layout inventory has its own bounded callback.
+export const ACTIVE_SAVED_LAYOUT_PROBE = `/* V5_ACTIVE_SAVED_LAYOUT_PROBE */
+  (async function() {
+    function read(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return typeof value === 'string' || typeof value === 'number' ? String(value) : '';
+      } catch { return ''; }
+    }
+    function objectValue(value) {
+      try {
+        if (typeof value === 'function') value = value();
+        if (value && typeof value.value === 'function') value = value.value();
+        else if (value && Object.prototype.hasOwnProperty.call(value, 'value')) value = value.value;
+        return value && typeof value === 'object' ? value : null;
+      } catch { return null; }
+    }
+    var api = window.TradingViewApi;
+    var collection = api && api._chartWidgetCollection;
+    var metaInfo = objectValue(collection && collection.metaInfo);
+    var activeSavedLayoutId = read(metaInfo && metaInfo.id);
+    var activeSavedLayoutName = read(metaInfo && metaInfo.name);
+    var subjects = [];
+    var candidates = [
+      api && api._user && (api._user.id || api._user.user_id || api._user.username),
+      window.TradingView && window.TradingView.user && (window.TradingView.user.id || window.TradingView.user.user_id || window.TradingView.user.username),
+      collection && collection.metaInfo && collection.metaInfo.username,
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+      var value = read(candidates[i]);
+      if (value && subjects.indexOf(value) === -1) subjects.push(value);
+    }
+    if (subjects.length !== 1 || !window.crypto || !window.crypto.subtle) {
+      return {
+        authenticated: false, account_subject_sha256: null, chart_uid: null,
+        active_saved_layout_id: activeSavedLayoutId || null,
+        active_saved_layout_name: activeSavedLayoutName || null,
+      };
+    }
+    var digest = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(subjects[0]));
+    var accountHash = Array.prototype.map.call(new Uint8Array(digest), function(byte) {
+      return byte.toString(16).padStart(2, '0');
+    }).join('');
+    var match = String(window.location && window.location.pathname || '').match(/^\\/chart\\/([A-Za-z0-9_-]{1,160})\\/?$/u);
+    return {
+      authenticated: true,
+      account_subject_sha256: accountHash,
+      chart_uid: match ? match[1] : null,
+      current_url: String(window.location && window.location.href || ''),
+      active_saved_layout_id: activeSavedLayoutId || null,
+      active_saved_layout_name: activeSavedLayoutName || null,
     };
   })()
 `;
@@ -180,6 +260,13 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
     .update(`tv-observer-v5:saved-chart:${captureSlotId}:${reconciliationKey}`, 'utf8')
     .digest('base64url').slice(0, 32);
   return `V5OBS-${slot}-${digest}`;
+}
+
+function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId) {
+  const digest = createHash('sha256')
+    .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
+    .digest('base64url').slice(0, 32);
+  return `about:blank#v5-hydrate-${digest}`;
 }
 
 /** Read-only current-account and exact deterministic-layout preflight. */
@@ -194,7 +281,11 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     }
   } catch (error) {
     const cleanup = inventory === undefined
-      ? { failureCode: null }
+      ? {
+        failureCode: temporaryTargetCloseEvidence(error)
+          || safeFailureCode(error) === 'TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN'
+          ? null : 'TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED',
+      }
       : await closeMismatchedProfileInventory(inventory);
     return preflightResult(normalized, marker, {
       authenticated: false,
@@ -210,6 +301,7 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
   }
 
   let createProbe = { available: false, failureCode: null, inputCount: null, inputMaxLength: null };
+  let inventoryCloseFailureCode = null;
   try {
     if (inventory.authenticated && inventory.layouts !== null
       && exactMarkerMatches(inventory.layouts, marker).length === 0) {
@@ -220,7 +312,14 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
       }
     }
   } finally {
-    await closeProfileInventory(inventory);
+    try {
+      await closeProfileInventory(inventory);
+    } catch {
+      inventoryCloseFailureCode = inventory.temporaryTargetCreated
+        ? 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED'
+        : 'PROFILE_INVENTORY_CLOSE_UNCONFIRMED';
+      createProbe = { available: false, failureCode: inventoryCloseFailureCode, inputCount: null, inputMaxLength: null };
+    }
   }
   return preflightResult(normalized, marker, {
     authenticated: inventory.authenticated,
@@ -231,7 +330,8 @@ export async function preflightSavedChartAuthority(input = {}, dependencies = {}
     createFailureCode: createProbe.failureCode,
     createInputCount: createProbe.inputCount,
     createInputMaxLength: createProbe.inputMaxLength,
-    failureCode: inventory.authenticated && inventory.layouts !== null ? null : 'PROFILE_NOT_AUTHENTICATED',
+    failureCode: inventoryCloseFailureCode
+      ?? (inventory.authenticated && inventory.layouts !== null ? null : 'PROFILE_NOT_AUTHENTICATED'),
   });
 }
 
@@ -247,7 +347,12 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
     }
   } catch (error) {
     const cleanup = inventory === undefined
-      ? { temporaryTargetClosed: temporaryTargetCloseEvidence(error), failureCode: null }
+      ? {
+        temporaryTargetClosed: temporaryTargetCloseEvidence(error),
+        failureCode: temporaryTargetCloseEvidence(error)
+          || safeFailureCode(error) === 'TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN'
+          ? null : 'TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED',
+      }
       : await closeMismatchedProfileInventory(inventory);
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null, accountSubjectSha256: null,
@@ -255,7 +360,19 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       failureCode: cleanup.failureCode ?? safeFailureCode(error),
     });
   }
-  await closeProfileInventory(inventory);
+  try {
+    await closeProfileInventory(inventory);
+  } catch {
+    return ensureResult(normalized, marker, {
+      action: 'unknown', matchCount: 0, savedChartId: null,
+      accountSubjectSha256: inventory.accountSubjectSha256,
+      mutationsPerformed: false,
+      temporaryTargetClosed: inventory.temporaryTargetCreated !== true,
+      failureCode: inventory.temporaryTargetCreated === true
+        ? 'PROFILE_INVENTORY_TEMPORARY_TARGET_CLOSE_UNCONFIRMED'
+        : 'PROFILE_INVENTORY_CLOSE_UNCONFIRMED',
+    });
+  }
   if (!inventory.authenticated || inventory.layouts === null) {
     return ensureResult(normalized, marker, {
       action: 'unknown', matchCount: 0, savedChartId: null,
@@ -357,36 +474,108 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
 async function openAndLoadSavedLayout(expected, dependencies) {
   const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
     accountSubjectSha256, priorLayouts } = expected;
-  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
+  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId);
+  const version = await fetchJson(
+    new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
+    createAuthorityReadDeadline(dependencies),
+  );
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
-  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
+  const browser = await withAuthorityReadDeadline(
+    () => (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl),
+    createAuthorityReadDeadline(dependencies),
+  );
   let targetId = null;
   let page = null;
   let operationError = null;
   let failed = false;
   let closeResult = null;
   try {
-    const created = await browser.Target.createTarget({ url: 'about:blank' });
-    targetId = requireText(created?.targetId, 'created target id');
-    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
-    if (!target || target.type !== 'page' || target.url !== 'about:blank'
+    const beforeTargets = await listTargets(
+      profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+    );
+    const priorIds = new Set(beforeTargets.map((target) => target?.id).filter((id) => typeof id === 'string'));
+    const existingMarkedTargets = beforeTargets.filter((target) => target?.url === temporaryTargetUrl);
+    if (existingMarkedTargets.length > 1) {
+      const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS');
+      error.temporaryTargetClosed = false;
+      throw error;
+    }
+    if (existingMarkedTargets.length === 1) {
+      const existing = existingMarkedTargets[0];
+      if (existing.type !== 'page' || typeof existing.id !== 'string' || existing.id.length === 0) {
+        const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_NOT_EXACT');
+        error.temporaryTargetClosed = false;
+        throw error;
+      }
+      targetId = existing.id;
+    } else {
+      try {
+        const created = await withAuthorityReadDeadline(
+          () => browser.Target.createTarget({ url: temporaryTargetUrl }),
+          createAuthorityReadDeadline(dependencies),
+        );
+        const createdTargetId = requireText(created?.targetId, 'created target id');
+        if (priorIds.has(createdTargetId)) {
+          const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT');
+          error.temporaryTargetClosed = true;
+          throw error;
+        }
+        targetId = createdTargetId;
+      } catch (error) {
+        if (error?.message === 'SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT') throw error;
+        let afterTargets = [];
+        try {
+          afterTargets = await listTargets(
+            profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+          );
+        } catch { /* a lost create response remains unknown */ }
+        const recoveredTargets = afterTargets.filter((target) => target?.url === temporaryTargetUrl);
+        if (recoveredTargets.length === 1 && recoveredTargets[0].type === 'page'
+          && typeof recoveredTargets[0].id === 'string' && recoveredTargets[0].id.length > 0
+          && !priorIds.has(recoveredTargets[0].id)) {
+          targetId = recoveredTargets[0].id;
+        } else {
+          const code = recoveredTargets.length > 1
+            ? 'SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS'
+            : 'SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN';
+          const failure = new Error(code, { cause: error });
+          failure.temporaryTargetClosed = false;
+          throw failure;
+        }
+      }
+    }
+    const target = await waitForTarget(
+      profile.cdpUrl, targetId, dependencies, createAuthorityReadDeadline(dependencies),
+    );
+    if (!target || target.type !== 'page' || target.url !== temporaryTargetUrl
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
       throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
     }
-    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
-    await enablePage(page);
-    const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    page = await withAuthorityReadDeadline(
+      () => (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl),
+      createAuthorityReadDeadline(dependencies),
+    );
+    await enablePage(page, createAuthorityReadDeadline(dependencies));
+    const current = await evaluate(page, '({ url: location.href })', createAuthorityReadDeadline(dependencies));
+    if (current?.url !== temporaryTargetUrl) throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
+    const navigation = await withAuthorityReadDeadline(
+      () => page.Page.navigate({ url: GENERIC_CHART_URL }), createAuthorityReadDeadline(dependencies),
+    );
     if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
-    const beforeLoad = await waitForAccountProbe(page, dependencies);
+    const beforeLoadDeadline = createAuthorityReadDeadline(dependencies);
+    const beforeLoad = await waitForAccountProbe(page, dependencies, beforeLoadDeadline);
     if (beforeLoad.account_subject_sha256 !== accountSubjectSha256
       || stableJson(beforeLoad.layouts) !== stableJson(priorLayouts)) {
       throw new Error('SAVED_LAYOUT_ACCOUNT_OR_INVENTORY_CHANGED');
     }
     const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId && layout.name === marker);
     if (exactBeforeLoad.length !== 1) throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
-    await loadSavedLayout(page, savedLayoutId, dependencies);
-    const probe = await waitForSavedLayoutPageProbe(page, marker, savedLayoutId, accountSubjectSha256, dependencies);
-    const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    const hydrationDeadline = createAuthorityReadDeadline(dependencies);
+    await loadSavedLayout(page, savedLayoutId, marker, dependencies, hydrationDeadline);
+    const probe = await waitForSavedLayoutPageProbe(
+      page, marker, savedLayoutId, accountSubjectSha256, dependencies, hydrationDeadline,
+    );
+    const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies, hydrationDeadline);
     const canonicalUrl = `https://www.tradingview.com/chart/${probe.chart_uid}/`;
     if (!currentTarget || currentTarget.url !== canonicalUrl || probe.current_url !== canonicalUrl) {
       throw new Error('SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH');
@@ -400,11 +589,17 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     failed = true;
     operationError = error;
   } finally {
-    if (page) await closePage(page);
+    if (page) await closePage(page, createAuthorityReadDeadline(dependencies));
     if (failed && targetId) {
-      try { closeResult = await browser.Target.closeTarget({ targetId }); } catch { closeResult = null; }
+      try {
+        closeResult = await withAuthorityReadDeadline(
+          () => browser.Target.closeTarget({ targetId }), createAuthorityReadDeadline(dependencies),
+        );
+      } catch { closeResult = null; }
     }
-    try { await browser.close?.(); } catch { /* preserve target outcome */ }
+    try {
+      await withAuthorityReadDeadline(() => browser.close?.(), createAuthorityReadDeadline(dependencies));
+    } catch { /* preserve target outcome */ }
   }
   throw withTemporaryTargetCloseEvidence(operationError, targetId === null || closeResult?.success === true);
 }
@@ -482,14 +677,15 @@ function ensureResult(input, marker, state) {
 }
 
 async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies) {
+  const deadline = createAuthorityReadDeadline(dependencies);
   let temporaryTarget;
   let result = { available: false, failureCode: 'CREATE_PREFLIGHT_NOT_COMPLETED', inputCount: null, inputMaxLength: null };
   let closeFailed = false;
   try {
     temporaryTarget = await (dependencies.openTemporaryChartTarget || openTemporaryChartTarget)(
-      inventory.profile, dependencies, inventory.targets,
+      inventory.profile, dependencies, inventory.allTargets || inventory.targets, deadline,
     );
-    const probe = await evaluate(temporaryTarget.page, ACCOUNT_LAYOUT_PROBE);
+    const probe = await evaluate(temporaryTarget.page, ACCOUNT_LAYOUT_PROBE, deadline);
     if (probe?.authenticated !== true || probe.account_subject_sha256 !== inventory.accountSubjectSha256
       || !Array.isArray(probe.layouts)) {
       throw new Error('CREATE_PREFLIGHT_ACCOUNT_OR_LAYOUT_IDENTITY_MISMATCH');
@@ -501,8 +697,10 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
     if (exactMarkerMatches(layouts, marker).length !== 0) {
       throw new Error('CREATE_PREFLIGHT_MARKER_APPEARED');
     }
-    result = await (dependencies.canCreateSavedLayout || canCreateSavedLayout)(
-      temporaryTarget.page, marker, dependencies,
+    result = await withAuthorityReadDeadline(
+      () => (dependencies.canCreateSavedLayout || canCreateSavedLayout)(temporaryTarget.page, marker, dependencies),
+      deadline,
+      () => { void temporaryTarget.close().catch(() => {}); },
     );
   } catch (error) {
     result = { available: false, failureCode: safeFailureCode(error), inputCount: null, inputMaxLength: null };
@@ -522,12 +720,17 @@ async function preflightCreateOnFreshChartTarget(inventory, marker, dependencies
 }
 
 async function readProfileInventory(profileName, dependencies) {
-  const profile = await resolveExactRunningProfile(profileName, dependencies);
-  const targets = await listTargets(profile.cdpUrl, dependencies);
+  const deadline = createAuthorityReadDeadline(dependencies);
+  const profile = await withAuthorityReadDeadline(
+    () => resolveExactRunningProfile(profileName, dependencies), deadline,
+  );
+  const targets = await listTargets(profile.cdpUrl, dependencies, deadline);
   let chartTargets = targets.filter(isTradingViewChartTarget);
   let temporaryTarget = null;
   if (chartTargets.length === 0) {
-    temporaryTarget = await (dependencies.createInventoryTarget || openTemporaryChartTarget)(profile, dependencies, targets);
+    temporaryTarget = await (dependencies.createInventoryTarget || openTemporaryChartTarget)(
+      profile, dependencies, targets, deadline,
+    );
     chartTargets = [temporaryTarget.target];
   }
 
@@ -537,10 +740,10 @@ async function readProfileInventory(profileName, dependencies) {
   for (const target of chartTargets) {
     const page = temporaryTarget?.target.id === target.id
       ? temporaryTarget.page
-      : await connectTarget(target, dependencies);
+      : await connectTarget(target, dependencies, deadline);
     try {
-      await enablePage(page);
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      await enablePage(page, deadline);
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
       if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))
         || !Array.isArray(probe.layouts)) {
         throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
@@ -555,7 +758,7 @@ async function readProfileInventory(profileName, dependencies) {
       accountSubjectSha256 = probe.account_subject_sha256;
       canonicalLayouts = layouts;
       firstPage ??= page;
-      if (page !== firstPage) await closePage(page);
+      if (page !== firstPage) await closePage(page, deadline);
     } catch (error) {
       let temporaryTargetClosed = temporaryTarget === null;
       if (temporaryTarget !== null) {
@@ -566,10 +769,10 @@ async function readProfileInventory(profileName, dependencies) {
           temporaryTargetClosed = false;
         }
       } else {
-        try { await closePage(page); } catch { /* preserve inventory failure */ }
+        try { await closePage(page, deadline); } catch { /* preserve inventory failure */ }
       }
       if (firstPage !== null && firstPage !== page && firstPage !== temporaryTarget?.page) {
-        try { await closePage(firstPage); } catch { /* preserve inventory failure */ }
+        try { await closePage(firstPage, deadline); } catch { /* preserve inventory failure */ }
       }
       throw inventoryReadFailure(error, temporaryTargetClosed);
     }
@@ -583,6 +786,7 @@ async function readProfileInventory(profileName, dependencies) {
   }
   return {
     profile,
+    allTargets: temporaryTarget === null ? targets : [...targets, temporaryTarget.target],
     targets: chartTargets,
     temporaryTargetCreated: temporaryTarget !== null,
     page: firstPage,
@@ -591,7 +795,7 @@ async function readProfileInventory(profileName, dependencies) {
     authenticated: true,
     close: async () => {
       if (temporaryTarget !== null) await temporaryTarget.close();
-      else await closePage(firstPage);
+      else await closePage(firstPage, deadline);
     },
   };
 }
@@ -622,66 +826,104 @@ function withTemporaryTargetCloseEvidence(error, closeConfirmed) {
   return wrapped;
 }
 
-async function openTemporaryChartTarget(profile, dependencies, existingTargets) {
+async function openTemporaryChartTarget(profile, dependencies, existingTargets,
+  deadline = createAuthorityReadDeadline(dependencies)) {
   if (existingTargets.some(isTradingViewLoginTarget)) {
     throw new Error('TRADINGVIEW_LOGIN_TARGET_PRESENT');
   }
-  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
+  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies, deadline);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
-  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(
-    version.webSocketDebuggerUrl,
+  const browser = await withAuthorityReadDeadline(
+    () => (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl),
+    deadline,
   );
   let targetId = null;
   let page = null;
-  let closed = false;
+  let targetCreateAttempted = false;
+  let targetCreationResolved = false;
+  let closePromise = null;
   const close = async () => {
-    if (closed) return;
-    closed = true;
-    if (page) {
-      try { await closePage(page); } catch { /* target close below is authoritative */ }
-    }
-    let result = null;
-    if (targetId !== null) {
-      try { result = await browser.Target.closeTarget({ targetId }); } catch { result = null; }
-    }
-    try { await browser.close?.(); } catch { /* exact target close result is authoritative */ }
-    if (targetId === null || result?.success !== true) {
-      throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
-    }
+    if (closePromise) return await closePromise;
+    closePromise = (async () => {
+      const cleanupDeadline = createAuthorityReadDeadline(dependencies);
+      if (page) await closePage(page, cleanupDeadline);
+      let result = null;
+      if (targetId !== null) {
+        try {
+          result = await withAuthorityReadDeadline(
+            () => browser.Target.closeTarget({ targetId }), cleanupDeadline,
+          );
+        } catch { result = null; }
+      }
+      try {
+        await withAuthorityReadDeadline(() => browser.close?.(), cleanupDeadline);
+      } catch { /* exact target close result is authoritative */ }
+      if (targetCreateAttempted && targetId === null && !targetCreationResolved) {
+        throw new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN');
+      }
+      if (targetId !== null && result?.success !== true) {
+        throw new Error('TEMPORARY_INVENTORY_TARGET_CLOSE_UNCONFIRMED');
+      }
+    })();
+    return await closePromise;
   };
   try {
-    const created = await browser.Target.createTarget({ url: 'about:blank' });
+    targetCreateAttempted = true;
+    const created = await withAuthorityReadDeadline(
+      () => browser.Target.createTarget({ url: 'about:blank' }), deadline,
+    );
     const createdTargetId = requireText(created?.targetId, 'temporary inventory target id');
     if (existingTargets.some((target) => target?.id === createdTargetId)) {
+      targetCreationResolved = true;
       throw new Error('TEMPORARY_INVENTORY_TARGET_ID_ALREADY_EXISTS');
     }
     targetId = createdTargetId;
-    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    targetCreationResolved = true;
+    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies, deadline);
     if (!target || target.type !== 'page' || target.url !== 'about:blank'
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
       throw new Error('TEMPORARY_INVENTORY_TARGET_NOT_EXACT');
     }
-    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(
-      target.webSocketDebuggerUrl,
-    );
-    await enablePage(page);
-    const before = await evaluate(page, '({ url: location.href })');
+    page = await connectTarget(target, dependencies, deadline);
+    await enablePage(page, deadline);
+    const before = await evaluate(page, '({ url: location.href })', deadline);
     if (before?.url !== 'about:blank') throw new Error('TEMPORARY_INVENTORY_TARGET_LEFT_BLANK');
-    const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    const navigation = await withAuthorityReadDeadline(
+      () => page.Page.navigate({ url: GENERIC_CHART_URL }), deadline,
+      () => { void close().catch(() => {}); },
+    );
     if (navigation?.errorText) throw new Error('TEMPORARY_INVENTORY_NAVIGATION_FAILED');
-    await waitForAccountProbe(page, dependencies);
-    const navigatedTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    await waitForAccountProbe(page, dependencies, deadline);
+    const navigatedTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies, deadline);
     if (!isTradingViewChartTarget(navigatedTarget)) {
       throw new Error('TEMPORARY_INVENTORY_TARGET_ROUTE_NOT_EXACT');
     }
     return { target: navigatedTarget, page, close };
   } catch (error) {
     let temporaryTargetClosed = false;
+    let failure = error;
+    if (targetCreateAttempted && targetId === null && !targetCreationResolved) {
+      try {
+        const cleanupDeadline = createAuthorityReadDeadline(dependencies);
+        const currentTargets = await listTargets(profile.cdpUrl, dependencies, cleanupDeadline);
+        const existingIds = new Set(existingTargets.map((target) => target?.id));
+        const added = currentTargets.filter((target) => !existingIds.has(target?.id));
+        if (added.length === 1 && added[0]?.type === 'page' && added[0]?.url === 'about:blank'
+          && typeof added[0]?.id === 'string' && added[0].id.length > 0) {
+          targetId = added[0].id;
+          targetCreationResolved = true;
+        } else {
+          failure = new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
+        }
+      } catch {
+        failure = new Error('TEMPORARY_INVENTORY_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
+      }
+    }
     try {
       await close();
       temporaryTargetClosed = true;
-    } catch { /* retain close uncertainty for the caller */ }
-    throw inventoryReadFailure(error, temporaryTargetClosed);
+    } catch { /* preserve primary failure; cleanup is separately reported as false */ }
+    throw inventoryReadFailure(failure, temporaryTargetClosed);
   }
 }
 
@@ -916,16 +1158,62 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   return { savedLayoutId, temporaryTargetClosed: closeBrowser?.success === true };
 }
 
-async function loadSavedLayout(page, layoutId, dependencies) {
-  const expression = `(function() {
+async function loadSavedLayout(page, layoutId, marker, dependencies, deadline) {
+  const loadTimeoutMs = Math.max(1, Math.floor(deadline.at - performance.now() - 250));
+  const expression = `(async function() {
     var api = window.TradingViewApi;
-    if (!api || typeof api.loadChartFromServer !== 'function') return { ok: false };
-    try { api.loadChartFromServer(${JSON.stringify(layoutId)}); return { ok: true }; }
-    catch { return { ok: false }; }
+    if (!api || typeof api.getSavedCharts !== 'function' || typeof api.loadChartFromServer !== 'function') {
+      return { ok: false, error: 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE' };
+    }
+    var records = await new Promise(function(resolve) {
+      var settled = false;
+      var timer = setTimeout(function() {
+        if (!settled) { settled = true; resolve(null); }
+      }, 5000);
+      function finish(value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(Array.isArray(value) ? value : null);
+      }
+      try {
+        var returned = api.getSavedCharts(finish);
+        if (returned && typeof returned.then === 'function') returned.then(finish, function() { finish(null); });
+      } catch { finish(null); }
+    });
+    if (!Array.isArray(records)) return { ok: false, error: 'SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE' };
+    var matches = records.filter(function(record) {
+      var id = record && (record.id ?? record.chartId ?? record.chart_id);
+      var name = record && (record.name ?? record.title);
+      return id !== null && id !== undefined && String(id) === ${JSON.stringify(layoutId)}
+        && name === ${JSON.stringify(marker)};
+    });
+    if (matches.length !== 1) {
+      return { ok: false, error: matches.length === 0
+        ? 'SAVED_LAYOUT_RECORD_NOT_FOUND' : 'SAVED_LAYOUT_RECORD_AMBIGUOUS' };
+    }
+    var loadTimer;
+    try {
+      await Promise.race([
+        Promise.resolve(api.loadChartFromServer(matches[0])),
+        new Promise(function(_resolve, reject) {
+          loadTimer = setTimeout(function() { reject(new Error('SAVED_LAYOUT_LOAD_TIMEOUT')); }, ${JSON.stringify(loadTimeoutMs)});
+        }),
+      ]);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error?.message === 'SAVED_LAYOUT_LOAD_TIMEOUT'
+        ? 'SAVED_LAYOUT_LOAD_TIMEOUT' : 'SAVED_LAYOUT_LOAD_REJECTED' };
+    } finally { clearTimeout(loadTimer); }
   })()`;
-  const result = await evaluate(page, expression);
-  if (result?.ok !== true) throw new Error('SAVED_LAYOUT_LOAD_API_UNAVAILABLE');
-  await sleep(dependencies, 1000);
+  const result = await evaluate(page, expression, deadline);
+  if (result?.ok !== true) {
+    const failureCode = typeof result?.error === 'string'
+      && /^SAVED_LAYOUT_[A-Z0-9_]{1,64}$/u.test(result.error)
+      ? result.error : 'SAVED_LAYOUT_LOAD_API_UNAVAILABLE';
+    throw new Error(failureCode);
+  }
+  await withAuthorityReadDeadline(() => sleep(dependencies, 1000), deadline);
 }
 
 async function clickUniqueVisible(page, selector, dependencies, errorCode) {
@@ -955,16 +1243,17 @@ async function pressEscape(page, dependencies) {
   await dispatch({ type: 'keyUp', key: 'Escape', code: 'Escape' });
 }
 
-async function waitForAccountProbe(page, dependencies) {
+async function waitForAccountProbe(page, dependencies, deadline) {
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
       if (probe?.authenticated === true && HASH.test(String(probe.account_subject_sha256 || ''))
         && Array.isArray(probe.layouts)) {
         return { ...probe, layouts: normalizeLayouts(probe.layouts) };
       }
     } catch { /* bounded page readiness poll */ }
-    await sleep(dependencies, PAGE_POLL_MS);
+    if (deadline === undefined) await sleep(dependencies, PAGE_POLL_MS);
+    else await withAuthorityReadDeadline(() => sleep(dependencies, PAGE_POLL_MS), deadline);
   }
   throw new Error('TRADINGVIEW_ACCOUNT_OR_LAYOUT_READINESS_TIMEOUT');
 }
@@ -988,70 +1277,169 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
   throw new Error('SAVED_CHART_CREATE_OR_DISCOVERY_NOT_CONFIRMED');
 }
 
-async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies) {
+async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies, deadline) {
+  let lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
+  let lastObserved = null;
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
+    let probe = null;
     try {
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
-      if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+      probe = await evaluate(page, ACTIVE_SAVED_LAYOUT_PROBE, deadline);
+    } catch (error) {
+      if (error?.message === 'SAVED_CHART_AUTHORITY_READ_TIMEOUT') throw error;
+      lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
+    }
+    if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+      throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
+    }
+    lastObserved = savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash, marker, savedLayoutId);
+    const activeFailure = savedLayoutPageReadbackFailure(probe, marker, savedLayoutId);
+    if (activeFailure !== null) lastFailure = activeFailure;
+    if (probe !== null && activeFailure === null) {
+      let verified;
+      try {
+        verified = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
+      } catch (error) {
+        if (error?.message === 'SAVED_CHART_AUTHORITY_READ_TIMEOUT') throw error;
+        throw new Error('SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE_AFTER_HYDRATION');
+      }
+      if (verified?.authenticated !== true) {
+        throw new Error('SAVED_LAYOUT_ACCOUNT_NOT_AUTHENTICATED_AFTER_HYDRATION');
+      }
+      if (verified.account_subject_sha256 !== expectedAccountHash) {
         throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
       }
-      const exactMarker = Array.isArray(probe?.layouts)
-        ? probe.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker)
-        : [];
-      if (probe?.authenticated === true && exactMarker.length === 1
-        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
-        && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
-        return probe;
+      if (!Array.isArray(verified.layouts)) {
+        throw new Error('SAVED_LAYOUT_INVENTORY_READBACK_UNAVAILABLE_AFTER_HYDRATION');
       }
-    } catch (error) {
-      if (error.message === 'ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION') throw error;
+      const exactMarker = verified.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker);
+      if (exactMarker.length !== 1) {
+        throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH_AFTER_HYDRATION');
+      }
+      const finalFailure = savedLayoutPageReadbackFailure(verified, marker, savedLayoutId);
+      if (finalFailure !== null) throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${finalFailure}`);
+      return { ...verified, layouts: normalizeLayouts(verified.layouts) };
     }
-    await sleep(dependencies, PAGE_POLL_MS);
+    if (attempt + 1 < PAGE_POLL_ATTEMPTS) {
+      await withAuthorityReadDeadline(() => sleep(dependencies, PAGE_POLL_MS), deadline);
+    }
   }
-  throw new Error('SAVED_LAYOUT_LOAD_NOT_CONFIRMED');
+  throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${lastFailure}:${lastObserved}`);
 }
 
-async function listTargets(cdpUrl, dependencies) {
-  const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies);
-  if (!Array.isArray(targets)) throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
-  return targets;
-}
-
-async function waitForTarget(cdpUrl, targetId, dependencies) {
-  for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
-    const target = (await listTargets(cdpUrl, dependencies)).find((entry) => entry?.id === targetId);
-    if (target) return target;
-    await sleep(dependencies, TARGET_POLL_MS);
+function savedLayoutPageReadbackFailure(probe, marker, savedLayoutId) {
+  if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))) {
+    return 'SAVED_LAYOUT_ACCOUNT_NOT_READY';
+  }
+  if (probe.active_saved_layout_id !== savedLayoutId) return 'SAVED_LAYOUT_ACTIVE_ID_MISMATCH';
+  if (probe.active_saved_layout_name !== marker) return 'SAVED_LAYOUT_ACTIVE_NAME_MISMATCH';
+  if (typeof probe.chart_uid !== 'string' || !CHART_UID.test(probe.chart_uid)
+    || probe.current_url !== `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
+    return 'SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH';
   }
   return null;
 }
 
-async function fetchJson(url, dependencies) {
-  const response = await (dependencies.fetch || fetch)(url);
-  if (!response.ok) throw new Error(`CLOAK_REQUEST_${response.status}`);
-  return await response.json();
+function savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash, marker, savedLayoutId) {
+  const routeReadbackMatches = typeof probe?.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
+    && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`;
+  return [
+    `authenticated=${probe?.authenticated === true}`,
+    `account_match=${probe?.account_subject_sha256 === expectedAccountHash}`,
+    `active_id_match=${probe?.active_saved_layout_id === savedLayoutId}`,
+    `active_name_match=${probe?.active_saved_layout_name === marker}`,
+    `route_readback_match=${routeReadbackMatches}`,
+  ].join(';');
 }
 
-async function connectTarget(target, dependencies) {
+async function listTargets(cdpUrl, dependencies, deadline) {
+  const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), dependencies, deadline);
+  if (!Array.isArray(targets)) throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
+  return targets;
+}
+
+async function waitForTarget(cdpUrl, targetId, dependencies, deadline) {
+  for (let attempt = 0; attempt < TARGET_POLL_ATTEMPTS; attempt += 1) {
+    const target = (await listTargets(cdpUrl, dependencies, deadline)).find((entry) => entry?.id === targetId);
+    if (target) return target;
+    if (deadline === undefined) await sleep(dependencies, TARGET_POLL_MS);
+    else await withAuthorityReadDeadline(() => sleep(dependencies, TARGET_POLL_MS), deadline);
+  }
+  return null;
+}
+
+async function fetchJson(url, dependencies, deadline) {
+  const request = async (signal) => {
+    const response = await (dependencies.fetch || fetch)(url, signal ? { signal } : undefined);
+    if (!response.ok) throw new Error(`CLOAK_REQUEST_${response.status}`);
+    return await response.json();
+  };
+  if (deadline === undefined) return await request(undefined);
+  const controller = new AbortController();
+  return await withAuthorityReadDeadline(() => request(controller.signal), deadline, () => controller.abort());
+}
+
+async function connectTarget(target, dependencies, deadline) {
   if (typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
     throw new Error('EXACT_CHART_TARGET_WEBSOCKET_UNAVAILABLE');
   }
-  return await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+  const connect = () => (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(
+    target.webSocketDebuggerUrl,
+  );
+  return deadline === undefined ? await connect() : await withAuthorityReadDeadline(connect, deadline);
 }
 
-async function enablePage(page) {
-  await page.Runtime.enable();
-  await page.Page.enable();
+async function enablePage(page, deadline) {
+  const enable = (operation) => deadline === undefined
+    ? operation()
+    : withAuthorityReadDeadline(operation, deadline, () => closePage(page));
+  await enable(() => page.Runtime.enable());
+  await enable(() => page.Page.enable());
 }
 
-async function evaluate(page, expression) {
-  const response = await page.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
+async function evaluate(page, expression, deadline) {
+  const operation = () => page.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: true });
+  const response = deadline === undefined
+    ? await operation()
+    : await withAuthorityReadDeadline(operation, deadline, () => closePage(page));
   if (response.exceptionDetails) throw new Error('TRADINGVIEW_PAGE_EVALUATION_FAILED');
   return response.result?.value;
 }
 
-async function closePage(page) {
-  try { await page.close?.(); } catch { /* preserve authoritative operation result */ }
+async function closePage(page, deadline) {
+  try {
+    const closing = Promise.resolve().then(() => page.close?.());
+    if (deadline === undefined) await closing;
+    else await withAuthorityReadDeadline(() => closing, deadline);
+  } catch { /* preserve authoritative operation result */ }
+}
+
+function createAuthorityReadDeadline(dependencies) {
+  const timeoutMs = dependencies.authorityReadTimeoutMs ?? DEFAULT_AUTHORITY_READ_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30_000) {
+    throw new Error('SAVED_CHART_AUTHORITY_READ_TIMEOUT_INVALID');
+  }
+  return Object.freeze({ at: performance.now() + timeoutMs, timeoutMs });
+}
+
+function withAuthorityReadDeadline(operation, deadline, onTimeout = () => {}) {
+  const remaining = deadline.at - performance.now();
+  if (remaining <= 0) {
+    try { onTimeout(); } catch { /* preserve timeout */ }
+    return Promise.reject(authorityReadTimeoutError());
+  }
+  let timer;
+  const work = Promise.resolve().then(operation);
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout(); } catch { /* preserve timeout */ }
+      reject(authorityReadTimeoutError());
+    }, remaining);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+function authorityReadTimeoutError() {
+  return new Error('SAVED_CHART_AUTHORITY_READ_TIMEOUT');
 }
 
 async function sleep(dependencies, milliseconds) {

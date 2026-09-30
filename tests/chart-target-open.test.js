@@ -185,6 +185,66 @@ test('starts only exact stable-name profile and returns no runtime UUID', async 
   z.object(observerToolDefinitions.tv_observer_start_profile_by_name_v1.outputSchema).parse(result);
 });
 
+test('lost profile-launch response is reconciled by exact-name readback without replaying launch', async () => {
+  const calls = [];
+  let status = 'stopped';
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  const result = await startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      calls.push({ url, method: init.method || 'GET' });
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status, cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+        assert.equal(init.method, 'POST');
+        status = 'running'; // remote effect happened, but Manager response was lost/failed
+        return { ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({}) };
+      }
+      if (url === `${cdpUrl}/json/version`) {
+        return response({ webSocketDebuggerUrl: `ws://manager.test/api/profiles/${PROFILE_ID}/cdp` });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  });
+
+  assert.deepEqual(result, {
+    success: true,
+    profile_name: PROFILE_NAME,
+    status: 'running',
+    launch_performed: false,
+    cdp_ready: true,
+  });
+  assert.equal(calls.filter(({ method }) => method === 'POST').length, 1);
+  assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
+    ['GET', `${BASE_URL}/profiles`],
+    ['POST', `${BASE_URL}/profiles/${PROFILE_ID}/launch`],
+    ['GET', `${BASE_URL}/profiles`],
+    ['GET', `${cdpUrl}/json/version`],
+  ]);
+});
+
+test('failed launch with stopped readback fails closed and never replays launch', async () => {
+  let launches = 0;
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, {
+    managerBaseUrl: BASE_URL,
+    sleep: async () => {},
+    fetch: async (url, init = {}) => {
+      if (url === `${BASE_URL}/profiles`) {
+        return response([{ id: PROFILE_ID, name: PROFILE_NAME, status: 'stopped',
+          cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+      }
+      if (url === `${BASE_URL}/profiles/${PROFILE_ID}/launch`) {
+        launches += 1;
+        return { ok: false, status: 503, statusText: 'Unavailable', json: async () => ({}) };
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    },
+  }), (error) => error.failureCode === 'PROFILE_LAUNCH_FAILED');
+  assert.equal(launches, 1);
+});
+
 test('does not launch when exact profile name is ambiguous', async () => {
   let launches = 0;
   await assert.rejects(startExactProfileByName(PROFILE_NAME, {
