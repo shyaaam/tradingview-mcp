@@ -1,8 +1,26 @@
 import { jsonResult } from './_format.js';
-import { preflightSavedChartAuthority, ensureSavedChartAuthority } from '../core/saved-chart-authority.js';
+import { preflightSavedChartAuthority, ensureSavedChartAuthority, hydrateSavedChartLayout } from '../core/saved-chart-authority.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
 export function registerSavedChartAuthorityTools(server) {
+  registerObserverTool(
+    server,
+    'tv_observer_hydrate_saved_layout_v1',
+    'Hydrate one exact current-account saved-layout ID into a disposable TradingView target and verify marker plus runtime readback',
+    async ({ profile_name, capture_slot_id, reconciliation_key, saved_layout_id }) => {
+      try {
+        return jsonResult(await hydrateSavedChartLayout({
+          profileName: profile_name,
+          captureSlotId: capture_slot_id,
+          reconciliationKey: reconciliation_key,
+          savedLayoutId: saved_layout_id,
+        }));
+      } catch (error) {
+        return jsonResult({ success: false, error: error.message }, true);
+      }
+    },
+  );
+
   registerObserverTool(
     server,
     'tv_observer_saved_chart_authority_preflight_v1',

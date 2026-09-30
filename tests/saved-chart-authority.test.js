@@ -7,6 +7,7 @@ import { TextEncoder } from 'node:util';
 import {
   ACCOUNT_LAYOUT_PROBE,
   ensureSavedChartAuthority,
+  hydrateSavedChartLayout,
   preflightSavedChartAuthority,
   savedChartLayoutMarker,
 } from '../src/core/saved-chart-authority.js';
@@ -43,6 +44,7 @@ function inventory(layouts = []) {
     targets: [{ id: 'transient-target', url: 'https://www.tradingview.com/chart/' }],
     page: { close: async () => {} },
     layouts,
+    loadedTargets: [],
     accountSubjectSha256: ACCOUNT_HASH,
     authenticated: true,
   };
@@ -279,6 +281,7 @@ test('read-only preflight reports current-account marker state and create availa
     account_subject_sha256: ACCOUNT_HASH,
     action: 'not_found',
     match_count: 0,
+    saved_layout_id: null,
     layout_count: 1,
     layout_inventory_sha256: createHash('sha256').update(JSON.stringify([
       { layoutId: 'user-layout-id', name: 'User chart', symbol: 'BATS:META', resolution: '60' },
@@ -642,14 +645,15 @@ test('cold profile preflight opens one exact-profile chart tab, reads current ac
   const page = {
     Runtime: {
       enable: async () => {},
-      evaluate: async ({ expression }) => ({ result: { value: expression.includes('location.href')
-        ? { url: 'about:blank' }
-        : {
+      evaluate: async ({ expression }) => ({ result: { value: expression === ACCOUNT_LAYOUT_PROBE
+        ? {
           authenticated: true,
           account_subject_sha256: ACCOUNT_HASH,
           layouts: [{ layout_id: 'new-account-layout', name: 'Current account chart' }],
           chart_uid: null,
-        } } }),
+          saved_layout_uid: null,
+          current_url: 'https://www.tradingview.com/chart/',
+        } : { url: 'about:blank' } } }),
     },
     Page: {
       enable: async () => {},
@@ -722,14 +726,15 @@ test('cold profile discovers saved layouts with a blank tab while preserving tha
   const page = {
     Runtime: {
       enable: async () => {},
-      evaluate: async ({ expression }) => ({ result: { value: expression.includes('location.href')
-        ? { url: 'about:blank' }
-        : {
+      evaluate: async ({ expression }) => ({ result: { value: expression === ACCOUNT_LAYOUT_PROBE
+        ? {
           authenticated: true,
           account_subject_sha256: ACCOUNT_HASH,
           layouts: [{ layout_id: 'current-account-layout', name: MARKER }],
           chart_uid: null,
-        } } }),
+          saved_layout_uid: null,
+          current_url: 'https://www.tradingview.com/chart/',
+        } : { url: 'about:blank' } } }),
     },
     Page: {
       enable: async () => {},
@@ -799,19 +804,275 @@ test('existing exact marker is mapped to verified route UID without any new save
     createIfAbsent: true,
   }, {
     readProfileInventory: async () => inventory([{ layoutId: 'internal-layout-id', name: MARKER }]),
-    resolveSavedLayoutRoute: async (_profileName, _profileId, layout) => {
-      assert.equal(layout.layoutId, 'internal-layout-id');
-      return { chartId: 'saved-route-uid', temporaryTargetClosed: true };
-    },
     createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
   });
 
   assert.equal(result.action, 'reused');
-  assert.equal(result.saved_chart_id, 'saved-route-uid');
-  assert.equal(result.canonical_chart_url, 'https://www.tradingview.com/chart/saved-route-uid/');
+  assert.equal(result.saved_layout_id, 'internal-layout-id');
+  assert.equal(result.saved_chart_id, null);
+  assert.equal(result.canonical_chart_url, null);
   assert.equal(result.mutations_performed, false);
   assert.equal(result.create_if_absent, true);
   assert.equal(createCount, 0);
+});
+
+test('saved-layout discovery does not depend on route UID resolution or target close', async () => {
+  let createCount = 0;
+  const result = await ensureSavedChartAuthority({
+    ...INPUT,
+    expectedAccountSubjectSha256: ACCOUNT_HASH,
+    createIfAbsent: true,
+  }, {
+    readProfileInventory: async () => inventory([
+      { layoutId: 'existing-layout', name: MARKER, symbol: '', resolution: '' },
+    ]),
+    createSavedLayout: async () => { createCount += 1; throw new Error('must not create'); },
+  });
+
+  assert.equal(result.action, 'reused');
+  assert.equal(result.saved_layout_id, 'existing-layout');
+  assert.equal(result.failure_code, null);
+  assert.equal(result.temporary_target_closed, true);
+  assert.equal(result.mutations_performed, false);
+  assert.equal(result.match_count, 1);
+  assert.equal(createCount, 0);
+});
+
+test('saved-layout hydration loads exact server ID into a fresh target and verifies marker/account/readback', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const savedLayoutId = '206000778';
+  const runtimeChartId = 'runtime-route-a';
+  const targetId = 'fresh-layout-target';
+  const targets = new Map();
+  let loaded = false;
+  let loadedRequestedId = null;
+  let targetCloseCount = 0;
+  let targetCreateCount = 0;
+  const page = {
+    Runtime: {
+      enable: async () => {},
+      evaluate: async ({ expression }) => {
+        if (expression.includes('loadChartFromServer')) {
+          loadedRequestedId = savedLayoutId;
+          loaded = true;
+          targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
+          return { result: { value: { ok: true } } };
+        }
+        return { result: { value: {
+          authenticated: true,
+          account_subject_sha256: ACCOUNT_HASH,
+          layouts: [{ layout_id: savedLayoutId, name: MARKER, symbol: '', resolution: '' }],
+          chart_uid: loaded ? runtimeChartId : null,
+          current_url: loaded
+            ? `https://www.tradingview.com/chart/${runtimeChartId}/`
+            : 'https://www.tradingview.com/chart/',
+          // Runtime UID is locator metadata and may differ from saved-layout ID.
+          saved_layout_uid: loaded ? runtimeChartId : null,
+        } } };
+      },
+    },
+    Page: {
+      enable: async () => {},
+      navigate: async ({ url }) => {
+        targets.set(targetId, { ...targets.get(targetId), url });
+        return {};
+      },
+    },
+    close: async () => {},
+  };
+  const browser = {
+    Target: {
+      createTarget: async ({ url }) => {
+        targetCreateCount += 1;
+        targets.set(targetId, {
+          id: targetId, type: 'page', url,
+          webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${targetId}`,
+        });
+        return { targetId };
+      },
+      closeTarget: async ({ targetId: closedId }) => {
+        targetCloseCount += 1;
+        targets.delete(closedId);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  };
+  const result = await hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      loadedTargets: [{
+        targetId: 'misleading-existing-target',
+        targetUrl: `https://www.tradingview.com/chart/${runtimeChartId}/`,
+        chartId: runtimeChartId,
+        savedLayoutUid: runtimeChartId,
+      }],
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async () => page,
+    sleep: async () => {},
+  });
+
+  assert.equal(result.state, 'hydrated');
+  assert.equal(result.saved_layout_id, savedLayoutId);
+  assert.equal(result.layout_marker, MARKER);
+  assert.equal(result.account_subject_sha256, ACCOUNT_HASH);
+  assert.equal(result.target_id, targetId);
+  assert.equal(result.runtime_chart_id, runtimeChartId);
+  assert.equal(result.target_url, `https://www.tradingview.com/chart/${runtimeChartId}/`);
+  assert.equal(result.mutations_performed, true);
+  assert.equal(loadedRequestedId, savedLayoutId);
+  assert.equal(targetCreateCount, 1);
+  assert.equal(targetCloseCount, 0);
+  assert.equal(targets.has(targetId), true);
+});
+
+test('saved-layout hydration refuses marker-to-ID mismatch before opening a target', async () => {
+  let targetCreateCount = 0;
+  let closed = false;
+  await assert.rejects(hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId: 'wrong-layout-id',
+  }, {
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: 'actual-layout-id', name: MARKER }]),
+      close: async () => { closed = true; },
+    }),
+    connectBrowser: async () => { targetCreateCount += 1; throw new Error('must not open target'); },
+  }), /SAVED_LAYOUT_MARKER_ID_MISMATCH/u);
+  assert.equal(closed, true);
+  assert.equal(targetCreateCount, 0);
+});
+
+test('slot B create accepts exact new layout ID even when route UID matches Slot A', async () => {
+    const cdpUrl = 'http://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
+    const browserWebSocketUrl = 'ws://127.0.0.1:9222/profiles/ephemeral-manager-id/cdp';
+    const slotAMarker = savedChartLayoutMarker('v5-capture-slot-a', 'a'.repeat(64));
+    const slotBInput = {
+      ...INPUT,
+      captureSlotId: 'v5-capture-slot-b',
+      reconciliationKey: 'c'.repeat(64),
+      expectedAccountSubjectSha256: ACCOUNT_HASH,
+      createIfAbsent: true,
+    };
+    const slotBMarker = savedChartLayoutMarker(slotBInput.captureSlotId, slotBInput.reconciliationKey);
+    const layouts = [{ layoutId: 'slot-a-layout', name: slotAMarker, symbol: '', resolution: '' }];
+    let pageUrl = 'about:blank';
+    let chartUid = null;
+    let createClickCount = 0;
+    const createdTargets = new Map();
+    let inputValue = '';
+    const accountProbe = () => ({
+      authenticated: true,
+      account_subject_sha256: ACCOUNT_HASH,
+      layouts: layouts.map(({ layoutId, name, symbol, resolution }) => ({
+        layout_id: layoutId, name, symbol, resolution,
+      })),
+      chart_uid: chartUid,
+    });
+    const page = {
+      Runtime: {
+        enable: async () => {},
+        evaluate: async ({ expression }) => {
+          if (expression === ACCOUNT_LAYOUT_PROBE) return { result: { value: accountProbe() } };
+          if (expression.includes('location.href')) return { result: { value: { url: pageUrl } } };
+          if (expression.includes('loadChartFromServer')) {
+            chartUid = 'slot-a-route-uid';
+            return { result: { value: { ok: true } } };
+          }
+          if (expression.includes('V5_CREATE_LAYOUT_FORM_PROBE')) {
+            return { result: { value: {
+              rootKind: 'dialog', failureCode: null, inputCount: 1, inputMaxLength: 80,
+              inputValue, inputCoords: { x: 30, y: 30 }, createButtonCount: 1,
+              createButtonEnabled: true, createCoords: { x: 40, y: 40 },
+            } } };
+          }
+          if (expression.includes('save-load-menu')) return { result: { value: { x: 10, y: 10 } } };
+          if (expression.includes('Create new layout')) return { result: { value: { x: 20, y: 20 } } };
+          return { result: { value: null } };
+        },
+      },
+      Page: {
+        enable: async () => {},
+        navigate: async ({ url }) => { pageUrl = url; chartUid = null; return {}; },
+      },
+      close: async () => {},
+    };
+    const browser = {
+      Target: {
+        createTarget: async ({ url }) => {
+          const id = 'slot-b-create-target';
+          createdTargets.set(id, {
+            id, type: 'page', url,
+            webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${id}`,
+          });
+          return { targetId: id };
+        },
+        closeTarget: async ({ targetId }) => {
+          createdTargets.delete(targetId);
+          return { success: true };
+        },
+      },
+      close: async () => {},
+    };
+    const result = await ensureSavedChartAuthority(slotBInput, {
+      managerBaseUrl: 'http://manager.test/api',
+      fetch: async (value) => {
+        const url = new URL(String(value));
+        let body;
+        if (url.pathname === '/api/profiles') {
+          body = [{ name: INPUT.profileName, id: INPUT.expectedProfileId, status: 'running', cdp_url: cdpUrl }];
+        } else if (url.pathname.endsWith('/json/version')) {
+          body = { webSocketDebuggerUrl: browserWebSocketUrl };
+        } else if (url.pathname.endsWith('/json/list')) {
+          body = [...createdTargets.values()];
+        } else {
+          throw new Error(`unexpected URL ${url}`);
+        }
+        return { ok: true, json: async () => body };
+      },
+      connectBrowser: async () => browser,
+      connectTarget: async () => page,
+      readProfileInventory: async () => inventory(layouts.map((layout) => ({ ...layout }))),
+      dispatchMouseEvent: async (event) => {
+        if (event.type === 'mouseReleased' && event.x === 40 && event.y === 40) {
+          createClickCount += 1;
+          chartUid = 'slot-a-route-uid';
+          pageUrl = `https://www.tradingview.com/chart/${chartUid}/`;
+          layouts.push({ layoutId: 'slot-b-layout', name: slotBMarker, symbol: '', resolution: '' });
+        }
+      },
+      insertText: async (text) => { inputValue = text; },
+      sleep: async () => {},
+    });
+    assert.equal(result.action, 'created', result.failure_code ?? undefined);
+    assert.equal(result.saved_layout_id, 'slot-b-layout');
+    assert.equal(result.saved_chart_id, null);
+    assert.equal(result.mutations_performed, true);
+    assert.equal(result.temporary_target_closed, true);
+    assert.equal(createClickCount, 1);
+    assert.deepEqual(layouts.map(({ layoutId, name }) => ({ layoutId, name })), [
+      { layoutId: 'slot-a-layout', name: slotAMarker },
+      { layoutId: 'slot-b-layout', name: slotBMarker },
+    ]);
 });
 
 test('one-shot create reports exact saved chart UID and preserves unknown outcome for discovery-only retry', async () => {
@@ -822,13 +1083,14 @@ test('one-shot create reports exact saved chart UID and preserves unknown outcom
       assert.equal(marker, MARKER);
       createCount += 1;
       onAttempt();
-      return { chartId: 'fresh-chart-uid', temporaryTargetClosed: true };
+      return { savedLayoutId: 'fresh-layout-id', temporaryTargetClosed: true };
     },
   };
   const request = { ...INPUT, expectedAccountSubjectSha256: ACCOUNT_HASH, createIfAbsent: true };
   const created = await ensureSavedChartAuthority(request, createDependencies);
   assert.equal(created.action, 'created');
-  assert.equal(created.saved_chart_id, 'fresh-chart-uid');
+  assert.equal(created.saved_layout_id, 'fresh-layout-id');
+  assert.equal(created.saved_chart_id, null);
   assert.equal(created.mutations_performed, true);
   assert.equal(created.create_if_absent, true);
   assert.equal(createCount, 1);
