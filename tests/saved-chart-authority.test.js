@@ -1020,7 +1020,15 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     connectBrowser: async () => browser,
     connectTarget: async () => page,
     sleep: async () => {},
-  }), /SAVED_LAYOUT_LOAD_NOT_CONFIRMED:SAVED_LAYOUT_ACTIVE_ID_MISMATCH/u);
+  }), (error) => {
+    assert.match(error.message, /SAVED_LAYOUT_LOAD_NOT_CONFIRMED:SAVED_LAYOUT_ACTIVE_ID_MISMATCH/u);
+    assert.match(error.message, /active_id=206128986/u);
+    assert.match(error.message, /active_name=V5OBS-A-/u);
+    assert.match(error.message, /route=runtime-route-a/u);
+    assert.ok(error.message.length <= 512);
+    assert.doesNotMatch(error.message, /https?:\/\//u);
+    return true;
+  });
   assert.equal(targetCloseCount, 1);
   assert.equal(targets.has(targetId), false);
 });

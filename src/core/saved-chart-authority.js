@@ -1069,6 +1069,7 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
 
 async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies) {
   let lastFailure = 'SAVED_LAYOUT_PAGE_READBACK_UNAVAILABLE';
+  let lastObserved = null;
   for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
     let probe = null;
     try {
@@ -1077,6 +1078,7 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
     if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
       throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
     }
+    lastObserved = savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash);
     const activeFailure = savedLayoutPageReadbackFailure(probe, marker, savedLayoutId);
     if (activeFailure !== null) lastFailure = activeFailure;
     if (probe !== null && activeFailure === null) {
@@ -1105,7 +1107,7 @@ async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expected
     }
     if (attempt + 1 < PAGE_POLL_ATTEMPTS) await sleep(dependencies, PAGE_POLL_MS);
   }
-  throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${lastFailure}`);
+  throw new Error(`SAVED_LAYOUT_LOAD_NOT_CONFIRMED:${lastFailure}:${lastObserved}`);
 }
 
 function savedLayoutPageReadbackFailure(probe, marker, savedLayoutId) {
@@ -1119,6 +1121,19 @@ function savedLayoutPageReadbackFailure(probe, marker, savedLayoutId) {
     return 'SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH';
   }
   return null;
+}
+
+function savedLayoutPageReadbackDiagnostic(probe, expectedAccountHash) {
+  const identifier = (value) => typeof value === 'string' && value.length > 0
+    ? value.replace(/[^A-Za-z0-9_-]/gu, '_').slice(0, 160)
+    : 'missing';
+  return [
+    `authenticated=${probe?.authenticated === true}`,
+    `account_match=${probe?.account_subject_sha256 === expectedAccountHash}`,
+    `active_id=${identifier(probe?.active_saved_layout_id)}`,
+    `active_name=${identifier(probe?.active_saved_layout_name)}`,
+    `route=${identifier(probe?.chart_uid)}`,
+  ].join(';');
 }
 
 async function listTargets(cdpUrl, dependencies) {
