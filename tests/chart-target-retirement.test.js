@@ -20,13 +20,14 @@ const ROUTE = `https://www.tradingview.com/chart/${ROUTE_UID}/`;
 const INPUT = AUTHORITY;
 
 function fixture(initialTargets = [
-  { id: 'target-a', type: 'page', url: ROUTE },
-  { id: 'target-b', type: 'page', url: ROUTE },
+  { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+  { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
   { id: 'anchor', type: 'page', url: 'about:blank' },
 ]) {
   let targets = initialTargets.map((target) => ({ ...target }));
   const calls = {
-    close: [], fetch: [], inspectedTargetIds: [], webSocketUrls: [], socketCloseCount: 0,
+    close: [], fetch: [], inspectedTargetIds: [], attachedTargetIds: [], detachedSessionIds: [],
+    browserWebSocketUrls: [], browserCloseCount: 0,
     closeAcknowledged: true,
     profileCdpUrl: 'http://manager.test/profiles/current-profile/cdp',
     browserWebSocketUrl: 'ws://manager.test/profiles/current-profile/cdp',
@@ -38,39 +39,51 @@ function fixture(initialTargets = [
     if (parsed.pathname.endsWith('/json/list')) return ok(targets.map((target) => ({ ...target })));
     throw new Error(`Unexpected fixture URL: ${parsed.pathname}`);
   };
-  const createWebSocket = (url) => {
-    calls.webSocketUrls.push(url);
-    const socket = new EventTarget();
-    socket.send = (raw) => {
-      const request = JSON.parse(raw);
-      assert.equal(request.method, 'Target.closeTarget');
-      calls.close.push(request.params.targetId);
-      if (calls.closeAcknowledged) targets = targets.filter((target) => target.id !== request.params.targetId);
-      queueMicrotask(() => socket.dispatchEvent(new MessageEvent('message', {
-        data: JSON.stringify({ id: request.id, result: { success: calls.closeAcknowledged } }),
-      })));
-    };
-    socket.close = () => {
-      calls.socketCloseCount += 1;
-      socket.dispatchEvent(new Event('close'));
-    };
-    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
-    return socket;
-  };
-  const readTargetIdentity = async (target) => {
-    calls.inspectedTargetIds.push(target.id);
-    return {
-      href: target.url,
-      account_subject_sha256: ACCOUNT_HASH,
-      saved_layout_id: target.id === 'target-a' ? '206000778' : '206146606',
-      saved_layout_name: target.id === 'target-a' ? OTHER_MARKER : MARKER,
-      layouts: LAYOUTS,
-    };
+  const targetBySessionId = new Map();
+  const browser = {
+    Target: {
+      attachToTarget: async ({ targetId, flatten }) => {
+        assert.equal(flatten, true);
+        assert.ok(targets.some((target) => target.id === targetId));
+        calls.attachedTargetIds.push(targetId);
+        const sessionId = `session-${targetId}`;
+        targetBySessionId.set(sessionId, targetId);
+        return { sessionId };
+      },
+      detachFromTarget: async ({ sessionId }) => {
+        calls.detachedSessionIds.push(sessionId);
+        targetBySessionId.delete(sessionId);
+        return {};
+      },
+      closeTarget: async ({ targetId }) => {
+        calls.close.push(targetId);
+        if (calls.closeAcknowledged) targets = targets.filter((target) => target.id !== targetId);
+        return { success: calls.closeAcknowledged };
+      },
+    },
+    send: async (method, _params, sessionId) => {
+      assert.equal(method, 'Runtime.evaluate');
+      const targetId = targetBySessionId.get(sessionId);
+      const target = targets.find((entry) => entry.id === targetId);
+      assert.ok(target);
+      calls.inspectedTargetIds.push(target.id);
+      const isA = target.id === 'target-a';
+      return { result: { type: 'object', value: {
+        current_url: target.url,
+        account_subject_sha256: ACCOUNT_HASH,
+        active_saved_layout_id: isA ? '206000778' : '206146606',
+        active_saved_layout_name: isA ? OTHER_MARKER : MARKER,
+        layouts: LAYOUTS,
+      } } };
+    },
+    close: async () => { calls.browserCloseCount += 1; },
   };
   return {
     fetch,
-    createWebSocket,
-    readTargetIdentity,
+    connectBrowser: async (url) => {
+      calls.browserWebSocketUrls.push(url);
+      return browser;
+    },
     calls,
     resolveExactRunningProfile: async (name) => {
       assert.equal(name, 'tv-observer-1');
@@ -115,7 +128,7 @@ function retire(input = INPUT, dependencies = {}) {
   return retireSavedChartTarget(input, { reviewedAuthority: AUTHORITY, ...dependencies });
 }
 
-test('closes exact saved-layout metaInfo ID and marker despite shared route UID', async () => {
+test('closes exact server layout through target ID despite shared route and swapped page sockets', async () => {
   const deps = fixture();
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
   assert.equal(result.action, 'closed');
@@ -126,8 +139,9 @@ test('closes exact saved-layout metaInfo ID and marker despite shared route UID'
   assert.equal(result.mutations_performed, true);
   assert.deepEqual(deps.calls.close, ['target-b']);
   assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a', 'target-b', 'target-a', 'target-b', 'target-a']);
-  assert.deepEqual(deps.calls.webSocketUrls, ['ws://manager.test/profiles/current-profile/cdp']);
-  assert.ok(deps.calls.socketCloseCount >= 1);
+  assert.deepEqual(deps.calls.attachedTargetIds, deps.calls.inspectedTargetIds);
+  assert.deepEqual(deps.calls.browserWebSocketUrls, ['ws://manager.test/profiles/current-profile/cdp']);
+  assert.equal(deps.calls.browserCloseCount, 1);
 });
 
 test('fails closed when expected marker is active under a different server layout ID', async () => {

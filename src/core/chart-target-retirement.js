@@ -35,10 +35,33 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   const profile = await resolveProfile(expected.profileName, { ...dependencies, managerBaseUrl });
   const profileId = requireText(profile.profileId, 'current profile ID');
   const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
+  const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
+  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
+    version?.webSocketDebuggerUrl,
+    cdpUrl,
+    profileId,
+  );
+  const connectBrowser = dependencies.connectBrowser || ((url) => CDP({ target: url, local: true }));
+  const browser = await connectBrowser(browserWebSocketUrl);
+  try {
+    return await retireFromProfile({
+      expected,
+      dependencies,
+      deadline,
+      browser,
+      requestJson,
+      cdpUrl,
+    });
+  } finally {
+    try { await browser.close?.(); } catch { /* preserve retirement outcome */ }
+  }
+}
+
+async function retireFromProfile({ expected, dependencies, deadline, browser, requestJson, cdpUrl }) {
   const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
   const before = pageTargets(await requestJson(targetListUrl));
   const beforeCharts = chartTargets(before);
-  const beforeViews = await inspectChartTargets(beforeCharts, expected, dependencies, deadline);
+  const beforeViews = await inspectChartTargets(beforeCharts, expected, browser, dependencies, deadline);
   assertNoConflictingSavedLayoutTarget(beforeViews, expected);
   const exact = beforeViews.filter((view) => isExactSavedLayout(view, expected));
   if (exact.length > 1) throw new Error('Exact saved-layout is open in multiple targets; refusing retirement.');
@@ -51,7 +74,7 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   if (before.length <= 1) throw new Error('Cannot retire the last browser page in the exact profile.');
   const preClose = pageTargets(await requestJson(targetListUrl));
   const preCloseCharts = chartTargets(preClose);
-  const preCloseViews = await inspectChartTargets(preCloseCharts, expected, dependencies, deadline);
+  const preCloseViews = await inspectChartTargets(preCloseCharts, expected, browser, dependencies, deadline);
   assertNoConflictingSavedLayoutTarget(preCloseViews, expected);
   const currentExact = preCloseViews.filter((view) => isExactSavedLayout(view, expected));
   if (currentExact.length !== 1 || currentExact[0].target.id !== target.id
@@ -59,17 +82,9 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
     || !sameChartViews(beforeViews, preCloseViews)) {
     throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
   }
-  const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
-  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
-    version?.webSocketDebuggerUrl,
-    cdpUrl,
-    profileId,
-  );
-  const closeResult = await sendBrowserCdpCommand(
-    browserWebSocketUrl,
-    { targetId: target.id },
+  const closeResult = await withDeadline(
+    () => browser.Target.closeTarget({ targetId: target.id }),
     deadline,
-    dependencies.createWebSocket,
   );
   if (closeResult?.success !== true) throw new Error('Exact saved-chart target close was not acknowledged.');
 
@@ -78,7 +93,7 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   let afterViews = beforeViews;
   while (remainingMs(deadline) > 0) {
     after = pageTargets(await requestJson(targetListUrl));
-    afterViews = await inspectChartTargets(chartTargets(after), expected, dependencies, deadline);
+    afterViews = await inspectChartTargets(chartTargets(after), expected, browser, dependencies, deadline);
     if (!after.some((entry) => entry.id === target.id)
       && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
     await withDeadline(
@@ -174,24 +189,19 @@ function chartTargets(targets) {
   return targets.filter((target) => CHART_PAGE.test(target.url));
 }
 
-async function readTargetIdentity(target, dependencies, deadline) {
-  const endpoint = target.webSocketDebuggerUrl;
-  if (typeof endpoint !== 'string' || endpoint.length === 0 || endpoint.length > MAX_CDP_TARGET_URL_CHARS) {
-    throw new Error('Exact TradingView target CDP endpoint is unavailable.');
-  }
-  let parsed;
-  try { parsed = new URL(endpoint); } catch { throw new Error('Exact TradingView target CDP endpoint is malformed.'); }
-  if (!['ws:', 'wss:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error('Exact TradingView target CDP endpoint is outside the profile boundary.');
-  }
-  const connectTarget = dependencies.connectTarget || ((url) => CDP({ target: url, local: true }));
-  const page = await connectTarget(endpoint);
+async function readTargetIdentity(browser, target, deadline) {
+  const attached = await withDeadline(
+    () => browser.Target.attachToTarget({ targetId: target.id, flatten: true }),
+    deadline,
+    () => browser.close?.(),
+  );
+  const sessionId = requireText(attached?.sessionId, 'exact target CDP session ID');
   try {
-    const response = await withDeadline(() => page.Runtime.evaluate({
+    const response = await withDeadline(() => browser.send('Runtime.evaluate', {
       expression: ACCOUNT_LAYOUT_PROBE,
       awaitPromise: true,
       returnByValue: true,
-    }), deadline, () => page.close?.());
+    }, sessionId), deadline, () => browser.close?.());
     if (response?.exceptionDetails || response?.result?.type !== 'object'
       || !response.result.value || typeof response.result.value !== 'object') {
       throw new Error('TradingView saved-layout identity readback failed.');
@@ -212,13 +222,15 @@ async function readTargetIdentity(target, dependencies, deadline) {
         : value.layouts,
     };
   } finally {
-    try { await page.close?.(); } catch { /* preserve identity result */ }
+    try {
+      await withDeadline(() => browser.Target.detachFromTarget({ sessionId }), deadline, () => browser.close?.());
+    } catch { /* closing the exact-profile browser connection releases the session */ }
   }
 }
 
-async function inspectChartTargets(targets, expected, dependencies, deadline) {
+async function inspectChartTargets(targets, expected, browser, dependencies, deadline) {
   if (targets.length === 0) return Object.freeze([]);
-  const inspect = dependencies.readTargetIdentity || ((target) => readTargetIdentity(target, dependencies, deadline));
+  const inspect = dependencies.readTargetIdentity || ((target) => readTargetIdentity(browser, target, deadline));
   const views = [];
   for (const target of targets) {
     const raw = await withDeadline(() => inspect(target), deadline);
@@ -340,72 +352,6 @@ function isExactProfileCdpPath(pathname, profileId) {
     && segments[profilesIndex + 1] === profileId
     && segments[profilesIndex + 2] === 'cdp'
     && profilesIndex + 3 === segments.length;
-}
-
-async function sendBrowserCdpCommand(url, params, deadline, createWebSocket) {
-  const WebSocketImpl = globalThis.WebSocket;
-  if (typeof createWebSocket !== 'function' && typeof WebSocketImpl !== 'function') {
-    throw new Error('Browser CDP WebSocket is unavailable.');
-  }
-  let socket;
-  let settled = false;
-  const response = new Promise((resolve, reject) => {
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    };
-    try {
-      socket = createWebSocket ? createWebSocket(url) : new WebSocketImpl(url);
-    } catch {
-      fail(new Error('Browser CDP WebSocket could not be opened.'));
-      return;
-    }
-    socket.addEventListener('open', () => {
-      if (remainingMs(deadline) <= 0) {
-        fail(deadlineError(deadline.timeoutMs));
-        return;
-      }
-      try {
-        socket.send(JSON.stringify({ id: 1, method: 'Target.closeTarget', params }));
-      } catch {
-        fail(new Error('Browser CDP close command could not be sent.'));
-      }
-    }, { once: true });
-    socket.addEventListener('message', (event) => {
-      if (settled) return;
-      if (typeof event?.data !== 'string'
-        || Buffer.byteLength(event.data, 'utf8') > MAX_RETIREMENT_READ_BYTES) {
-        fail(new Error('Browser CDP response is malformed or exceeds the bounded read limit.'));
-        return;
-      }
-      let message;
-      try { message = JSON.parse(event.data); } catch {
-        fail(new Error('Browser CDP response is not valid JSON.'));
-        return;
-      }
-      if (message?.id !== 1) return;
-      if (message.error) {
-        fail(new Error('Browser CDP close command failed.'));
-        return;
-      }
-      settled = true;
-      resolve(message.result);
-    });
-    socket.addEventListener('error', () => fail(new Error('Browser CDP WebSocket failed.')), { once: true });
-    socket.addEventListener('close', () => {
-      fail(new Error('Browser CDP WebSocket closed before close acknowledgement.'));
-    }, { once: true });
-  });
-  try {
-    return await withDeadline(() => response, deadline, () => closeWebSocket(socket));
-  } finally {
-    closeWebSocket(socket);
-  }
-}
-
-function closeWebSocket(socket) {
-  try { socket?.close?.(); } catch { /* preserve retirement result */ }
 }
 
 function compareIdentity(left, right) {
