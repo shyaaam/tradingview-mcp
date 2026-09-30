@@ -168,6 +168,7 @@ export const ACCOUNT_LAYOUT_PROBE = `
       account_subject_sha256: accountHash,
       layouts: layouts,
       chart_uid: match ? match[1] : null,
+      current_url: String(window.location && window.location.href || ''),
     };
   })()
 `;
@@ -273,31 +274,16 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
   const matches = exactMarkerMatches(inventory.layouts, marker);
   if (matches.length > 1) {
     return ensureResult(normalized, marker, {
-      action: 'multiple', matchCount: matches.length, savedChartId: null,
+      action: 'multiple', matchCount: matches.length, savedLayoutId: null, savedChartId: null,
       accountSubjectSha256: inventory.accountSubjectSha256,
       mutationsPerformed: false, temporaryTargetClosed: true, failureCode: null,
     });
   }
   if (matches.length === 1) {
-    let chartId;
-    let closed = true;
-    try {
-      const resolved = await (dependencies.resolveSavedLayoutRoute || resolveSavedLayoutRoute)(
-        normalized.profileName, normalized.expectedProfileId, matches[0], inventory.accountSubjectSha256, dependencies);
-      chartId = resolved.chartId;
-      closed = resolved.temporaryTargetClosed;
-    } catch (error) {
-      return ensureResult(normalized, marker, {
-        action: 'unknown', matchCount: 1, savedChartId: null,
-        accountSubjectSha256: inventory.accountSubjectSha256,
-        mutationsPerformed: false, temporaryTargetClosed: temporaryTargetCloseEvidence(error),
-        failureCode: safeFailureCode(error),
-      });
-    }
     return ensureResult(normalized, marker, {
-      action: 'reused', matchCount: 1, savedChartId: chartId,
+      action: 'reused', matchCount: 1, savedLayoutId: matches[0].layoutId, savedChartId: null,
       accountSubjectSha256: inventory.accountSubjectSha256,
-      mutationsPerformed: false, temporaryTargetClosed: closed, failureCode: null,
+      mutationsPerformed: false, temporaryTargetClosed: true, failureCode: null,
     });
   }
   if (!normalized.createIfAbsent) {
@@ -319,7 +305,8 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
         normalized.captureSlotId, marker, inventory, dependencies, onCreateAttempt);
     temporaryTargetClosed = created.temporaryTargetClosed;
     return ensureResult(normalized, marker, {
-      action: 'created', matchCount: 1, savedChartId: created.chartId,
+      action: 'created', matchCount: 1, savedLayoutId: created.savedLayoutId,
+      savedChartId: created.chartId ?? null,
       accountSubjectSha256: inventory.accountSubjectSha256,
       mutationsPerformed: true, temporaryTargetClosed, failureCode: null,
     });
@@ -332,6 +319,115 @@ export async function ensureSavedChartAuthority(input = {}, dependencies = {}) {
       failureCode: safeFailureCode(error),
     });
   }
+}
+
+/** Load one exact account-owned saved layout into a fresh disposable target when needed. */
+export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
+  const profileName = requireText(input.profileName ?? input.profile_name, 'profile_name');
+  const captureSlotId = input.captureSlotId ?? input.capture_slot_id;
+  const reconciliationKey = input.reconciliationKey ?? input.reconciliation_key;
+  const savedLayoutId = requireText(input.savedLayoutId ?? input.saved_layout_id, 'saved_layout_id');
+  if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
+    throw new Error('Saved-layout hydration authority is invalid');
+  }
+  const marker = savedChartLayoutMarker(captureSlotId, reconciliationKey);
+  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(profileName, dependencies);
+  try {
+    const matches = exactMarkerMatches(inventory.layouts, marker);
+    if (matches.length > 1) throw new Error('MULTIPLE_SAVED_CHART_AUTHORITIES');
+    if (matches.length !== 1 || matches[0].layoutId !== savedLayoutId) {
+      throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
+    }
+  } finally {
+    await closeProfileInventory(inventory);
+  }
+
+  return await openAndLoadSavedLayout({
+    profile: inventory.profile,
+    profileName,
+    captureSlotId,
+    reconciliationKey,
+    marker,
+    savedLayoutId,
+    accountSubjectSha256: inventory.accountSubjectSha256,
+    priorLayouts: inventory.layouts,
+  }, dependencies);
+}
+
+async function openAndLoadSavedLayout(expected, dependencies) {
+  const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
+    accountSubjectSha256, priorLayouts } = expected;
+  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
+  assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
+  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
+  let targetId = null;
+  let page = null;
+  let operationError = null;
+  let failed = false;
+  let closeResult = null;
+  try {
+    const created = await browser.Target.createTarget({ url: 'about:blank' });
+    targetId = requireText(created?.targetId, 'created target id');
+    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    if (!target || target.type !== 'page' || target.url !== 'about:blank'
+      || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
+      throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
+    }
+    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+    await enablePage(page);
+    const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
+    const beforeLoad = await waitForAccountProbe(page, dependencies);
+    if (beforeLoad.account_subject_sha256 !== accountSubjectSha256
+      || stableJson(beforeLoad.layouts) !== stableJson(priorLayouts)) {
+      throw new Error('SAVED_LAYOUT_ACCOUNT_OR_INVENTORY_CHANGED');
+    }
+    const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId && layout.name === marker);
+    if (exactBeforeLoad.length !== 1) throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
+    await loadSavedLayout(page, savedLayoutId, dependencies);
+    const probe = await waitForSavedLayoutPageProbe(page, marker, savedLayoutId, accountSubjectSha256, dependencies);
+    const currentTarget = await waitForTarget(profile.cdpUrl, targetId, dependencies);
+    const canonicalUrl = `https://www.tradingview.com/chart/${probe.chart_uid}/`;
+    if (!currentTarget || currentTarget.url !== canonicalUrl || probe.current_url !== canonicalUrl) {
+      throw new Error('SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH');
+    }
+    return savedLayoutHydrationResult({
+      profileName, profileId: profile.profileId, marker, savedLayoutId,
+      captureSlotId, reconciliationKey,
+      accountSubjectSha256, targetId, targetUrl: canonicalUrl, chartId: probe.chart_uid,
+    });
+  } catch (error) {
+    failed = true;
+    operationError = error;
+  } finally {
+    if (page) await closePage(page);
+    if (failed && targetId) {
+      try { closeResult = await browser.Target.closeTarget({ targetId }); } catch { closeResult = null; }
+    }
+    try { await browser.close?.(); } catch { /* preserve target outcome */ }
+  }
+  throw withTemporaryTargetCloseEvidence(operationError, targetId === null || closeResult?.success === true);
+}
+
+function savedLayoutHydrationResult(input) {
+  return Object.freeze({
+    success: true,
+    hydration_version: 'saved-layout-hydration-v1',
+    profile_name: input.profileName,
+    profile_id: input.profileId,
+    capture_slot_id: input.captureSlotId,
+    reconciliation_key: input.reconciliationKey,
+    layout_marker: input.marker,
+    saved_layout_id: input.savedLayoutId,
+    account_subject_sha256: input.accountSubjectSha256,
+    target_id: input.targetId,
+    target_url: input.targetUrl,
+    runtime_chart_id: input.chartId,
+    target_created: true,
+    navigation_performed: true,
+    state: 'hydrated',
+    mutations_performed: true,
+  });
 }
 
 function preflightResult(input, marker, state) {
@@ -348,6 +444,7 @@ function preflightResult(input, marker, state) {
     account_subject_sha256: state.accountSubjectSha256,
     action,
     match_count: matches.length,
+    saved_layout_id: matches.length === 1 ? matches[0].layoutId : null,
     can_create: action === 'not_found' && state.authenticated && state.createAvailable,
     create_preflight_failure_code: state.createFailureCode,
     create_marker_length: marker.length,
@@ -374,6 +471,7 @@ function ensureResult(input, marker, state) {
     action: state.action,
     layout_marker: marker,
     match_count: state.matchCount,
+    saved_layout_id: state.savedLayoutId ?? null,
     saved_chart_id: savedChartId,
     canonical_chart_url: savedChartId === null ? null : `https://www.tradingview.com/chart/${savedChartId}/`,
     account_subject_sha256: state.accountSubjectSha256,
@@ -737,7 +835,7 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   let targetId;
   let page;
   let saved = false;
-  let chartId = null;
+  let savedLayoutId = null;
   let closeBrowser;
   let operationError;
   let operationFailed = false;
@@ -760,28 +858,6 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
       throw new Error('ACCOUNT_IDENTITY_CHANGED_BEFORE_LAYOUT_CREATE');
     }
     if (probe.layouts.some((layout) => layout.name === marker)) throw new Error('LAYOUT_MARKER_APPEARED_BEFORE_CREATE');
-    const sourceChartIds = new Set();
-    if (probe.chart_uid !== null) {
-      if (!CHART_UID.test(probe.chart_uid)) throw new Error('SOURCE_CHART_ROUTE_ID_INVALID');
-      sourceChartIds.add(probe.chart_uid);
-    }
-    const slotASources = captureSlotId === 'v5-capture-slot-b'
-      ? probe.layouts.filter((layout) => /^V5OBS-A-[A-Za-z0-9_-]{32}$/u.test(layout.name))
-      : [];
-    if (slotASources.length > 1) throw new Error('MULTIPLE_SLOT_A_SOURCE_CHARTS');
-    if (slotASources.length === 1) {
-      // Resolve A on a separate disposable target; never load it into B's create target.
-      const source = await (dependencies.resolveSavedLayoutRoute || resolveSavedLayoutRoute)(
-        profileName, expectedProfileId, slotASources[0], priorInventory.accountSubjectSha256, dependencies);
-      if (source.temporaryTargetClosed !== true) {
-        const error = new Error('SLOT_A_SOURCE_TARGET_CLOSE_UNCONFIRMED');
-        error.temporaryTargetClosed = false;
-        throw error;
-      }
-      if (!CHART_UID.test(source.chartId)) throw new Error('SLOT_A_SOURCE_ROUTE_ID_NOT_PROVEN');
-      sourceChartIds.add(source.chartId);
-    }
-
     const before = await waitForAccountProbe(page, dependencies);
     if (stableJson(before.layouts) !== stableJson(priorInventory.layouts)
       && stableJson(before.layouts) !== stableJson(probe.layouts)) {
@@ -805,13 +881,11 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
     onCreateAttempt();
     await clickAt(page, createCoords, dependencies);
     const createdProbe = await waitForMarkerPageProbe(page, marker, priorInventory.accountSubjectSha256, dependencies);
-    chartId = createdProbe.chart_uid;
-    if (chartId === null || sourceChartIds.has(chartId) || !CHART_UID.test(chartId)) {
-      throw new Error('NEW_SAVED_CHART_ROUTE_ID_NOT_PROVEN');
-    }
-    if (createdProbe.layouts.filter((layout) => layout.name === marker).length !== 1) {
+    const createdMatches = createdProbe.layouts.filter((layout) => layout.name === marker);
+    if (createdMatches.length !== 1) {
       throw new Error('CREATED_LAYOUT_MARKER_NOT_UNIQUE');
     }
+    savedLayoutId = createdMatches[0].layoutId;
     const priorEntries = createdProbe.layouts.filter((layout) => layout.name !== marker)
       .map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
     const expectedEntries = priorInventory.layouts.map(({ layoutId, name }) => ({ layoutId, name })).sort(layoutOrder);
@@ -836,63 +910,10 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
   if (operationFailed) {
     throw withTemporaryTargetCloseEvidence(operationError, closeBrowser?.success === true);
   }
-  if (!saved || chartId === null) {
+  if (!saved || savedLayoutId === null) {
     throw withTemporaryTargetCloseEvidence(new Error('SAVED_LAYOUT_CREATE_NOT_CONFIRMED'), closeBrowser?.success === true);
   }
-  return { chartId, temporaryTargetClosed: closeBrowser?.success === true };
-}
-
-async function resolveSavedLayoutRoute(profileName, expectedProfileId, layout, expectedAccountHash, dependencies) {
-  const profile = await resolveExactRunningProfile(profileName, dependencies);
-  if (expectedProfileId !== null && profile.profileId !== expectedProfileId) {
-    throw new Error('PROFILE_UUID_CHANGED_BEFORE_LAYOUT_DISCOVERY');
-  }
-  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
-  assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
-  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
-  let targetId;
-  let page;
-  let closeResult = null;
-  let chartId = null;
-  let operationError;
-  let operationFailed = false;
-  try {
-    const created = await browser.Target.createTarget({ url: 'about:blank' });
-    targetId = requireText(created?.targetId, 'created target id');
-    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
-    if (!target || target.type !== 'page' || target.url !== 'about:blank'
-      || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
-      throw new Error('DISCOVERY_TARGET_NOT_EXACT');
-    }
-    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
-    await enablePage(page);
-    const nav = await page.Page.navigate({ url: GENERIC_CHART_URL });
-    if (nav?.errorText) throw new Error('DISCOVERY_GENERIC_NAVIGATION_FAILED');
-    await waitForAccountProbe(page, dependencies);
-    await loadSavedLayout(page, layout.layoutId, dependencies);
-    const probe = await waitForMarkerPageProbe(page, layout.name, expectedAccountHash, dependencies);
-    if (probe.layouts.filter((entry) => entry.layoutId === layout.layoutId && entry.name === layout.name).length !== 1
-      || probe.chart_uid === null || !CHART_UID.test(probe.chart_uid)) {
-      throw new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN');
-    }
-    chartId = probe.chart_uid;
-  } catch (error) {
-    operationFailed = true;
-    operationError = error;
-  } finally {
-    if (page) await closePage(page);
-    if (targetId) {
-      try { closeResult = await browser.Target.closeTarget({ targetId }); } catch { closeResult = null; }
-    }
-    try { await browser.close?.(); } catch { /* preserve discovered result */ }
-  }
-  if (operationFailed) {
-    throw withTemporaryTargetCloseEvidence(operationError, closeResult?.success === true);
-  }
-  if (chartId === null) {
-    throw withTemporaryTargetCloseEvidence(new Error('DISCOVERED_LAYOUT_ROUTE_ID_NOT_PROVEN'), closeResult?.success === true);
-  }
-  return { chartId, temporaryTargetClosed: closeResult?.success === true };
+  return { savedLayoutId, temporaryTargetClosed: closeBrowser?.success === true };
 }
 
 async function loadSavedLayout(page, layoutId, dependencies) {
@@ -956,8 +977,7 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
         throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_CHART_OPERATION');
       }
       if (probe?.authenticated === true && Array.isArray(probe.layouts)
-        && probe.layouts.filter((layout) => layout.name === marker).length === 1
-        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)) {
+        && probe.layouts.filter((layout) => layout.name === marker).length === 1) {
         return { ...probe, layouts: normalizeLayouts(probe.layouts) };
       }
     } catch (error) {
@@ -966,6 +986,29 @@ async function waitForMarkerPageProbe(page, marker, expectedAccountHash, depende
     await sleep(dependencies, PAGE_POLL_MS);
   }
   throw new Error('SAVED_CHART_CREATE_OR_DISCOVERY_NOT_CONFIRMED');
+}
+
+async function waitForSavedLayoutPageProbe(page, marker, savedLayoutId, expectedAccountHash, dependencies) {
+  for (let attempt = 0; attempt < PAGE_POLL_ATTEMPTS; attempt += 1) {
+    try {
+      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE);
+      if (probe?.authenticated === true && probe.account_subject_sha256 !== expectedAccountHash) {
+        throw new Error('ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION');
+      }
+      const exactMarker = Array.isArray(probe?.layouts)
+        ? probe.layouts.filter((layout) => layout.layout_id === savedLayoutId && layout.name === marker)
+        : [];
+      if (probe?.authenticated === true && exactMarker.length === 1
+        && typeof probe.chart_uid === 'string' && CHART_UID.test(probe.chart_uid)
+        && probe.current_url === `https://www.tradingview.com/chart/${probe.chart_uid}/`) {
+        return probe;
+      }
+    } catch (error) {
+      if (error.message === 'ACCOUNT_IDENTITY_CHANGED_DURING_SAVED_LAYOUT_HYDRATION') throw error;
+    }
+    await sleep(dependencies, PAGE_POLL_MS);
+  }
+  throw new Error('SAVED_LAYOUT_LOAD_NOT_CONFIRMED');
 }
 
 async function listTargets(cdpUrl, dependencies) {
