@@ -1147,6 +1147,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   let activeSavedLayoutId = 'default-layout-id';
   let activeSavedLayoutName = 'Default chart';
   let simulateMismatchedActiveReadback = false;
+  let simulateHungLoad = false;
   const savedChartRecord = Object.freeze({
     id: savedLayoutId,
     name: MARKER,
@@ -1167,6 +1168,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
             getSavedCharts(callback) { callback([savedChartRecord]); },
             async loadChartFromServer(record) {
               loadedRequestedRecord = record;
+              if (simulateHungLoad) return await new Promise(() => {});
               await new Promise((resolve) => setTimeout(resolve, 10));
               loaded = true;
               if (!simulateMismatchedActiveReadback) {
@@ -1321,6 +1323,38 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     return true;
   });
   assert.equal(targetCloseCount, 1);
+  assert.equal(targets.has(targetId), false);
+
+  simulateHungLoad = true;
+  loaded = false;
+  await assert.rejects(hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    authorityReadTimeoutMs: 25,
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async () => page,
+    sleep: async () => {},
+  }), (error) => {
+    assert.equal(error.message, 'SAVED_LAYOUT_LOAD_TIMEOUT');
+    assert.equal(error.temporaryTargetClosed, true);
+    return true;
+  });
+  assert.equal(targetCloseCount, 2, 'a hung load must close its exact disposable target');
   assert.equal(targets.has(targetId), false);
 });
 

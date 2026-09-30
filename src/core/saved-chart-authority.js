@@ -510,11 +510,17 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     failed = true;
     operationError = error;
   } finally {
-    if (page) await closePage(page);
+    if (page) await closePage(page, createAuthorityReadDeadline(dependencies));
     if (failed && targetId) {
-      try { closeResult = await browser.Target.closeTarget({ targetId }); } catch { closeResult = null; }
+      try {
+        closeResult = await withAuthorityReadDeadline(
+          () => browser.Target.closeTarget({ targetId }), createAuthorityReadDeadline(dependencies),
+        );
+      } catch { closeResult = null; }
     }
-    try { await browser.close?.(); } catch { /* preserve target outcome */ }
+    try {
+      await withAuthorityReadDeadline(() => browser.close?.(), createAuthorityReadDeadline(dependencies));
+    } catch { /* preserve target outcome */ }
   }
   throw withTemporaryTargetCloseEvidence(operationError, targetId === null || closeResult?.success === true);
 }
@@ -1074,6 +1080,8 @@ async function createSavedLayout(profileName, expectedProfileId, captureSlotId, 
 }
 
 async function loadSavedLayout(page, layoutId, marker, dependencies) {
+  const deadline = createAuthorityReadDeadline(dependencies);
+  const loadTimeoutMs = Math.max(1, deadline.timeoutMs - 250);
   const expression = `(async function() {
     var api = window.TradingViewApi;
     if (!api || typeof api.getSavedCharts !== 'function' || typeof api.loadChartFromServer !== 'function') {
@@ -1106,12 +1114,21 @@ async function loadSavedLayout(page, layoutId, marker, dependencies) {
       return { ok: false, error: matches.length === 0
         ? 'SAVED_LAYOUT_RECORD_NOT_FOUND' : 'SAVED_LAYOUT_RECORD_AMBIGUOUS' };
     }
+    var loadTimer;
     try {
-      await api.loadChartFromServer(matches[0]);
+      await Promise.race([
+        Promise.resolve(api.loadChartFromServer(matches[0])),
+        new Promise(function(_resolve, reject) {
+          loadTimer = setTimeout(function() { reject(new Error('SAVED_LAYOUT_LOAD_TIMEOUT')); }, ${JSON.stringify(loadTimeoutMs)});
+        }),
+      ]);
       return { ok: true };
-    } catch { return { ok: false, error: 'SAVED_LAYOUT_LOAD_REJECTED' }; }
+    } catch (error) {
+      return { ok: false, error: error?.message === 'SAVED_LAYOUT_LOAD_TIMEOUT'
+        ? 'SAVED_LAYOUT_LOAD_TIMEOUT' : 'SAVED_LAYOUT_LOAD_REJECTED' };
+    } finally { clearTimeout(loadTimer); }
   })()`;
-  const result = await evaluate(page, expression);
+  const result = await withAuthorityReadDeadline(() => evaluate(page, expression), deadline);
   if (result?.ok !== true) {
     const failureCode = typeof result?.error === 'string'
       && /^SAVED_LAYOUT_[A-Z0-9_]{1,64}$/u.test(result.error)
