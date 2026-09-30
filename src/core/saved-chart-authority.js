@@ -262,6 +262,13 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   return `V5OBS-${slot}-${digest}`;
 }
 
+function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId) {
+  const digest = createHash('sha256')
+    .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
+    .digest('base64url').slice(0, 32);
+  return `about:blank#v5-hydrate-${digest}`;
+}
+
 /** Read-only current-account and exact deterministic-layout preflight. */
 export async function preflightSavedChartAuthority(input = {}, dependencies = {}) {
   const normalized = validateEnsureInput(input);
@@ -467,25 +474,93 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
 async function openAndLoadSavedLayout(expected, dependencies) {
   const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
     accountSubjectSha256, priorLayouts } = expected;
-  const version = await fetchJson(new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies);
+  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId);
+  const version = await fetchJson(
+    new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
+    createAuthorityReadDeadline(dependencies),
+  );
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, profile.cdpUrl, profile.profileId);
-  const browser = await (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
+  const browser = await withAuthorityReadDeadline(
+    () => (dependencies.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl),
+    createAuthorityReadDeadline(dependencies),
+  );
   let targetId = null;
   let page = null;
   let operationError = null;
   let failed = false;
   let closeResult = null;
   try {
-    const created = await browser.Target.createTarget({ url: 'about:blank' });
-    targetId = requireText(created?.targetId, 'created target id');
-    const target = await waitForTarget(profile.cdpUrl, targetId, dependencies);
-    if (!target || target.type !== 'page' || target.url !== 'about:blank'
+    const beforeTargets = await listTargets(
+      profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+    );
+    const priorIds = new Set(beforeTargets.map((target) => target?.id).filter((id) => typeof id === 'string'));
+    const existingMarkedTargets = beforeTargets.filter((target) => target?.url === temporaryTargetUrl);
+    if (existingMarkedTargets.length > 1) {
+      const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS');
+      error.temporaryTargetClosed = false;
+      throw error;
+    }
+    if (existingMarkedTargets.length === 1) {
+      const existing = existingMarkedTargets[0];
+      if (existing.type !== 'page' || typeof existing.id !== 'string' || existing.id.length === 0) {
+        const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_NOT_EXACT');
+        error.temporaryTargetClosed = false;
+        throw error;
+      }
+      targetId = existing.id;
+    } else {
+      try {
+        const created = await withAuthorityReadDeadline(
+          () => browser.Target.createTarget({ url: temporaryTargetUrl }),
+          createAuthorityReadDeadline(dependencies),
+        );
+        const createdTargetId = requireText(created?.targetId, 'created target id');
+        if (priorIds.has(createdTargetId)) {
+          const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT');
+          error.temporaryTargetClosed = true;
+          throw error;
+        }
+        targetId = createdTargetId;
+      } catch (error) {
+        if (error?.message === 'SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT') throw error;
+        let afterTargets = [];
+        try {
+          afterTargets = await listTargets(
+            profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+          );
+        } catch { /* a lost create response remains unknown */ }
+        const recoveredTargets = afterTargets.filter((target) => target?.url === temporaryTargetUrl);
+        if (recoveredTargets.length === 1 && recoveredTargets[0].type === 'page'
+          && typeof recoveredTargets[0].id === 'string' && recoveredTargets[0].id.length > 0
+          && !priorIds.has(recoveredTargets[0].id)) {
+          targetId = recoveredTargets[0].id;
+        } else {
+          const code = recoveredTargets.length > 1
+            ? 'SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS'
+            : 'SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN';
+          const failure = new Error(code, { cause: error });
+          failure.temporaryTargetClosed = false;
+          throw failure;
+        }
+      }
+    }
+    const target = await waitForTarget(
+      profile.cdpUrl, targetId, dependencies, createAuthorityReadDeadline(dependencies),
+    );
+    if (!target || target.type !== 'page' || target.url !== temporaryTargetUrl
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
       throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
     }
-    page = await (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
-    await enablePage(page);
-    const navigation = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    page = await withAuthorityReadDeadline(
+      () => (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl),
+      createAuthorityReadDeadline(dependencies),
+    );
+    await enablePage(page, createAuthorityReadDeadline(dependencies));
+    const current = await evaluate(page, '({ url: location.href })', createAuthorityReadDeadline(dependencies));
+    if (current?.url !== temporaryTargetUrl) throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
+    const navigation = await withAuthorityReadDeadline(
+      () => page.Page.navigate({ url: GENERIC_CHART_URL }), createAuthorityReadDeadline(dependencies),
+    );
     if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
     const beforeLoadDeadline = createAuthorityReadDeadline(dependencies);
     const beforeLoad = await waitForAccountProbe(page, dependencies, beforeLoadDeadline);

@@ -1140,7 +1140,9 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const savedLayoutId = '206000778';
   let runtimeChartId = 'runtime-route-a';
-  const targetId = 'fresh-layout-target';
+  let targetId = 'fresh-layout-target-0';
+  let targetSequence = 0;
+  let lastTemporaryTargetUrl = null;
   const targets = new Map();
   let loaded = false;
   let loadedRequestedRecord = null;
@@ -1161,10 +1163,15 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   let activeProbeCount = 0;
   let fullLayoutProbeCount = 0;
   let simulateHungReadback = false;
+  let simulateLostTargetCreateResponse = false;
+  let simulateUnknownTargetCreateResponse = false;
   const page = {
     Runtime: {
       enable: async () => {},
       evaluate: async ({ expression }) => {
+        if (expression === '({ url: location.href })') {
+          return { result: { value: { url: targets.get(targetId)?.url } } };
+        }
         if (expression.includes('loadChartFromServer')) {
           const chartApi = {
             getSavedCharts(callback) { callback([savedChartRecord]); },
@@ -1230,10 +1237,20 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     Target: {
       createTarget: async ({ url }) => {
         targetCreateCount += 1;
+        targetId = `fresh-layout-target-${++targetSequence}`;
+        lastTemporaryTargetUrl = url;
+        if (simulateUnknownTargetCreateResponse) {
+          simulateUnknownTargetCreateResponse = false;
+          return await new Promise(() => {});
+        }
         targets.set(targetId, {
           id: targetId, type: 'page', url,
           webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${targetId}`,
         });
+        if (simulateLostTargetCreateResponse) {
+          simulateLostTargetCreateResponse = false;
+          return await new Promise(() => {});
+        }
         return { targetId };
       },
       closeTarget: async ({ targetId: closedId }) => {
@@ -1269,7 +1286,10 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
       return { ok: true, json: async () => body };
     },
     connectBrowser: async () => browser,
-    connectTarget: async () => page,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
     sleep: async () => {},
   });
 
@@ -1289,6 +1309,149 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(fullLayoutProbeCount, 2);
   assert.equal(targets.has(targetId), true);
 
+  simulateLostTargetCreateResponse = true;
+  loaded = false;
+  const recovered = await hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    authorityReadTimeoutMs: 300,
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
+    sleep: async () => {},
+  });
+  assert.equal(recovered.state, 'hydrated', 'lost create response must reconcile the exact marked target');
+  assert.equal(recovered.target_id, targetId);
+  assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
+  assert.equal(targetCreateCount, 2);
+  assert.equal(targetCloseCount, 0);
+
+  const orphanTargetId = 'orphaned-hydration-target';
+  targets.set(orphanTargetId, {
+    id: orphanTargetId,
+    type: 'page',
+    url: lastTemporaryTargetUrl,
+    webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${orphanTargetId}`,
+  });
+  loaded = false;
+  const rehydrated = await hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
+    sleep: async () => {},
+  });
+  assert.equal(rehydrated.state, 'hydrated', 'fresh invocation must reuse exact marked orphan without another target create');
+  assert.equal(rehydrated.target_id, orphanTargetId);
+  assert.equal(targetCreateCount, 2);
+
+  targets.clear();
+  simulateUnknownTargetCreateResponse = true;
+  await assert.rejects(hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    authorityReadTimeoutMs: 25,
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
+    sleep: async () => {},
+  }), (error) => {
+    assert.equal(error.message, 'SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN');
+    assert.equal(error.temporaryTargetClosed, false);
+    return true;
+  });
+  assert.equal(targetCloseCount, 0, 'ambiguous target creation must not claim cleanup or close a guessed page');
+
+  targets.set('ambiguous-target-a', {
+    id: 'ambiguous-target-a', type: 'page', url: lastTemporaryTargetUrl,
+  });
+  targets.set('ambiguous-target-b', {
+    id: 'ambiguous-target-b', type: 'page', url: lastTemporaryTargetUrl,
+  });
+  await assert.rejects(hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+  }, {
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
+    sleep: async () => {},
+  }), (error) => {
+    assert.equal(error.message, 'SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS');
+    assert.equal(error.temporaryTargetClosed, false);
+    return true;
+  });
+
+  targets.clear();
+  loaded = false;
   runtimeChartId = `private-route-${'r'.repeat(146)}`;
   activeSavedLayoutId = `PRIVATE_LAYOUT_ID_${'x'.repeat(180)}`;
   activeSavedLayoutName = `PRIVATE_ACCOUNT_LAYOUT_NAME_${'y'.repeat(180)}`;
