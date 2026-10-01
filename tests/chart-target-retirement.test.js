@@ -31,6 +31,11 @@ function fixture(initialTargets = [
     close: [], fetch: [], inspectedTargetIds: [], attachedTargetIds: [], detachedSessionIds: [],
     browserWebSocketUrls: [], browserCloseCount: 0,
     closeAcknowledged: true,
+    missingTargetOnAttach: null,
+    keepMissingTargetListed: false,
+    jsonListCallCount: 0,
+    removeTargetOnJsonListCall: null,
+    addPageOnJsonListCall: null,
     profileCdpUrl: 'http://manager.test/profiles/current-profile/cdp',
     browserWebSocketUrl: 'ws://manager.test/profiles/current-profile/cdp',
   };
@@ -38,7 +43,16 @@ function fixture(initialTargets = [
     calls.fetch.push(url);
     const parsed = new URL(url);
     if (parsed.pathname.endsWith('/json/version')) return ok({ webSocketDebuggerUrl: calls.browserWebSocketUrl });
-    if (parsed.pathname.endsWith('/json/list')) return ok(targets.map((target) => ({ ...target })));
+    if (parsed.pathname.endsWith('/json/list')) {
+      calls.jsonListCallCount += 1;
+      if (calls.jsonListCallCount === calls.removeTargetOnJsonListCall) {
+        targets = targets.filter((target) => target.id !== 'target-b');
+      }
+      if (calls.jsonListCallCount === calls.addPageOnJsonListCall) {
+        targets.push({ id: 'unexpected-page', type: 'page', url: 'about:blank' });
+      }
+      return ok(targets.map((target) => ({ ...target })));
+    }
     throw new Error(`Unexpected fixture URL: ${parsed.pathname}`);
   };
   const targetBySessionId = new Map();
@@ -46,8 +60,15 @@ function fixture(initialTargets = [
     Target: {
       attachToTarget: async ({ targetId, flatten }) => {
         assert.equal(flatten, true);
-        assert.ok(targets.some((target) => target.id === targetId));
         calls.attachedTargetIds.push(targetId);
+        if (calls.missingTargetOnAttach === targetId) {
+          if (!calls.keepMissingTargetListed) {
+            targets = targets.filter((target) => target.id !== targetId);
+            calls.missingTargetOnAttach = null;
+          }
+          throw new Error('Browser CDP command failed: No target with given id found');
+        }
+        assert.ok(targets.some((target) => target.id === targetId));
         const sessionId = `session-${targetId}`;
         targetBySessionId.set(sessionId, targetId);
         return { sessionId };
@@ -237,6 +258,52 @@ test('reports already closed when no page has exact saved-layout metaInfo identi
   assert.equal(result.mutations_performed, false);
   assert.deepEqual(deps.calls.close, []);
   assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a']);
+});
+
+test('re-reads profile inventory when listed chart target disappears before CDP identity attach', async () => {
+  const deps = fixture();
+  deps.calls.missingTargetOnAttach = 'target-b';
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'already-closed');
+  assert.equal(result.chart_target_id, null);
+  assert.equal(result.remaining_chart_targets, 1);
+  assert.equal(result.mutations_performed, false);
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.attachedTargetIds, ['target-a', 'target-b', 'target-a']);
+  assert.equal(deps.calls.fetch.filter((url) => url.endsWith('/json/list')).length, 2);
+});
+
+test('reports already closed when exact target disappears before pre-close verification', async () => {
+  const deps = fixture();
+  deps.calls.removeTargetOnJsonListCall = 2;
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'already-closed');
+  assert.equal(result.chart_target_id, null);
+  assert.equal(result.mutations_performed, false);
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a', 'target-b', 'target-a']);
+});
+
+test('fails closed when exact target disappears while another profile page is added', async () => {
+  const deps = fixture();
+  deps.calls.removeTargetOnJsonListCall = 2;
+  deps.calls.addPageOnJsonListCall = 2;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /page inventory changed before exact saved-layout retirement/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+});
+
+test('fails closed when CDP says target is missing but fresh profile inventory still lists it', async () => {
+  const deps = fixture();
+  deps.calls.missingTargetOnAttach = 'target-a';
+  deps.calls.keepMissingTargetListed = true;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /target remained in the current profile inventory/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
 });
 
 test('refuses to close the final browser page', async () => {

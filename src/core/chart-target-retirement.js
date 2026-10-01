@@ -15,6 +15,13 @@ const MAX_RETIREMENT_READ_BYTES = 128 * 1024;
 const MAX_CDP_TARGET_ID_CHARS = 256;
 const MAX_CDP_TARGET_URL_CHARS = 4_096;
 
+class TargetDisappearedDuringIdentityRead extends Error {
+  constructor(targetId, cause) {
+    super('CDP target disappeared during exact identity read.', { cause });
+    this.targetId = targetId;
+  }
+}
+
 /** Close only one exact saved-chart target; the durable saved chart is not deleted. */
 export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   const requested = normalizeInput(input);
@@ -169,9 +176,12 @@ function transportError(error) {
 
 async function retireFromProfile({ expected, dependencies, deadline, browser, requestJson, cdpUrl }) {
   const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
-  const before = pageTargets(await requestJson(targetListUrl));
-  const beforeCharts = chartTargets(before);
-  const beforeViews = await inspectChartTargets(beforeCharts, expected, browser, dependencies, deadline);
+  const beforeSnapshot = await readProfileSnapshot({
+    targetListUrl, expected, browser, dependencies, deadline, requestJson,
+  });
+  const before = beforeSnapshot.targets;
+  const beforeCharts = beforeSnapshot.chartTargets;
+  const beforeViews = beforeSnapshot.views;
   assertNoConflictingSavedLayoutTarget(beforeViews, expected);
   const exact = beforeViews.filter((view) => isExactSavedLayout(view, expected));
   if (exact.length > 1) throw new Error('Exact saved-layout is open in multiple targets; refusing retirement.');
@@ -182,11 +192,21 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   const beforeIdentity = exact[0];
   const target = beforeIdentity.target;
   if (before.length <= 1) throw new Error('Cannot retire the last browser page in the exact profile.');
-  const preClose = pageTargets(await requestJson(targetListUrl));
-  const preCloseCharts = chartTargets(preClose);
-  const preCloseViews = await inspectChartTargets(preCloseCharts, expected, browser, dependencies, deadline);
+  const preCloseSnapshot = await readProfileSnapshot({
+    targetListUrl, expected, browser, dependencies, deadline, requestJson,
+  });
+  const preClose = preCloseSnapshot.targets;
+  const preCloseCharts = preCloseSnapshot.chartTargets;
+  const preCloseViews = preCloseSnapshot.views;
   assertNoConflictingSavedLayoutTarget(preCloseViews, expected);
   const currentExact = preCloseViews.filter((view) => isExactSavedLayout(view, expected));
+  const preservedBefore = beforeViews.filter((view) => view.target.id !== target.id);
+  if (currentExact.length === 0 && !preClose.some((entry) => entry.id === target.id)
+    && samePageInventory(before, preClose, target.id)
+    && sameChartViews(preservedBefore, preCloseViews)) {
+    return result(expected, null, 'already-closed', preCloseCharts.length, false,
+      beforeIdentity.accountSubjectSha256);
+  }
   if (currentExact.length !== 1 || currentExact[0].target.id !== target.id
     || !samePageInventory(before, preClose)
     || !sameChartViews(beforeViews, preCloseViews)) {
@@ -202,8 +222,11 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   let after = before;
   let afterViews = beforeViews;
   while (remainingMs(deadline) > 0) {
-    after = pageTargets(await requestJson(targetListUrl));
-    afterViews = await inspectChartTargets(chartTargets(after), expected, browser, dependencies, deadline);
+    const afterSnapshot = await readProfileSnapshot({
+      targetListUrl, expected, browser, dependencies, deadline, requestJson,
+    });
+    after = afterSnapshot.targets;
+    afterViews = afterSnapshot.views;
     if (!after.some((entry) => entry.id === target.id)
       && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
     await withDeadline(
@@ -215,13 +238,34 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     || afterViews.some((view) => isExactSavedLayout(view, expected))) {
     throw new Error('Exact saved-layout target remained open after bounded close.');
   }
-  const preservedBefore = beforeViews.filter((view) => view.target.id !== target.id);
   if (!samePageInventory(before, after, target.id)
     || !sameChartViews(preservedBefore, afterViews)) {
     throw new Error('Saved-layout retirement changed another TradingView chart target.');
   }
   return result(expected, target.id, 'closed', chartTargets(after).length, true,
     beforeIdentity.accountSubjectSha256);
+}
+
+async function readProfileSnapshot({ targetListUrl, expected, browser, dependencies, deadline, requestJson }) {
+  let targets = pageTargets(await requestJson(targetListUrl));
+  let reconciledDisappearedTarget = false;
+  while (true) {
+    const currentChartTargets = chartTargets(targets);
+    try {
+      const views = await inspectChartTargets(currentChartTargets, expected, browser, dependencies, deadline);
+      return { targets, chartTargets: currentChartTargets, views };
+    } catch (error) {
+      if (!(error instanceof TargetDisappearedDuringIdentityRead) || reconciledDisappearedTarget) throw error;
+      const refreshed = pageTargets(await requestJson(targetListUrl));
+      if (refreshed.some((target) => target.id === error.targetId)) {
+        throw new Error('CDP target remained in the current profile inventory after an exact missing-target response.', {
+          cause: error,
+        });
+      }
+      targets = refreshed;
+      reconciledDisappearedTarget = true;
+    }
+  }
 }
 
 function normalizeInput(input) {
@@ -343,7 +387,15 @@ async function inspectChartTargets(targets, expected, browser, dependencies, dea
   const inspect = dependencies.readTargetIdentity || ((target) => readTargetIdentity(browser, target, deadline));
   const views = [];
   for (const target of targets) {
-    const raw = await withDeadline(() => inspect(target), deadline);
+    let raw;
+    try {
+      raw = await withDeadline(() => inspect(target), deadline);
+    } catch (error) {
+      if (/No target with given id found/iu.test(String(error?.message || error))) {
+        throw new TargetDisappearedDuringIdentityRead(target.id, error);
+      }
+      throw error;
+    }
     views.push(normalizeTargetIdentity(raw, target, expected));
   }
   views.sort((left, right) => left.target.id.localeCompare(right.target.id));
