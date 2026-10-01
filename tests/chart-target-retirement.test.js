@@ -35,6 +35,7 @@ function fixture(initialTargets = [
     keepMissingTargetListed: false,
     jsonListCallCount: 0,
     removeTargetOnJsonListCall: null,
+    addPageOnJsonListCall: null,
     profileCdpUrl: 'http://manager.test/profiles/current-profile/cdp',
     browserWebSocketUrl: 'ws://manager.test/profiles/current-profile/cdp',
   };
@@ -46,6 +47,9 @@ function fixture(initialTargets = [
       calls.jsonListCallCount += 1;
       if (calls.jsonListCallCount === calls.removeTargetOnJsonListCall) {
         targets = targets.filter((target) => target.id !== 'target-b');
+      }
+      if (calls.jsonListCallCount === calls.addPageOnJsonListCall) {
+        targets.push({ id: 'unexpected-page', type: 'page', url: 'about:blank' });
       }
       return ok(targets.map((target) => ({ ...target })));
     }
@@ -278,6 +282,17 @@ test('reports already closed when exact target disappears before pre-close verif
   assert.equal(result.mutations_performed, false);
   assert.deepEqual(deps.calls.close, []);
   assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a', 'target-b', 'target-a']);
+});
+
+test('fails closed when exact target disappears while another profile page is added', async () => {
+  const deps = fixture();
+  deps.calls.removeTargetOnJsonListCall = 2;
+  deps.calls.addPageOnJsonListCall = 2;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /page inventory changed before exact saved-layout retirement/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
 });
 
 test('fails closed when CDP says target is missing but fresh profile inventory still lists it', async () => {
