@@ -212,11 +212,17 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     || !sameChartViews(beforeViews, preCloseViews)) {
     throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
   }
-  const closeResult = await withDeadline(
-    () => browser.Target.closeTarget({ targetId: target.id }),
-    deadline,
-  );
-  if (closeResult?.success !== true) throw new Error('Exact saved-chart target close was not acknowledged.');
+  // A lost close receipt does not prove the target remains open. Keep part of
+  // the existing deadline for a fresh exact inventory after the single close.
+  const acknowledgementMs = Math.min(1_000, Math.max(1, Math.floor(remainingMs(deadline) / 2)));
+  const closeDeadline = { ...deadline, at: Math.min(deadline.at, deadline.now() + acknowledgementMs), timeoutMs: acknowledgementMs };
+  let closeAcknowledged = false;
+  try {
+    const closeResult = await withDeadline(
+      () => browser.Target.closeTarget({ targetId: target.id }), closeDeadline,
+    );
+    closeAcknowledged = closeResult?.success === true;
+  } catch { /* fresh inventory, not the receipt, decides convergence */ }
 
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   let after = before;
@@ -229,6 +235,9 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     afterViews = afterSnapshot.views;
     if (!after.some((entry) => entry.id === target.id)
       && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
+    if (!closeAcknowledged) {
+      throw new Error('Exact saved-layout target remained open after unacknowledged close.');
+    }
     await withDeadline(
       () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
       deadline,
