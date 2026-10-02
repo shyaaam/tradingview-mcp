@@ -31,10 +31,13 @@ function fixture(initialTargets = [
     close: [], fetch: [], inspectedTargetIds: [], attachedTargetIds: [], detachedSessionIds: [],
     browserWebSocketUrls: [], browserCloseCount: 0,
     closeAcknowledged: true,
+    loseCloseResponse: false,
     missingTargetOnAttach: null,
     keepMissingTargetListed: false,
     jsonListCallCount: 0,
     removeTargetOnJsonListCall: null,
+    closeRemovesTarget: true,
+    hangClosedTargetIdentity: false,
     addPageOnJsonListCall: null,
     profileCdpUrl: 'http://manager.test/profiles/current-profile/cdp',
     browserWebSocketUrl: 'ws://manager.test/profiles/current-profile/cdp',
@@ -80,7 +83,10 @@ function fixture(initialTargets = [
       },
       closeTarget: async ({ targetId }) => {
         calls.close.push(targetId);
-        if (calls.closeAcknowledged) targets = targets.filter((target) => target.id !== targetId);
+        if (calls.closeAcknowledged && calls.closeRemovesTarget) {
+          targets = targets.filter((target) => target.id !== targetId);
+        }
+        if (calls.loseCloseResponse) return await new Promise(() => {});
         return { success: calls.closeAcknowledged };
       },
     },
@@ -90,6 +96,9 @@ function fixture(initialTargets = [
       const target = targets.find((entry) => entry.id === targetId);
       assert.ok(target);
       calls.inspectedTargetIds.push(target.id);
+      if (calls.hangClosedTargetIdentity && target.id === 'target-b' && calls.close.length > 0) {
+        return await new Promise(() => {});
+      }
       const isA = target.id === 'target-a';
       return { result: { type: 'object', value: {
         current_url: target.url,
@@ -316,14 +325,59 @@ test('refuses to close the final browser page', async () => {
 
 });
 
-test('retirement requires positive close acknowledgement and exact profile CDP authority', async () => {
+test('retirement fails closed when unacknowledged close leaves exact target present', async () => {
   const unacknowledged = fixture();
   unacknowledged.calls.closeAcknowledged = false;
   await assert.rejects(
     retire(INPUT, { ...unacknowledged, managerBaseUrl: 'http://manager.test' }),
-    /close was not acknowledged/u,
+    /remained open after unacknowledged close/u,
   );
   assert.deepEqual(unacknowledged.calls.close, ['target-b']);
+
+  const lostResponse = fixture();
+  lostResponse.calls.loseCloseResponse = true;
+  lostResponse.calls.closeAcknowledged = false;
+  await assert.rejects(
+    retire(INPUT, { ...lostResponse, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
+    /remained open after unacknowledged close/u,
+  );
+  assert.deepEqual(lostResponse.calls.close, ['target-b']);
+});
+
+test('retirement confirms exact absence after lost close response within existing deadline', async () => {
+  const deps = fixture();
+  deps.calls.loseCloseResponse = true;
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 });
+  assert.equal(result.action, 'closed');
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.equal(deps.calls.jsonListCallCount, 3);
+});
+
+test('retirement waits for closing target to leave inventory without evaluating its disappearing session', async () => {
+  const deps = fixture();
+  deps.calls.closeRemovesTarget = false;
+  deps.calls.hangClosedTargetIdentity = true;
+  deps.calls.removeTargetOnJsonListCall = 4;
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 2_000 });
+  assert.equal(result.action, 'closed');
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.equal(deps.calls.jsonListCallCount, 4);
+  assert.equal(deps.calls.inspectedTargetIds.filter((id) => id === 'target-b').length, 2);
+  assert.ok(deps.calls.inspectedTargetIds.includes('target-a'));
+});
+
+test('lost close response cannot conceal changes to other pages', async () => {
+  const deps = fixture();
+  deps.calls.loseCloseResponse = true;
+  deps.calls.addPageOnJsonListCall = 3;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
+    /changed another TradingView chart target/u,
+  );
+  assert.deepEqual(deps.calls.close, ['target-b']);
+});
+
+test('retirement requires exact profile CDP authority', async () => {
 
   const wrongEndpoint = fixture();
   wrongEndpoint.calls.browserWebSocketUrl = 'ws://other.test/profiles/current-profile/cdp';
