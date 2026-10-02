@@ -230,6 +230,7 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   while (remainingMs(deadline) > 0) {
     const afterSnapshot = await readProfileSnapshot({
       targetListUrl, expected, browser, dependencies, deadline, requestJson,
+      skipTargetId: target.id,
     });
     after = afterSnapshot.targets;
     afterViews = afterSnapshot.views;
@@ -255,13 +256,18 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     beforeIdentity.accountSubjectSha256);
 }
 
-async function readProfileSnapshot({ targetListUrl, expected, browser, dependencies, deadline, requestJson }) {
+async function readProfileSnapshot({
+  targetListUrl, expected, browser, dependencies, deadline, requestJson, skipTargetId = null,
+}) {
   let targets = pageTargets(await requestJson(targetListUrl));
   let reconciledDisappearedTarget = false;
   while (true) {
     const currentChartTargets = chartTargets(targets);
     try {
-      const views = await inspectChartTargets(currentChartTargets, expected, browser, dependencies, deadline);
+      const inspectionTargets = skipTargetId === null
+        ? currentChartTargets
+        : currentChartTargets.filter((target) => target.id !== skipTargetId);
+      const views = await inspectChartTargets(inspectionTargets, expected, browser, dependencies, deadline);
       return { targets, chartTargets: currentChartTargets, views };
     } catch (error) {
       if (!(error instanceof TargetDisappearedDuringIdentityRead) || reconciledDisappearedTarget) throw error;
