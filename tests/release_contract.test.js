@@ -201,6 +201,7 @@ test('symbol metadata capabilities expose bounded read-only observer contracts',
   const result = { symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', exchange: 'BYBIT', type: 'crypto', full_name: 'BYBIT:BTCUSDT' };
   const symbolSearchFixture = { success: true, query: 'BTCUSDT', source: 'rest_api', results: [result], count: 1 };
   assert.equal(symbolSearch.inputSchema.query.parse('BTCUSDT'), 'BTCUSDT');
+  assert.equal(symbolSearch.inputSchema.query.safeParse('x'.repeat(513)).success, false);
   assert.equal(symbolSearch.inputSchema.type.parse('crypto'), 'crypto');
   assert.equal(symbolSearchOutput.safeParse(symbolSearchFixture).success, true);
   assert.equal(symbolSearchOutput.safeParse({ ...symbolSearchFixture, results: Array(16).fill(result), count: 16 }).success, false);

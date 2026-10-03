@@ -1202,7 +1202,7 @@ export const observerToolDefinitions = Object.freeze({
   symbol_search: {
     classification: 'read_only',
     inputSchema: {
-      query: z.string(),
+      query: z.string().max(512),
       type: z.string().optional(),
     },
     outputSchema: {
