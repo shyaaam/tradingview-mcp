@@ -151,6 +151,21 @@ test('adopts and navigates the sole exact about:blank target without creating an
   assert.equal(harness.calls.bound[0].chartTargetId, 'existing-blank');
 });
 
+test('adopted blank landing on TradingView login route is reported without claiming authentication', async () => {
+  const harness = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    finalUrl: 'https://www.tradingview.com/accounts/signin/',
+  });
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+
+  assert.equal(result.target_created, false);
+  assert.equal(result.navigation_performed, true);
+  assert.equal(result.page_state, 'login_route');
+  assert.equal(result.mutations_performed, true);
+  assert.deepEqual(harness.calls.createTarget, []);
+  assert.equal(harness.calls.bound[0].chartTargetId, 'existing-blank');
+});
+
 test('refuses blank-target adoption when page inventory is ambiguous', async () => {
   const cases = [
     [
