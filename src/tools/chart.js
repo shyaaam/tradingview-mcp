@@ -95,15 +95,12 @@ export function registerChartTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('symbol_info', 'Get detailed metadata about the current symbol (name, exchange, type, description)', {}, async () => {
+  registerObserverTool(server, 'symbol_info', 'Get read-only metadata about the current chart symbol, including TradingView typespecs', async () => {
     try { return jsonResult(await core.symbolInfo()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('symbol_search', 'Search for symbols by name or keyword', {
-    query: z.string().describe('Search query (e.g., "AAPL", "crude oil", "ES")'),
-    type: z.string().optional().describe('Filter by type (e.g., "stock", "futures", "crypto", "forex")'),
-  }, async ({ query, type }) => {
+  registerObserverTool(server, 'symbol_search', 'Search TradingView symbols through the read-only symbol-search REST API', async ({ query, type }) => {
     try { return jsonResult(await core.symbolSearch({ query, type })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });

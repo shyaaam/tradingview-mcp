@@ -1182,6 +1182,43 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: emptyInput,
     outputSchema: chartStateOutput,
   },
+  symbol_info: {
+    classification: 'read_only',
+    inputSchema: emptyInput,
+    outputSchema: {
+      success: z.literal(true),
+      symbol: z.string().min(1).max(160),
+      full_name: z.string().min(1).max(256),
+      exchange: z.string().min(1).max(128),
+      description: z.string().max(512),
+      type: z.string().min(1).max(64),
+      pro_name: z.string().min(1).max(256),
+      typespecs: z.array(z.string().min(1).max(128)).max(32).nullable().optional()
+        .describe('Raw TradingView tags; missing, null, or ambiguous values do not prove spot.'),
+      resolution: z.string().min(1).max(32),
+      chart_type: z.number(),
+    },
+  },
+  symbol_search: {
+    classification: 'read_only',
+    inputSchema: {
+      query: z.string(),
+      type: z.string().optional(),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      query: z.string().max(512),
+      source: z.literal('rest_api'),
+      results: z.array(z.object({
+        symbol: z.string().min(1).max(160),
+        description: z.string().max(512),
+        exchange: z.string().max(128),
+        type: z.string().max(64),
+        full_name: z.string().min(1).max(256),
+      })).max(15),
+      count: z.number().int().min(0).max(15),
+    },
+  },
   chart_save_existing_capability_probe: {
     classification: 'read_only',
     inputSchema: {

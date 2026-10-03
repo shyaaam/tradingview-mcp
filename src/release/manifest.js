@@ -51,6 +51,8 @@ const CAPABILITY_NAMES = [
   'chart_save_existing_scoped_v2',
   'chart_set_symbol',
   'chart_set_timeframe',
+  'symbol_info',
+  'symbol_search',
   'pine_apply_scoped',
   'pine_upsert_named',
 ];

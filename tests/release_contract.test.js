@@ -115,6 +115,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
+    'symbol_info',
+    'symbol_search',
     'pine_apply_scoped',
     'pine_upsert_named',
   ]);
@@ -141,6 +143,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+    symbol_info: classifications.symbol_info,
+    symbol_search: classifications.symbol_search,
     pine_apply_scoped: classifications.pine_apply_scoped,
     pine_upsert_named: classifications.pine_upsert_named,
   }, {
@@ -153,6 +157,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    symbol_info: 'read_only',
+    symbol_search: 'read_only',
     pine_apply_scoped: 'chart_mutation',
     pine_upsert_named: 'chart_mutation',
   });
@@ -164,6 +170,40 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     assert.deepEqual(capability.inputSchema, schemaFor(observerToolDefinitions[capability.name].inputSchema, true));
     assert.deepEqual(capability.resultSchema, schemaFor(observerToolDefinitions[capability.name].outputSchema));
   }
+});
+
+test('symbol metadata capabilities expose bounded read-only observer contracts', () => {
+  const { z } = require('zod');
+  const symbolInfo = observerToolDefinitions.symbol_info;
+  const symbolSearch = observerToolDefinitions.symbol_search;
+  assert.equal(symbolInfo.classification, 'read_only');
+  assert.equal(symbolSearch.classification, 'read_only');
+
+  const symbolInfoOutput = z.object(symbolInfo.outputSchema);
+  const symbolInfoFixture = {
+    success: true,
+    symbol: 'BTCUSDT',
+    full_name: 'BYBIT:BTCUSDT',
+    exchange: 'BYBIT',
+    description: 'Bitcoin / TetherUS',
+    type: 'crypto',
+    pro_name: 'BYBIT:BTCUSDT',
+    typespecs: ['crypto'],
+    resolution: '60',
+    chart_type: 1,
+  };
+  assert.equal(symbolInfoOutput.safeParse(symbolInfoFixture).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: undefined }).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: null }).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: ['x'.repeat(129)] }).success, false);
+
+  const symbolSearchOutput = z.object(symbolSearch.outputSchema);
+  const result = { symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', exchange: 'BYBIT', type: 'crypto', full_name: 'BYBIT:BTCUSDT' };
+  const symbolSearchFixture = { success: true, query: 'BTCUSDT', source: 'rest_api', results: [result], count: 1 };
+  assert.equal(symbolSearch.inputSchema.query.parse('BTCUSDT'), 'BTCUSDT');
+  assert.equal(symbolSearch.inputSchema.type.parse('crypto'), 'crypto');
+  assert.equal(symbolSearchOutput.safeParse(symbolSearchFixture).success, true);
+  assert.equal(symbolSearchOutput.safeParse({ ...symbolSearchFixture, results: Array(16).fill(result), count: 16 }).success, false);
 });
 
 test('every observer capability is registered by the MCP tool groups', () => {
@@ -878,6 +918,25 @@ test('observer result fixtures satisfy registered output schemas', () => {
       focus: { success: true, focused_index: 0 },
     },
     chart_get_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [{ id: 'study-1', name: 'Volume' }] },
+    symbol_info: {
+      success: true,
+      symbol: 'BTCUSDT',
+      full_name: 'BYBIT:BTCUSDT',
+      exchange: 'BYBIT',
+      description: 'Bitcoin / TetherUS',
+      type: 'crypto',
+      pro_name: 'BYBIT:BTCUSDT',
+      typespecs: ['crypto'],
+      resolution: '60',
+      chart_type: 1,
+    },
+    symbol_search: {
+      success: true,
+      query: 'BTCUSDT',
+      source: 'rest_api',
+      results: [{ symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', exchange: 'BYBIT', type: 'crypto', full_name: 'BYBIT:BTCUSDT' }],
+      count: 1,
+    },
     chart_save_existing_capability_probe: {
       success: true,
       probe_version: 'chart-save-existing-capability-probe-v1',
