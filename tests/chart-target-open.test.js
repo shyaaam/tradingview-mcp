@@ -166,6 +166,39 @@ test('adopted blank landing on TradingView login route is reported without claim
   assert.equal(harness.calls.bound[0].chartTargetId, 'existing-blank');
 });
 
+test('stalled adopted-target landing inventory aborts at its per-request deadline without binding', async () => {
+  const harness = makeHarness({ targets: [{
+    id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank',
+  }] });
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  let jsonListCalls = 0;
+  let requestSignal;
+  const deps = {
+    ...harness.deps,
+    fetch: async (url, init = {}) => {
+      if (url === `${cdpUrl}/json/list`) {
+        jsonListCalls += 1;
+        if (jsonListCalls === 3) {
+          return await new Promise((_resolve, reject) => {
+            requestSignal = init.signal;
+            init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+          });
+        }
+      }
+      return harness.deps.fetch(url, init);
+    },
+  };
+
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, deps),
+    /bounded deadline/u,
+  );
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(harness.calls.navigate.length, 1);
+  assert.equal(harness.calls.bound.length, 0);
+});
+
 test('refuses blank-target adoption when page inventory is ambiguous', async () => {
   const cases = [
     [

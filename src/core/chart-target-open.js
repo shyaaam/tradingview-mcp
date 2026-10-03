@@ -93,7 +93,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   await (deps.invalidateObserverSession || invalidateObserverSession)();
 
   const { managerBaseUrl, profileId, cdpUrl } = await resolveExactRunningProfile(profileName, deps);
-  const version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), deps);
+  const version = await fetchJsonWithDeadline(new URL('json/version', `${cdpUrl}/`).toString(), deps);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);
   const before = await listTargets(cdpUrl, deps);
   const pageTargets = before.filter((target) => target?.type === 'page');
@@ -319,7 +319,7 @@ async function loadExactProfile(managerBaseUrl, profileName, deps) {
 }
 
 async function listTargets(cdpUrl, deps) {
-  const targets = await fetchJson(new URL('json/list', `${cdpUrl}/`).toString(), deps);
+  const targets = await fetchJsonWithDeadline(new URL('json/list', `${cdpUrl}/`).toString(), deps);
   if (!Array.isArray(targets)) throw new Error('Exact profile CDP target inventory is malformed.');
   return targets.map((target, index) => normalizeTargetEntry(target, index));
 }
