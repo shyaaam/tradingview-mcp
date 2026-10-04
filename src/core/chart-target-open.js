@@ -165,14 +165,9 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
       throw new Error('New target ID already existed in the exact profile; refusing navigation.');
     }
 
-    const createdInventory = normalizeTargetInventory(await listTargets(cdpUrl, deps));
-    const createdMatches = createdInventory.filter((entry) => entry.id === targetId);
-    if (createdMatches.length !== 1 || createdMatches[0].type !== 'page'
-      || !samePageInventory(normalizePageTargets(createdInventory), expectedOtherPageTargets, targetId)) {
-      throw new Error('New target ownership is ambiguous in the exact profile inventory.');
-    }
+    const target = await waitForTarget(cdpUrl, targetId, deps, expectedOtherPageTargets);
+    if (!target) throw new Error('New target was not read back before bounded target polling ended.');
     ownedTarget = true;
-    const target = createdMatches[0];
     if (!isBlankUrl(target.url)) {
       throw new Error('New target was not read back as about:blank; no navigation was attempted.');
     }
@@ -491,10 +486,20 @@ function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function waitForTarget(cdpUrl, targetId, deps) {
+async function waitForTarget(cdpUrl, targetId, deps, expectedOtherPageTargets) {
   for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
-    const target = (await listTargets(cdpUrl, deps)).find((entry) => entry?.id === targetId);
-    if (target) return target;
+    const inventory = normalizeTargetInventory(await listTargets(cdpUrl, deps));
+    const matches = inventory.filter((entry) => entry.id === targetId);
+    if (matches.length > 1
+      || !samePageInventory(normalizePageTargets(inventory), expectedOtherPageTargets, targetId)) {
+      throw new Error('New target ownership is ambiguous in the exact profile inventory.');
+    }
+    if (matches.length === 1) {
+      if (matches[0].type !== 'page') {
+        throw new Error('New target ownership is ambiguous in the exact profile inventory.');
+      }
+      return matches[0];
+    }
     await (deps.sleep || sleep)(POLL_INTERVAL_MS);
   }
   return null;

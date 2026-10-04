@@ -25,6 +25,7 @@ function makeHarness({
   finalUrl = CHART_URL,
   createResult = { targetId: 'target-new' },
   extraTargetsAfterCreate = [],
+  delayedTargetReads = 0,
   extraTargetsAfterNavigation = [],
   navigateResult = { frameId: 'main', errorText: null },
   closeBehavior = 'close',
@@ -40,7 +41,7 @@ function makeHarness({
   }];
   const calls = {
     createTarget: [], closeTargets: [], browserClosed: 0, navigate: [], browserWebSockets: [],
-    targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0,
+    targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0, targetListsAfterCreate: 0,
   };
   const deps = {
     managerBaseUrl: BASE_URL,
@@ -56,7 +57,12 @@ function makeHarness({
           return response(typeof snapshot === 'function' ? snapshot(state) : snapshot);
         }
         calls.targetLists += 1;
-        return response(targetInventory ?? state.targets.map((target) => ({ ...target })));
+        if (calls.createTarget.length > 0) calls.targetListsAfterCreate += 1;
+        const currentTargets = targetInventory ?? state.targets.map((target) => ({ ...target }));
+        if (calls.targetListsAfterCreate > 0 && calls.targetListsAfterCreate <= delayedTargetReads) {
+          return response(currentTargets.filter((target) => target.id !== createResult?.targetId));
+        }
+        return response(currentTargets);
       }
       throw new Error(`unexpected URL: ${url}`);
     },
@@ -157,6 +163,15 @@ test('failed bootstrap retires its exact newly-created target and preserves prio
     { id: 'home', url: 'https://www.tradingview.com/' },
   ]);
   assert.deepEqual(harness.calls.bound, []);
+});
+
+test('fresh-target creation waits for exact readback while preserving other-page inventory', async () => {
+  const harness = makeHarness({ delayedTargetReads: 2 });
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+  assert.equal(result.target_created, true);
+  assert.ok(harness.calls.targetListsAfterCreate >= 3);
+  assert.deepEqual(harness.calls.closeTargets, []);
+  assert.deepEqual(harness.state.targets.map(({ id }) => id).sort(), ['home', 'target-new']);
 });
 
 test('bootstrap cleanup fails closed when another page appears before retirement', async () => {
