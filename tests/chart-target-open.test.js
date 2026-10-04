@@ -25,6 +25,8 @@ function makeHarness({
   finalUrl = CHART_URL,
   runtimeUrl = finalUrl,
   runtimeSnapshots = null,
+  runtimeEnableHangs = false,
+  runtimeEvaluateHangs = false,
   createResult = { targetId: 'target-new' },
   extraTargetsAfterCreate = [],
   delayedTargetReads = 0,
@@ -112,8 +114,11 @@ function makeHarness({
           },
         },
         Runtime: {
-          enable: async () => {},
+          enable: async () => {
+            if (runtimeEnableHangs) return new Promise(() => {});
+          },
           evaluate: async () => {
+            if (runtimeEvaluateHangs) return new Promise(() => {});
             const isLogin = runtimeUrl.includes('/accounts/signin/') || runtimeUrl.includes('/accounts/login/');
             const snapshot = runtimeSnapshots
               ? runtimeSnapshots[Math.min(calls.runtimeReads, runtimeSnapshots.length - 1)]
@@ -214,6 +219,25 @@ test('bootstrap retires fresh target when generic route redirects to a saved cha
   ]);
   assert.deepEqual(harness.calls.bound, []);
 });
+
+for (const hangingCall of ['enable', 'evaluate']) {
+  test(`bootstrap bounds a hung Runtime.${hangingCall} call and retires its exact target`, async () => {
+    const harness = makeHarness({ [`runtime${hangingCall[0].toUpperCase()}${hangingCall.slice(1)}Hangs`]: true });
+    harness.deps.runtimeReadinessTimeoutMs = 25;
+    const startedAt = Date.now();
+    await assert.rejects(
+      openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+      (error) => error.failureCode === 'BOOTSTRAP_RUNTIME_DEADLINE' && error.cleanupState === 'confirmed',
+    );
+
+    assert.ok(Date.now() - startedAt < 1_000, 'hung runtime call must not hold bootstrap indefinitely');
+    assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+    assert.deepEqual(harness.state.targets.map(({ id, url }) => ({ id, url })), [
+      { id: 'home', url: 'https://www.tradingview.com/' },
+    ]);
+    assert.deepEqual(harness.calls.bound, []);
+  });
+}
 
 test('failed bootstrap retires its exact newly-created target and preserves prior pages', async () => {
   const harness = makeHarness({ navigateResult: { errorText: 'navigation rejected' } });

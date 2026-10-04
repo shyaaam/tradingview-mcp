@@ -16,6 +16,7 @@ const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const PROFILE_POLL_ATTEMPTS = 30;
 const POLL_INTERVAL_MS = 250;
 const PROFILE_REQUEST_TIMEOUT_MS = 2_000;
+const PROFILE_RUNTIME_READINESS_TIMEOUT_MS = 10_000;
 
 /** Start one exact profile selected by stable name; never expose its Manager UUID. */
 export async function startExactProfileByName(profileNameValue, dependencies = {}) {
@@ -525,19 +526,31 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
   }
 
   const connectTarget = deps.connectTarget || ((url) => CDP({ target: url, local: true }));
-  const page = await connectTarget(target.webSocketDebuggerUrl);
+  const readinessTimeoutMs = deps.runtimeReadinessTimeoutMs === undefined
+    ? PROFILE_RUNTIME_READINESS_TIMEOUT_MS
+    : boundedBootstrapTimeout(deps.runtimeReadinessTimeoutMs);
+  const deadlineAt = Date.now() + readinessTimeoutMs;
+  const page = await withBootstrapRuntimeDeadline(
+    () => connectTarget(target.webSocketDebuggerUrl), deadlineAt, 'connect to the created target');
   try {
-    await page.Runtime?.enable?.();
+    await withBootstrapRuntimeDeadline(() => page.Runtime?.enable?.(), deadlineAt, 'enable the target runtime');
     let authenticatedGenericReads = 0;
-    for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+    for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS && Date.now() < deadlineAt; attempt += 1) {
       let snapshot = null;
       try {
-        const evaluation = await page.Runtime.evaluate({
-          expression: CHART_RUNTIME_READINESS_EXPRESSION,
-          returnByValue: true,
-        });
+        const evaluation = await withBootstrapRuntimeDeadline(
+          () => page.Runtime.evaluate({
+            expression: CHART_RUNTIME_READINESS_EXPRESSION,
+            returnByValue: true,
+          }),
+          deadlineAt,
+          'read target runtime readiness',
+        );
         snapshot = evaluation?.result?.value;
-      } catch { /* a navigation boundary can interrupt one bounded readiness read */ }
+      } catch (error) {
+        if (error?.failureCode === 'BOOTSTRAP_RUNTIME_DEADLINE') throw error;
+        /* a navigation boundary can interrupt one bounded readiness read */
+      }
       if (snapshot && typeof snapshot === 'object') {
         const runtimeUrl = String(snapshot.current_url || '');
         if (snapshot.login_state === 'present' || isTradingViewLoginUrl(runtimeUrl)) return 'login_route';
@@ -565,12 +578,54 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
           throw new Error('TradingView generic chart authentication or session state is ambiguous; refusing to bind.');
         }
       }
-      if (attempt + 1 < PROFILE_POLL_ATTEMPTS) await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+      if (attempt + 1 < PROFILE_POLL_ATTEMPTS && Date.now() < deadlineAt) {
+        await withBootstrapRuntimeDeadline(
+          () => (deps.sleep || sleep)(Math.min(POLL_INTERVAL_MS, deadlineAt - Date.now())),
+          deadlineAt,
+          'wait between readiness reads',
+        );
+      }
     }
     throw new Error('TradingView generic chart did not become authenticated and API-ready before bounded bootstrap polling ended.');
   } finally {
-    try { await page.close?.(); } catch { /* preserve landing result */ }
+    try {
+      await withOperationTimeout(
+        () => page.close?.(),
+        PROFILE_REQUEST_TIMEOUT_MS,
+        'Closing the temporary target connection exceeded its bounded deadline.',
+      );
+    } catch { /* preserve landing result so exact target cleanup can proceed */ }
   }
+}
+
+function withBootstrapRuntimeDeadline(operation, deadlineAt, action) {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) {
+    return Promise.reject(codedError(
+      'BOOTSTRAP_RUNTIME_DEADLINE',
+      `Bootstrap runtime readiness exceeded its bounded deadline before it could ${action}.`,
+    ));
+  }
+  return withOperationTimeout(
+    operation,
+    Math.min(PROFILE_REQUEST_TIMEOUT_MS, remainingMs),
+    `Bootstrap runtime readiness exceeded its bounded deadline while attempting to ${action}.`,
+  );
+}
+
+function withOperationTimeout(operation, timeoutMs, message) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(codedError('BOOTSTRAP_RUNTIME_DEADLINE', message)), timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
+}
+
+function boundedBootstrapTimeout(value) {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > PROFILE_RUNTIME_READINESS_TIMEOUT_MS) {
+    throw new Error(`Bootstrap runtime readiness timeout must be a positive integer no greater than ${PROFILE_RUNTIME_READINESS_TIMEOUT_MS}ms.`);
+  }
+  return value;
 }
 
 async function fetchJson(url, deps, init = {}) {
