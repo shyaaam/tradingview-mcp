@@ -16,7 +16,7 @@ const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const PROFILE_POLL_ATTEMPTS = 30;
 const POLL_INTERVAL_MS = 250;
 const PROFILE_REQUEST_TIMEOUT_MS = 2_000;
-const PROFILE_RUNTIME_READINESS_TIMEOUT_MS = 10_000;
+const PROFILE_BOOTSTRAP_STAGE_TIMEOUT_MS = 10_000;
 
 /** Start one exact profile selected by stable name; never expose its Manager UUID. */
 export async function startExactProfileByName(profileNameValue, dependencies = {}) {
@@ -177,13 +177,25 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
       throw new Error('New target has no exact CDP websocket; no navigation was attempted.');
     }
 
-    const page = await (deps.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+    const navigationDeadlineAt = bootstrapStageDeadline(deps);
+    const connectTarget = deps.connectTarget || ((url) => CDP({ target: url, local: true }));
+    const page = await connectTargetWithinBootstrapDeadline(
+      connectTarget,
+      target.webSocketDebuggerUrl,
+      navigationDeadlineAt,
+      'connect for bootstrap navigation',
+    );
     let navigateResult;
     try {
-      await page.Page.enable();
-      navigateResult = await page.Page.navigate({ url: GENERIC_CHART_URL });
+      await withBootstrapOperationDeadline(
+        () => page.Page.enable(), navigationDeadlineAt, 'enable the page domain');
+      navigateResult = await withBootstrapOperationDeadline(
+        () => page.Page.navigate({ url: GENERIC_CHART_URL }),
+        navigationDeadlineAt,
+        'navigate the created target',
+      );
     } finally {
-      try { await page.close?.(); } catch { /* preserve navigation result */ }
+      await closeBootstrapTargetConnection(page);
     }
     if (navigateResult?.errorText) {
       throw new Error('TradingView generic chart navigation failed.');
@@ -526,19 +538,20 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
   }
 
   const connectTarget = deps.connectTarget || ((url) => CDP({ target: url, local: true }));
-  const readinessTimeoutMs = deps.runtimeReadinessTimeoutMs === undefined
-    ? PROFILE_RUNTIME_READINESS_TIMEOUT_MS
-    : boundedBootstrapTimeout(deps.runtimeReadinessTimeoutMs);
-  const deadlineAt = Date.now() + readinessTimeoutMs;
-  const page = await withBootstrapRuntimeDeadline(
-    () => connectTarget(target.webSocketDebuggerUrl), deadlineAt, 'connect to the created target');
+  const deadlineAt = bootstrapStageDeadline(deps);
+  const page = await connectTargetWithinBootstrapDeadline(
+    connectTarget,
+    target.webSocketDebuggerUrl,
+    deadlineAt,
+    'connect to the created target',
+  );
   try {
-    await withBootstrapRuntimeDeadline(() => page.Runtime?.enable?.(), deadlineAt, 'enable the target runtime');
+    await withBootstrapOperationDeadline(() => page.Runtime?.enable?.(), deadlineAt, 'enable the target runtime');
     let authenticatedGenericReads = 0;
     for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS && Date.now() < deadlineAt; attempt += 1) {
       let snapshot = null;
       try {
-        const evaluation = await withBootstrapRuntimeDeadline(
+        const evaluation = await withBootstrapOperationDeadline(
           () => page.Runtime.evaluate({
             expression: CHART_RUNTIME_READINESS_EXPRESSION,
             returnByValue: true,
@@ -548,7 +561,7 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
         );
         snapshot = evaluation?.result?.value;
       } catch (error) {
-        if (error?.failureCode === 'BOOTSTRAP_RUNTIME_DEADLINE') throw error;
+        if (error?.failureCode === 'BOOTSTRAP_OPERATION_DEADLINE') throw error;
         /* a navigation boundary can interrupt one bounded readiness read */
       }
       if (snapshot && typeof snapshot === 'object') {
@@ -579,7 +592,7 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
         }
       }
       if (attempt + 1 < PROFILE_POLL_ATTEMPTS && Date.now() < deadlineAt) {
-        await withBootstrapRuntimeDeadline(
+        await withBootstrapOperationDeadline(
           () => (deps.sleep || sleep)(Math.min(POLL_INTERVAL_MS, deadlineAt - Date.now())),
           deadlineAt,
           'wait between readiness reads',
@@ -588,42 +601,76 @@ async function waitForAuthenticatedBootstrapLanding(target, deps) {
     }
     throw new Error('TradingView generic chart did not become authenticated and API-ready before bounded bootstrap polling ended.');
   } finally {
-    try {
-      await withOperationTimeout(
-        () => page.close?.(),
-        PROFILE_REQUEST_TIMEOUT_MS,
-        'Closing the temporary target connection exceeded its bounded deadline.',
-      );
-    } catch { /* preserve landing result so exact target cleanup can proceed */ }
+    await closeBootstrapTargetConnection(page);
   }
 }
 
-function withBootstrapRuntimeDeadline(operation, deadlineAt, action) {
+function bootstrapStageDeadline(deps) {
+  const timeoutMs = deps.bootstrapStageTimeoutMs === undefined
+    ? PROFILE_BOOTSTRAP_STAGE_TIMEOUT_MS
+    : boundedBootstrapTimeout(deps.bootstrapStageTimeoutMs);
+  return Date.now() + timeoutMs;
+}
+
+async function connectTargetWithinBootstrapDeadline(connectTarget, targetUrl, deadlineAt, action) {
+  let timedOut = false;
+  let page = null;
+  let closePromise = null;
+  const closeLateConnection = () => {
+    if (!page) return Promise.resolve();
+    closePromise ||= closeBootstrapTargetConnection(page);
+    return closePromise;
+  };
+  const connection = Promise.resolve().then(() => connectTarget(targetUrl)).then((connectedPage) => {
+    page = connectedPage;
+    if (timedOut) void closeLateConnection();
+    return connectedPage;
+  });
+  try {
+    return await withBootstrapOperationDeadline(() => connection, deadlineAt, action);
+  } catch (error) {
+    timedOut = true;
+    await closeLateConnection();
+    throw error;
+  }
+}
+
+async function closeBootstrapTargetConnection(page) {
+  try {
+    await withOperationTimeout(
+      () => page.close?.(),
+      PROFILE_REQUEST_TIMEOUT_MS,
+      'Closing the temporary target connection exceeded its bounded deadline.',
+    );
+  } catch { /* exact target cleanup must proceed if CDP close stalls */ }
+}
+
+function withBootstrapOperationDeadline(operation, deadlineAt, action) {
   const remainingMs = deadlineAt - Date.now();
   if (remainingMs <= 0) {
     return Promise.reject(codedError(
-      'BOOTSTRAP_RUNTIME_DEADLINE',
-      `Bootstrap runtime readiness exceeded its bounded deadline before it could ${action}.`,
+      'BOOTSTRAP_OPERATION_DEADLINE',
+      `Bootstrap target operation exceeded its bounded deadline before it could ${action}.`,
     ));
   }
   return withOperationTimeout(
     operation,
     Math.min(PROFILE_REQUEST_TIMEOUT_MS, remainingMs),
-    `Bootstrap runtime readiness exceeded its bounded deadline while attempting to ${action}.`,
+    `Bootstrap target operation exceeded its bounded deadline while attempting to ${action}.`,
   );
 }
 
 function withOperationTimeout(operation, timeoutMs, message) {
   let timer;
   const timeout = new Promise((_resolve, reject) => {
-    timer = setTimeout(() => reject(codedError('BOOTSTRAP_RUNTIME_DEADLINE', message)), timeoutMs);
+    timer = setTimeout(() => reject(codedError('BOOTSTRAP_OPERATION_DEADLINE', message)), timeoutMs);
   });
   return Promise.race([Promise.resolve().then(operation), timeout]).finally(() => clearTimeout(timer));
 }
 
 function boundedBootstrapTimeout(value) {
-  if (!Number.isSafeInteger(value) || value <= 0 || value > PROFILE_RUNTIME_READINESS_TIMEOUT_MS) {
-    throw new Error(`Bootstrap runtime readiness timeout must be a positive integer no greater than ${PROFILE_RUNTIME_READINESS_TIMEOUT_MS}ms.`);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > PROFILE_BOOTSTRAP_STAGE_TIMEOUT_MS) {
+    throw new Error(`Bootstrap stage timeout must be a positive integer no greater than ${PROFILE_BOOTSTRAP_STAGE_TIMEOUT_MS}ms.`);
   }
   return value;
 }

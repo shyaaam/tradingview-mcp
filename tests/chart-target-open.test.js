@@ -27,6 +27,10 @@ function makeHarness({
   runtimeSnapshots = null,
   runtimeEnableHangs = false,
   runtimeEvaluateHangs = false,
+  navigationEnableHangs = false,
+  navigationNavigateHangs = false,
+  targetConnectHangs = false,
+  targetConnectDelayMs = 0,
   createResult = { targetId: 'target-new' },
   extraTargetsAfterCreate = [],
   delayedTargetReads = 0,
@@ -46,8 +50,10 @@ function makeHarness({
   const calls = {
     createTarget: [], closeTargets: [], browserClosed: 0, navigate: [], browserWebSockets: [],
     targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0, targetListsAfterCreate: 0,
-    runtimeReads: 0,
+    runtimeReads: 0, targetConnectionsClosed: 0,
   };
+  let resolveLateTargetConnectionClosed;
+  const lateTargetConnectionClosed = new Promise((resolve) => { resolveLateTargetConnectionClosed = resolve; });
   const deps = {
     managerBaseUrl: BASE_URL,
     fetch: async (url) => {
@@ -102,11 +108,14 @@ function makeHarness({
     },
     connectTarget: async (webSocketUrl) => {
       calls.targetWebSockets.push(webSocketUrl);
-      return {
+      const connection = {
         Page: {
-          enable: async () => {},
+          enable: async () => {
+            if (navigationEnableHangs) return new Promise(() => {});
+          },
           navigate: async ({ url: requested }) => {
             calls.navigate.push(requested);
+            if (navigationNavigateHangs) return new Promise(() => {});
             const target = state.targets.find((entry) => entry.webSocketDebuggerUrl === webSocketUrl);
             if (target) target.url = finalUrl;
             state.targets.push(...extraTargetsAfterNavigation.map((entry) => ({ ...entry })));
@@ -137,15 +146,23 @@ function makeHarness({
             return { result: { value: snapshot } };
           },
         },
-        close: async () => {},
+        close: async () => {
+          calls.targetConnectionsClosed += 1;
+          resolveLateTargetConnectionClosed();
+        },
       };
+      if (targetConnectHangs) return new Promise(() => {});
+      if (calls.targetWebSockets.length === 1 && targetConnectDelayMs > 0) {
+        return new Promise((resolve) => setTimeout(() => resolve(connection), targetConnectDelayMs));
+      }
+      return connection;
     },
     sleep: async () => {},
     getObserverSession: () => null,
     invalidateObserverSession: async () => { calls.invalidated += 1; },
     bindObserverSession: async (binding) => { calls.bound.push(binding); },
   };
-  return { calls, deps, state };
+  return { calls, deps, state, lateTargetConnectionClosed };
 }
 
 test('opens one exact-profile blank target and navigates it to generic TradingView chart', async () => {
@@ -223,11 +240,11 @@ test('bootstrap retires fresh target when generic route redirects to a saved cha
 for (const hangingCall of ['enable', 'evaluate']) {
   test(`bootstrap bounds a hung Runtime.${hangingCall} call and retires its exact target`, async () => {
     const harness = makeHarness({ [`runtime${hangingCall[0].toUpperCase()}${hangingCall.slice(1)}Hangs`]: true });
-    harness.deps.runtimeReadinessTimeoutMs = 25;
+    harness.deps.bootstrapStageTimeoutMs = 25;
     const startedAt = Date.now();
     await assert.rejects(
       openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
-      (error) => error.failureCode === 'BOOTSTRAP_RUNTIME_DEADLINE' && error.cleanupState === 'confirmed',
+      (error) => error.failureCode === 'BOOTSTRAP_OPERATION_DEADLINE' && error.cleanupState === 'confirmed',
     );
 
     assert.ok(Date.now() - startedAt < 1_000, 'hung runtime call must not hold bootstrap indefinitely');
@@ -238,6 +255,49 @@ for (const hangingCall of ['enable', 'evaluate']) {
     assert.deepEqual(harness.calls.bound, []);
   });
 }
+
+for (const hangingCall of ['navigationEnable', 'navigationNavigate']) {
+  test(`bootstrap bounds a hung Page.${hangingCall === 'navigationEnable' ? 'enable' : 'navigate'} call and retires its exact target`, async () => {
+    const harness = makeHarness({ [`${hangingCall}Hangs`]: true });
+    harness.deps.bootstrapStageTimeoutMs = 25;
+    await assert.rejects(
+      openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+      (error) => error.failureCode === 'BOOTSTRAP_OPERATION_DEADLINE' && error.cleanupState === 'confirmed',
+    );
+    assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+    assert.deepEqual(harness.state.targets.map(({ id, url }) => ({ id, url })), [
+      { id: 'home', url: 'https://www.tradingview.com/' },
+    ]);
+    assert.deepEqual(harness.calls.bound, []);
+  });
+}
+
+test('bootstrap bounds a hung target connection and retires its exact target', async () => {
+  const harness = makeHarness({ targetConnectHangs: true });
+  harness.deps.bootstrapStageTimeoutMs = 25;
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => error.failureCode === 'BOOTSTRAP_OPERATION_DEADLINE' && error.cleanupState === 'confirmed',
+  );
+  assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+  assert.deepEqual(harness.calls.bound, []);
+});
+
+test('bootstrap closes a target connection that resolves after its deadline', async () => {
+  const harness = makeHarness({ targetConnectDelayMs: 60 });
+  harness.deps.bootstrapStageTimeoutMs = 25;
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => error.failureCode === 'BOOTSTRAP_OPERATION_DEADLINE' && error.cleanupState === 'confirmed',
+  );
+  assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+  const lateConnectionClosed = await Promise.race([
+    harness.lateTargetConnectionClosed.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 250)),
+  ]);
+  assert.equal(lateConnectionClosed, true, 'late CDP connection must be closed');
+  assert.deepEqual(harness.calls.bound, []);
+});
 
 test('failed bootstrap retires its exact newly-created target and preserves prior pages', async () => {
   const harness = makeHarness({ navigateResult: { errorText: 'navigation rejected' } });
