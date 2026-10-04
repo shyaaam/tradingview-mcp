@@ -89,6 +89,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_ensure_saved_chart_authority_v1',
     'tv_observer_hydrate_saved_layout_v1',
     'tv_observer_retire_saved_chart_v2',
+    'tv_observer_retire_owned_diagnostic_target_v1',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -145,6 +146,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
     symbol_info: classifications.symbol_info,
     symbol_search: classifications.symbol_search,
+    tv_observer_retire_owned_diagnostic_target_v1: classifications.tv_observer_retire_owned_diagnostic_target_v1,
     pine_apply_scoped: classifications.pine_apply_scoped,
     pine_upsert_named: classifications.pine_upsert_named,
   }, {
@@ -159,6 +161,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
     symbol_info: 'read_only',
     symbol_search: 'read_only',
+    tv_observer_retire_owned_diagnostic_target_v1: 'bootstrap_mutation',
     pine_apply_scoped: 'chart_mutation',
     pine_upsert_named: 'chart_mutation',
   });
@@ -321,6 +324,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
       target_id: 'target-new',
       target_url: 'https://www.tradingview.com/chart/',
       target_created: true,
+      ownership_proof: 'c'.repeat(64),
       navigation_performed: true,
       page_state: 'generic_chart',
       mutations_performed: true,
@@ -397,6 +401,15 @@ test('observer result fixtures satisfy registered output schemas', () => {
       chart_target_id: 'target-b',
       action: 'closed',
       remaining_chart_targets: 1,
+      mutations_performed: true,
+    },
+    tv_observer_retire_owned_diagnostic_target_v1: {
+      success: true,
+      retirement_version: 'owned-diagnostic-target-retirement-v1',
+      profile_name: 'tv-observer-1',
+      diagnostic_target_id: 'target-new',
+      action: 'closed',
+      remaining_page_targets: 1,
       mutations_performed: true,
     },
     chart_runtime_readiness_probe_v1: {

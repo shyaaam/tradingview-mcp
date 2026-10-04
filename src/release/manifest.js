@@ -25,6 +25,7 @@ const CAPABILITY_NAMES = [
   'tv_observer_ensure_saved_chart_authority_v1',
   'tv_observer_hydrate_saved_layout_v1',
   'tv_observer_retire_saved_chart_v2',
+  'tv_observer_retire_owned_diagnostic_target_v1',
   'tv_observer_identity',
   'chart_saved_layout_identity',
   'tv_observer_capture_candle',

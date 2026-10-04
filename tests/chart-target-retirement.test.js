@@ -329,8 +329,8 @@ test('retirement fails closed when unacknowledged close leaves exact target pres
   const unacknowledged = fixture();
   unacknowledged.calls.closeAcknowledged = false;
   await assert.rejects(
-    retire(INPUT, { ...unacknowledged, managerBaseUrl: 'http://manager.test' }),
-    /remained open after unacknowledged close/u,
+    retire(INPUT, { ...unacknowledged, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
+    /remained open after bounded retirement/u,
   );
   assert.deepEqual(unacknowledged.calls.close, ['target-b']);
 
@@ -339,7 +339,7 @@ test('retirement fails closed when unacknowledged close leaves exact target pres
   lostResponse.calls.closeAcknowledged = false;
   await assert.rejects(
     retire(INPUT, { ...lostResponse, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
-    /remained open after unacknowledged close/u,
+    /remained open after bounded retirement/u,
   );
   assert.deepEqual(lostResponse.calls.close, ['target-b']);
 });
@@ -350,18 +350,18 @@ test('retirement confirms exact absence after lost close response within existin
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 });
   assert.equal(result.action, 'closed');
   assert.deepEqual(deps.calls.close, ['target-b']);
-  assert.equal(deps.calls.jsonListCallCount, 3);
+  assert.equal(deps.calls.jsonListCallCount, 6);
 });
 
 test('retirement waits for closing target to leave inventory without evaluating its disappearing session', async () => {
   const deps = fixture();
   deps.calls.closeRemovesTarget = false;
   deps.calls.hangClosedTargetIdentity = true;
-  deps.calls.removeTargetOnJsonListCall = 4;
+  deps.calls.removeTargetOnJsonListCall = 5;
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 2_000 });
   assert.equal(result.action, 'closed');
   assert.deepEqual(deps.calls.close, ['target-b']);
-  assert.equal(deps.calls.jsonListCallCount, 4);
+  assert.equal(deps.calls.jsonListCallCount, 6);
   assert.equal(deps.calls.inspectedTargetIds.filter((id) => id === 'target-b').length, 2);
   assert.ok(deps.calls.inspectedTargetIds.includes('target-a'));
 });
@@ -369,10 +369,10 @@ test('retirement waits for closing target to leave inventory without evaluating 
 test('lost close response cannot conceal changes to other pages', async () => {
   const deps = fixture();
   deps.calls.loseCloseResponse = true;
-  deps.calls.addPageOnJsonListCall = 3;
+  deps.calls.addPageOnJsonListCall = 5;
   await assert.rejects(
     retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
-    /changed another TradingView chart target/u,
+    /page inventory changed/u,
   );
   assert.deepEqual(deps.calls.close, ['target-b']);
 });
