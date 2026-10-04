@@ -21,8 +21,11 @@ function makeHarness({
   profileStatus = 'running',
   profileInventory,
   targetInventory,
+  targetInventorySequence,
   finalUrl = CHART_URL,
   createResult = { targetId: 'target-new' },
+  extraTargetsAfterNavigation = [],
+  navigateResult = { frameId: 'main', errorText: null },
   browserWebSocketUrl = `ws://manager.test/api/profiles/${profileId}/cdp`,
 } = {}) {
   const state = { targets: targets.map((target) => ({ ...target })) };
@@ -33,7 +36,7 @@ function makeHarness({
     status: profileStatus,
     cdp_url: `/api/profiles/${profileId}/cdp`,
   }];
-  const calls = { createTarget: [], navigate: [], browserWebSockets: [], targetWebSockets: [], bound: [], invalidated: 0 };
+  const calls = { createTarget: [], navigate: [], browserWebSockets: [], targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0 };
   const deps = {
     managerBaseUrl: BASE_URL,
     fetch: async (url) => {
@@ -42,6 +45,12 @@ function makeHarness({
       }
       if (url === `${cdpUrl}/json/version`) return response({ webSocketDebuggerUrl: browserWebSocketUrl });
       if (url === `${cdpUrl}/json/list`) {
+        if (targetInventorySequence) {
+          const snapshot = targetInventorySequence[Math.min(calls.targetLists, targetInventorySequence.length - 1)];
+          calls.targetLists += 1;
+          return response(typeof snapshot === 'function' ? snapshot(state) : snapshot);
+        }
+        calls.targetLists += 1;
         return response(targetInventory ?? state.targets.map((target) => ({ ...target })));
       }
       throw new Error(`unexpected URL: ${url}`);
@@ -66,16 +75,17 @@ function makeHarness({
         close: async () => {},
       };
     },
-    connectTarget: async (url) => {
-      calls.targetWebSockets.push(url);
+    connectTarget: async (webSocketUrl) => {
+      calls.targetWebSockets.push(webSocketUrl);
       return {
         Page: {
           enable: async () => {},
           navigate: async ({ url: requested }) => {
             calls.navigate.push(requested);
-            const target = state.targets.find((entry) => entry.id === 'target-new');
+            const target = state.targets.find((entry) => entry.webSocketDebuggerUrl === webSocketUrl);
             if (target) target.url = finalUrl;
-            return { frameId: 'main', errorText: null };
+            state.targets.push(...extraTargetsAfterNavigation.map((entry) => ({ ...entry })));
+            return navigateResult;
           },
         },
         close: async () => {},
@@ -114,6 +124,175 @@ test('opens one exact-profile blank target and navigates it to generic TradingVi
   assert.equal(harness.calls.bound[0].profileId, PROFILE_ID);
   assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
   assert.equal(harness.calls.invalidated, 1);
+});
+
+test('adopts and navigates the sole exact about:blank target without creating another target', async () => {
+  const harness = makeHarness({ targets: [{
+    id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank',
+  }] });
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+
+  assert.deepEqual(result, {
+    success: true,
+    open_version: 'bootstrap-chart-target-v1',
+    profile_name: PROFILE_NAME,
+    profile_id: PROFILE_ID,
+    target_id: 'existing-blank',
+    target_url: CHART_URL,
+    target_created: false,
+    navigation_performed: true,
+    page_state: 'generic_chart',
+    mutations_performed: true,
+  });
+  assert.deepEqual(harness.calls.createTarget, []);
+  assert.deepEqual(harness.calls.navigate, [CHART_URL]);
+  assert.deepEqual(harness.calls.targetWebSockets, ['ws://existing-blank']);
+  assert.equal(harness.calls.bound.length, 1);
+  assert.equal(harness.calls.bound[0].chartTargetId, 'existing-blank');
+});
+
+test('adopted blank landing on TradingView login route is reported without claiming authentication', async () => {
+  const harness = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    finalUrl: 'https://www.tradingview.com/accounts/signin/',
+  });
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+
+  assert.equal(result.target_created, false);
+  assert.equal(result.navigation_performed, true);
+  assert.equal(result.page_state, 'login_route');
+  assert.equal(result.mutations_performed, true);
+  assert.deepEqual(harness.calls.createTarget, []);
+  assert.equal(harness.calls.bound[0].chartTargetId, 'existing-blank');
+});
+
+test('stalled adopted-target landing inventory aborts at its per-request deadline without binding', async () => {
+  const harness = makeHarness({ targets: [{
+    id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank',
+  }] });
+  const cdpUrl = `${BASE_URL}/profiles/${PROFILE_ID}/cdp`;
+  let jsonListCalls = 0;
+  let requestSignal;
+  const deps = {
+    ...harness.deps,
+    fetch: async (url, init = {}) => {
+      if (url === `${cdpUrl}/json/list`) {
+        jsonListCalls += 1;
+        if (jsonListCalls === 3) {
+          return await new Promise((_resolve, reject) => {
+            requestSignal = init.signal;
+            init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+          });
+        }
+      }
+      return harness.deps.fetch(url, init);
+    },
+  };
+
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, deps),
+    /bounded deadline/u,
+  );
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(harness.calls.navigate.length, 1);
+  assert.equal(harness.calls.bound.length, 0);
+});
+
+test('refuses blank-target adoption when page inventory is ambiguous', async () => {
+  const cases = [
+    [
+      { id: 'blank-a', type: 'page', url: 'about:blank' },
+      { id: 'blank-b', type: 'page', url: 'about:blank' },
+    ],
+    [
+      { id: 'blank', type: 'page', url: 'about:blank' },
+      { id: 'other', type: 'page', url: 'https://example.invalid/' },
+    ],
+    [
+      { id: 'blank', type: 'page', url: 'about:blank' },
+      { id: 'generic', type: 'page', url: CHART_URL },
+    ],
+    [
+      { id: 'blank', type: 'page', url: 'about:blank' },
+      { id: 'login', type: 'page', url: 'https://www.tradingview.com/accounts/signin/' },
+    ],
+  ];
+  for (const targets of cases) {
+    const harness = makeHarness({ targets });
+    await assert.rejects(
+      openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+      /competing page targets/u,
+    );
+    assert.equal(harness.calls.createTarget.length, 0);
+    assert.equal(harness.calls.navigate.length, 0);
+    assert.equal(harness.calls.bound.length, 0);
+  }
+});
+
+test('refuses adopted blank target with missing websocket, target-ID drift, or websocket drift', async () => {
+  const missingWebSocket = makeHarness({ targets: [{
+    id: 'existing-blank', type: 'page', url: 'about:blank',
+  }] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, missingWebSocket.deps),
+    /no CDP websocket; no navigation was attempted/u,
+  );
+  assert.equal(missingWebSocket.calls.navigate.length, 0);
+  assert.equal(missingWebSocket.calls.bound.length, 0);
+
+  const drifted = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    targetInventorySequence: [
+      [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+      [{ id: 'replacement-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://replacement-blank' }],
+    ],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, drifted.deps),
+    /target-ID drift or ambiguity/u,
+  );
+  assert.equal(drifted.calls.navigate.length, 0);
+  assert.equal(drifted.calls.bound.length, 0);
+
+  const websocketDrift = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    targetInventorySequence: [
+      [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+      [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://replacement-websocket' }],
+    ],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, websocketDrift.deps),
+    /websocket changed before navigation; refusing websocket drift/u,
+  );
+  assert.equal(websocketDrift.calls.targetWebSockets.length, 0);
+  assert.equal(websocketDrift.calls.navigate.length, 0);
+  assert.equal(websocketDrift.calls.bound.length, 0);
+});
+
+test('refuses adopted target with unexpected landing or a competing target after navigation', async () => {
+  const unexpected = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    finalUrl: 'https://example.invalid/chart/',
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, unexpected.deps),
+    /did not reach the exact generic chart or login route/u,
+  );
+  assert.equal(unexpected.calls.bound.length, 0);
+
+  const competing = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    extraTargetsAfterNavigation: [{
+      id: 'login-popup', type: 'page', url: 'https://www.tradingview.com/accounts/signin/',
+    }],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, competing.deps),
+    /landing became ambiguous/u,
+  );
+  assert.equal(competing.calls.bound.length, 0);
 });
 
 test('reuses exactly one generic chart route after an ambiguous prior response', async () => {
