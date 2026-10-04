@@ -4,6 +4,7 @@ import { bindObserverSession, getObserverSession, invalidateObserverSession } fr
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { createBootstrapTargetProof } from './bootstrap-target-proof.js';
+import { CHART_RUNTIME_READINESS_EXPRESSION } from './chart-runtime-readiness.js';
 import {
   closeExactPageTargetAndReconcile,
   normalizePageTargets,
@@ -198,6 +199,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
       || !(isGenericChartUrl(finalMatches[0].url) || isTradingViewLoginTarget(finalMatches[0]))) {
       throw new Error('New target landing became ambiguous; refusing to bind the target.');
     }
+    const pageState = await waitForAuthenticatedBootstrapLanding(finalMatches[0], deps);
     return await bindAndReturn({
       managerBaseUrl,
       profileName,
@@ -206,7 +208,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
       target: finalMatches[0],
       targetCreated: true,
       navigationPerformed: true,
-      pageState: classifyPage(finalMatches[0].url),
+      pageState,
       deps,
     });
   } catch (error) {
@@ -514,6 +516,63 @@ async function waitForBootstrapLanding(cdpUrl, targetId, deps) {
   return null;
 }
 
+async function waitForAuthenticatedBootstrapLanding(target, deps) {
+  if (isTradingViewLoginTarget(target)) return 'login_route';
+  if (!isGenericChartUrl(target?.url)
+    || typeof target.webSocketDebuggerUrl !== 'string'
+    || !target.webSocketDebuggerUrl) {
+    throw new Error('Bootstrap target is not the exact generic chart route.');
+  }
+
+  const connectTarget = deps.connectTarget || ((url) => CDP({ target: url, local: true }));
+  const page = await connectTarget(target.webSocketDebuggerUrl);
+  try {
+    await page.Runtime?.enable?.();
+    let authenticatedGenericReads = 0;
+    for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+      let snapshot = null;
+      try {
+        const evaluation = await page.Runtime.evaluate({
+          expression: CHART_RUNTIME_READINESS_EXPRESSION,
+          returnByValue: true,
+        });
+        snapshot = evaluation?.result?.value;
+      } catch { /* a navigation boundary can interrupt one bounded readiness read */ }
+      if (snapshot && typeof snapshot === 'object') {
+        const runtimeUrl = String(snapshot.current_url || '');
+        if (snapshot.login_state === 'present' || isTradingViewLoginUrl(runtimeUrl)) return 'login_route';
+        if (runtimeUrl && runtimeUrl !== 'about:blank' && !isGenericChartUrl(runtimeUrl)) {
+          throw new Error('TradingView generic chart redirected to an unsupported runtime route; refusing to bind.');
+        }
+        const chartApiReady = snapshot.tradingview_api_present === true
+          && snapshot.chart_widget_collection_present === true
+          && snapshot.active_widget_value_callable === true
+          && snapshot.active_widget_non_null === true;
+        const authenticated = snapshot.account_subject_state === 'ready'
+          && snapshot.login_state === 'absent'
+          && snapshot.disconnected_session_state === 'absent';
+        if (runtimeUrl === GENERIC_CHART_URL
+          && ['interactive', 'complete'].includes(snapshot.document_ready_state)
+          && chartApiReady && authenticated) {
+          authenticatedGenericReads += 1;
+          if (authenticatedGenericReads === 3) return 'generic_chart';
+        } else {
+          authenticatedGenericReads = 0;
+        }
+        if (snapshot.account_subject_state === 'ambiguous'
+          || snapshot.disconnected_session_state === 'present'
+          || snapshot.disconnected_session_state === 'ambiguous') {
+          throw new Error('TradingView generic chart authentication or session state is ambiguous; refusing to bind.');
+        }
+      }
+      if (attempt + 1 < PROFILE_POLL_ATTEMPTS) await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+    }
+    throw new Error('TradingView generic chart did not become authenticated and API-ready before bounded bootstrap polling ended.');
+  } finally {
+    try { await page.close?.(); } catch { /* preserve landing result */ }
+  }
+}
+
 async function fetchJson(url, deps, init = {}) {
   const response = await (deps.fetch || fetch)(url, init);
   if (!response.ok) throw new Error(`CloakBrowser request failed: ${response.status}.`);
@@ -575,9 +634,12 @@ function isGenericChartUrl(value) {
 }
 
 function isTradingViewLoginTarget(target) {
-  if (target?.type !== 'page') return false;
+  return target?.type === 'page' && isTradingViewLoginUrl(target.url);
+}
+
+function isTradingViewLoginUrl(value) {
   try {
-    const url = new URL(String(target.url || ''));
+    const url = new URL(String(value || ''));
     return url.origin === 'https://www.tradingview.com'
       && /^\/(?:accounts\/(?:signin|login)|signin|login)(?:\/|$)/iu.test(url.pathname);
   } catch {

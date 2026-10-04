@@ -23,6 +23,8 @@ function makeHarness({
   targetInventory,
   targetInventorySequence,
   finalUrl = CHART_URL,
+  runtimeUrl = finalUrl,
+  runtimeSnapshots = null,
   createResult = { targetId: 'target-new' },
   extraTargetsAfterCreate = [],
   delayedTargetReads = 0,
@@ -42,6 +44,7 @@ function makeHarness({
   const calls = {
     createTarget: [], closeTargets: [], browserClosed: 0, navigate: [], browserWebSockets: [],
     targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0, targetListsAfterCreate: 0,
+    runtimeReads: 0,
   };
   const deps = {
     managerBaseUrl: BASE_URL,
@@ -108,6 +111,27 @@ function makeHarness({
             return navigateResult;
           },
         },
+        Runtime: {
+          enable: async () => {},
+          evaluate: async () => {
+            const isLogin = runtimeUrl.includes('/accounts/signin/') || runtimeUrl.includes('/accounts/login/');
+            const snapshot = runtimeSnapshots
+              ? runtimeSnapshots[Math.min(calls.runtimeReads, runtimeSnapshots.length - 1)]
+              : {
+                current_url: runtimeUrl,
+                document_ready_state: 'complete',
+                tradingview_api_present: true,
+                chart_widget_collection_present: true,
+                active_widget_value_callable: true,
+                active_widget_non_null: true,
+                account_subject_state: isLogin ? 'missing' : 'ready',
+                disconnected_session_state: 'absent',
+                login_state: isLogin ? 'present' : 'absent',
+              };
+            calls.runtimeReads += 1;
+            return { result: { value: snapshot } };
+          },
+        },
         close: async () => {},
       };
     },
@@ -143,12 +167,52 @@ test('opens one exact-profile blank target and navigates it to generic TradingVi
   assert.deepEqual(harness.calls.createTarget, [{ url: 'about:blank' }]);
   assert.deepEqual(harness.calls.navigate, [CHART_URL]);
   assert.deepEqual(harness.calls.browserWebSockets, [`ws://manager.test/api/profiles/${PROFILE_ID}/cdp`]);
-  assert.deepEqual(harness.calls.targetWebSockets, ['ws://target-new']);
+  assert.deepEqual(harness.calls.targetWebSockets, ['ws://target-new', 'ws://target-new']);
   assert.equal(harness.calls.bound[0].profileId, PROFILE_ID);
   assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
   assert.equal(harness.calls.invalidated, 1);
   assert.deepEqual(harness.calls.closeTargets, []);
   assert.equal(harness.calls.browserClosed, 1);
+});
+
+test('bootstrap waits for exact generic chart runtime and authentication before binding', async () => {
+  const ready = {
+    current_url: CHART_URL,
+    document_ready_state: 'complete',
+    tradingview_api_present: true,
+    chart_widget_collection_present: true,
+    active_widget_value_callable: true,
+    active_widget_non_null: true,
+    account_subject_state: 'ready',
+    disconnected_session_state: 'absent',
+    login_state: 'absent',
+  };
+  const harness = makeHarness({
+    runtimeSnapshots: [
+      { ...ready, document_ready_state: 'loading', tradingview_api_present: false, account_subject_state: 'missing' },
+      ready,
+      ready,
+      ready,
+    ],
+  });
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+  assert.equal(result.page_state, 'generic_chart');
+  assert.equal(harness.calls.runtimeReads, 4);
+  assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
+});
+
+test('bootstrap retires fresh target when generic route redirects to a saved chart', async () => {
+  const harness = makeHarness({ runtimeUrl: 'https://www.tradingview.com/chart/y1mABBJk/' });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => /redirected to an unsupported runtime route/u.test(error.message)
+      && error.cleanupState === 'confirmed',
+  );
+  assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+  assert.deepEqual(harness.state.targets.map(({ id, url }) => ({ id, url })), [
+    { id: 'home', url: 'https://www.tradingview.com/' },
+  ]);
+  assert.deepEqual(harness.calls.bound, []);
 });
 
 test('failed bootstrap retires its exact newly-created target and preserves prior pages', async () => {
@@ -635,7 +699,7 @@ test('creates a new generic target without hydrating an existing saved-chart rou
   assert.equal(result.navigation_performed, true);
   assert.deepEqual(harness.calls.createTarget, [{ url: 'about:blank' }]);
   assert.deepEqual(harness.calls.navigate, [CHART_URL]);
-  assert.deepEqual(harness.calls.targetWebSockets, ['ws://target-new']);
+  assert.deepEqual(harness.calls.targetWebSockets, ['ws://target-new', 'ws://target-new']);
   assert.deepEqual(harness.state.targets[0], existing);
   assert.equal(harness.calls.bound.length, 1);
   assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
