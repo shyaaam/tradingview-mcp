@@ -371,7 +371,12 @@ function normalizePaneStudies(value) {
       const fieldLabel = String(item.field_label || '').trim();
       const rawValue = String(item.raw_value ?? '');
       const key = `${sourceLabel}:${fieldLabel}`;
-      if (!sourceLabel || !fieldLabel || !rawValue || valueKeys.has(key)) throw new Error(`studies[${index}].values is ambiguous.`);
+      let ambiguity = null;
+      if (!sourceLabel) ambiguity = 'EMPTY_SOURCE_LABEL';
+      else if (!fieldLabel) ambiguity = 'EMPTY_FIELD_LABEL';
+      else if (!rawValue) ambiguity = 'EMPTY_RAW_VALUE';
+      else if (valueKeys.has(key)) ambiguity = 'DUPLICATE_SOURCE_FIELD';
+      if (ambiguity) throw new Error(`studies[${index}].values[${valueIndex}] is ambiguous: ${ambiguity}.`);
       valueKeys.add(key);
       return { source_label: sourceLabel, field_label: fieldLabel, raw_value: rawValue };
     });

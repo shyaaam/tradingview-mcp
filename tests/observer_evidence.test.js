@@ -228,6 +228,57 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
   assert.doesNotMatch(expressions[1], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
 });
 
+test('exact pane telemetry reports bounded ambiguity category and indexes while failing closed', async () => {
+  setObserverSession(session);
+  const input = {
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 0,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    count: 1,
+  };
+  const studies = Array.from({ length: 8 }, (_, index) => ({
+    study_id: `study-${index}`,
+    study_name: `Study ${index}`,
+    values: [],
+  }));
+  const invalidValues = [
+    { source_label: '', field_label: 'Projection', raw_value: '1' },
+    { source_label: 'data-window', field_label: '  ', raw_value: '1' },
+    { source_label: 'data-window', field_label: 'Projection', raw_value: '' },
+  ];
+  const cases = [
+    { studyIndex: 7, values: [invalidValues[0]], valueIndex: 0, reason: 'EMPTY_SOURCE_LABEL' },
+    { studyIndex: 7, values: [invalidValues[1]], valueIndex: 0, reason: 'EMPTY_FIELD_LABEL' },
+    { studyIndex: 7, values: [invalidValues[2]], valueIndex: 0, reason: 'EMPTY_RAW_VALUE' },
+    { studyIndex: 7, values: [
+      { source_label: 'data-window', field_label: 'Projection', raw_value: '1' },
+      { source_label: 'data-window', field_label: 'Projection', raw_value: '2' },
+    ], valueIndex: 1, reason: 'DUPLICATE_SOURCE_FIELD' },
+  ];
+
+  for (const testCase of cases) {
+    studies[testCase.studyIndex].values = testCase.values;
+    await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => expression.includes('layout_id')
+        ? { layout_id: '8' }
+        : {
+          pane_index: 0,
+          pane_count: 1,
+          symbol: input.symbol,
+          timeframe: input.timeframe,
+          candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+          studies,
+        },
+    } }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
+  }
+});
+
 test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {
   setObserverSession(session);
   const input = {
