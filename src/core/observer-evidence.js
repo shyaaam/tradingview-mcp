@@ -374,12 +374,12 @@ function normalizePaneStudies(value) {
       let ambiguity = null;
       if (!sourceLabel) ambiguity = 'EMPTY_SOURCE_LABEL';
       else if (!fieldLabel) ambiguity = 'EMPTY_FIELD_LABEL';
-      else if (!rawValue) ambiguity = 'EMPTY_RAW_VALUE';
       else if (valueKeys.has(key)) ambiguity = 'DUPLICATE_SOURCE_FIELD';
       if (ambiguity) throw new Error(`studies[${index}].values[${valueIndex}] is ambiguous: ${ambiguity}.`);
       valueKeys.add(key);
+      if (!rawValue) return null;
       return { source_label: sourceLabel, field_label: fieldLabel, raw_value: rawValue };
-    });
+    }).filter((item) => item !== null);
     return { study_id: studyId, study_name: studyName, values };
   });
 }

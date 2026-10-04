@@ -249,12 +249,10 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
   const invalidValues = [
     { source_label: '', field_label: 'Projection', raw_value: '1' },
     { source_label: 'data-window', field_label: '  ', raw_value: '1' },
-    { source_label: 'data-window', field_label: 'Projection', raw_value: '' },
   ];
   const cases = [
     { studyIndex: 7, values: [invalidValues[0]], valueIndex: 0, reason: 'EMPTY_SOURCE_LABEL' },
     { studyIndex: 7, values: [invalidValues[1]], valueIndex: 0, reason: 'EMPTY_FIELD_LABEL' },
-    { studyIndex: 7, values: [invalidValues[2]], valueIndex: 0, reason: 'EMPTY_RAW_VALUE' },
     { studyIndex: 7, values: [
       { source_label: 'data-window', field_label: 'Projection', raw_value: '1' },
       { source_label: 'data-window', field_label: 'Projection', raw_value: '2' },
@@ -277,6 +275,66 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
         },
     } }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
   }
+});
+
+test('exact pane telemetry omits only labeled empty values and still rejects duplicate identity', async () => {
+  setObserverSession(session);
+  const input = {
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 0,
+    symbol: 'BITSTAMP:BTCUSDT',
+    timeframe: '60',
+    count: 1,
+  };
+  const studies = [{
+    study_id: 'pvp',
+    study_name: 'PvP',
+    values: [
+      { source_label: 'data-window', field_label: 'Optional rail', raw_value: '' },
+      { source_label: 'data-window', field_label: 'Current POC', raw_value: '100' },
+    ],
+  }];
+  const result = await capturePaneTelemetryOhlcv({ ...input, _deps: {
+    listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+    evaluateBound: async (expression) => expression.includes('layout_id')
+      ? { layout_id: '8' }
+      : {
+        pane_index: 0,
+        pane_count: 1,
+        symbol: input.symbol,
+        timeframe: input.timeframe,
+        candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+        studies,
+      },
+    now: () => new Date('2026-07-17T10:00:01.000Z'),
+  } });
+  assert.deepEqual(result.studies, [{
+    study_id: 'pvp',
+    study_name: 'PvP',
+    values: [{ source_label: 'data-window', field_label: 'Current POC', raw_value: '100' }],
+  }]);
+
+  studies[0].values = [
+    { source_label: 'data-window', field_label: 'Optional rail', raw_value: '' },
+    { source_label: 'data-window', field_label: 'Optional rail', raw_value: '101' },
+  ];
+  await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+    listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+    evaluateBound: async (expression) => expression.includes('layout_id')
+      ? { layout_id: '8' }
+      : {
+        pane_index: 0,
+        pane_count: 1,
+        symbol: input.symbol,
+        timeframe: input.timeframe,
+        candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+        studies,
+      },
+  } }), /studies\[0\]\.values\[1\] is ambiguous: DUPLICATE_SOURCE_FIELD/);
 });
 
 test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {
