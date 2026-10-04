@@ -134,6 +134,19 @@ test('missing or mismatched target ID fails before profile access', async () => 
   assert.deepEqual(harness.calls.close, []);
 });
 
+test('absent owned target fails fresh pre-close inventory check', async () => {
+  const harness = makeHarness({ targets: [page(PROTECTED_ID, 'https://www.tradingview.com/chart/protected/')] });
+  await assert.rejects(
+    retireOwnedDiagnosticTarget({
+      profile_name: PROFILE_NAME, target_id: DIAGNOSTIC_ID, bootstrap_result: harness.receipt,
+    }, harness.deps),
+    /not present exactly once in current profile inventory/u,
+  );
+  assert.equal(harness.calls.list, 1);
+  assert.deepEqual(harness.calls.close, []);
+  assert.deepEqual(harness.state.targets, [page(PROTECTED_ID, 'https://www.tradingview.com/chart/protected/')]);
+});
+
 test('competing page inventory change fails before exact close', async () => {
   const harness = makeHarness({ addCompetingPageAfterFirstRead: true });
   await assert.rejects(

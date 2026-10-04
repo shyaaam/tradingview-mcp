@@ -63,11 +63,13 @@ export async function retireOwnedDiagnosticTarget(input = {}, dependencies = {})
     const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
     const inventory = normalizeTargetInventory(await requestJson(targetListUrl));
     const matches = inventory.filter((target) => target.id === requested.targetId);
-    if (matches.length > 1) throw new Error('Owned diagnostic target ID is ambiguous in current profile inventory.');
-    if (matches.length === 1 && matches[0].type !== 'page') {
+    if (matches.length !== 1) {
+      throw new Error('Owned diagnostic target is not present exactly once in current profile inventory.');
+    }
+    if (matches[0].type !== 'page') {
       throw new Error('Owned diagnostic target is no longer a page; refusing retirement.');
     }
-    if (matches.length === 1 && !isTradingViewDiagnosticPage(matches[0].url)) {
+    if (!isTradingViewDiagnosticPage(matches[0].url)) {
       throw new Error('Owned diagnostic target left the approved TradingView chart/login routes.');
     }
     const expectedOtherPageTargets = normalizePageTargets(inventory)
