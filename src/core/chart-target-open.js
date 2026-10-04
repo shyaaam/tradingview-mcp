@@ -1,8 +1,15 @@
 import CDP from 'chrome-remote-interface';
 
-import { bindObserverSession, invalidateObserverSession } from '../connection.js';
+import { bindObserverSession, getObserverSession, invalidateObserverSession } from '../connection.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
+import { createBootstrapTargetProof } from './bootstrap-target-proof.js';
+import {
+  closeExactPageTargetAndReconcile,
+  normalizePageTargets,
+  normalizeTargetInventory,
+  samePageInventory,
+} from './exact-target-close.js';
 
 const GENERIC_CHART_URL = 'https://www.tradingview.com/chart/';
 const PROFILE_POLL_ATTEMPTS = 30;
@@ -145,52 +152,124 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
     : '';
   if (!browserWebSocketUrl) throw new Error('Exact profile CDP browser endpoint is unavailable.');
 
+  const expectedOtherPageTargets = normalizePageTargets(before);
   const browser = await (deps.connectBrowser || ((url) => CDP({ target: url, local: true })))(browserWebSocketUrl);
-  let created;
+  let targetId = null;
+  let creationAttempted = false;
+  let ownedTarget = false;
   try {
-    created = await browser.Target.createTarget({ url: 'about:blank' });
+    creationAttempted = true;
+    const created = await browser.Target.createTarget({ url: 'about:blank' });
+    targetId = requireText(created?.targetId || created?.id, 'created target id');
+    if (before.some((target) => target?.id === targetId)) {
+      throw new Error('New target ID already existed in the exact profile; refusing navigation.');
+    }
+
+    const createdInventory = normalizeTargetInventory(await listTargets(cdpUrl, deps));
+    const createdMatches = createdInventory.filter((entry) => entry.id === targetId);
+    if (createdMatches.length !== 1 || createdMatches[0].type !== 'page'
+      || !samePageInventory(normalizePageTargets(createdInventory), expectedOtherPageTargets, targetId)) {
+      throw new Error('New target ownership is ambiguous in the exact profile inventory.');
+    }
+    ownedTarget = true;
+    const target = createdMatches[0];
+    if (!isBlankUrl(target.url)) {
+      throw new Error('New target was not read back as about:blank; no navigation was attempted.');
+    }
+    if (typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
+      throw new Error('New target has no exact CDP websocket; no navigation was attempted.');
+    }
+
+    const page = await (deps.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+    let navigateResult;
+    try {
+      await page.Page.enable();
+      navigateResult = await page.Page.navigate({ url: GENERIC_CHART_URL });
+    } finally {
+      try { await page.close?.(); } catch { /* preserve navigation result */ }
+    }
+    if (navigateResult?.errorText) {
+      throw new Error('TradingView generic chart navigation failed.');
+    }
+
+    const finalTarget = await waitForBootstrapLanding(cdpUrl, targetId, deps);
+    if (!finalTarget) {
+      throw new Error('New target did not reach the exact generic chart or login route after navigation.');
+    }
+    const finalInventory = normalizeTargetInventory(await listTargets(cdpUrl, deps));
+    const finalMatches = finalInventory.filter((entry) => entry.id === targetId);
+    if (finalMatches.length !== 1 || finalMatches[0].type !== 'page'
+      || !samePageInventory(normalizePageTargets(finalInventory), expectedOtherPageTargets, targetId)
+      || !(isGenericChartUrl(finalMatches[0].url) || isTradingViewLoginTarget(finalMatches[0]))) {
+      throw new Error('New target landing became ambiguous; refusing to bind the target.');
+    }
+    return await bindAndReturn({
+      managerBaseUrl,
+      profileName,
+      profileId,
+      cdpUrl,
+      target: finalMatches[0],
+      targetCreated: true,
+      navigationPerformed: true,
+      pageState: classifyPage(finalMatches[0].url),
+      deps,
+    });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error('Bootstrap failed with an unknown error.');
+    if (ownedTarget) {
+      try {
+        await retireBootstrapCreatedTarget({
+          profileName,
+          profileId,
+          cdpUrl,
+          targetId,
+          expectedOtherPageTargets,
+          browser,
+          deps,
+        });
+        failure.cleanupState = 'confirmed';
+      } catch {
+        const cleanupFailure = codedError(
+          'BOOTSTRAP_CLEANUP_FAILED',
+          'Bootstrap failed after target ownership was established; exact target cleanup was not confirmed.',
+        );
+        cleanupFailure.cleanupState = 'unconfirmed';
+        throw cleanupFailure;
+      }
+    } else if (creationAttempted) {
+      failure.cleanupState = 'not_attempted_ambiguous';
+    }
+    throw failure;
   } finally {
-    try { await browser.close?.(); } catch { /* preserve create result */ }
+    try { await browser.close?.(); } catch { /* preserve bootstrap outcome */ }
   }
+}
 
-  const targetId = requireText(created?.targetId || created?.id, 'created target id');
-  if (before.some((target) => target?.id === targetId)) {
-    throw new Error('New target ID already existed in the exact profile; refusing navigation.');
+async function retireBootstrapCreatedTarget({
+  profileName,
+  profileId,
+  cdpUrl,
+  targetId,
+  expectedOtherPageTargets,
+  browser,
+  deps,
+}) {
+  const currentProfile = await resolveExactRunningProfile(profileName, deps);
+  if (currentProfile.profileId !== profileId || currentProfile.cdpUrl !== cdpUrl) {
+    throw new Error('Exact profile authority changed after bootstrap target creation.');
   }
-  const target = await waitForTarget(cdpUrl, targetId, deps);
-  if (!target || target.type !== 'page' || !isBlankUrl(target.url)) {
-    throw new Error('New blank target was not read back exactly; no navigation was attempted.');
+  const session = (deps.getObserverSession || getObserverSession)();
+  if (session?.profileId === profileId && session?.chartTargetId === targetId) {
+    await (deps.invalidateObserverSession || invalidateObserverSession)();
   }
-  if (typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
-    throw new Error('New target has no exact CDP websocket; no navigation was attempted.');
-  }
-
-  const page = await (deps.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
-  let navigateResult;
-  try {
-    await page.Page.enable();
-    navigateResult = await page.Page.navigate({ url: GENERIC_CHART_URL });
-  } finally {
-    try { await page.close?.(); } catch { /* preserve navigation result */ }
-  }
-  if (navigateResult?.errorText) {
-    throw new Error('TradingView generic chart navigation failed.');
-  }
-
-  const finalTarget = await waitForBootstrapLanding(cdpUrl, targetId, deps);
-  if (!finalTarget) {
-    throw new Error('New target did not reach the exact generic chart or login route after navigation.');
-  }
-  return bindAndReturn({
-    managerBaseUrl,
-    profileName,
-    profileId,
-    cdpUrl,
-    target: finalTarget,
-    targetCreated: true,
-    navigationPerformed: true,
-    pageState: classifyPage(finalTarget.url),
-    deps,
+  await closeExactPageTargetAndReconcile({
+    targetId,
+    expectedOtherPageTargets,
+    readTargets: () => listTargets(cdpUrl, deps),
+    browser,
+    timeoutMs: deps.cleanupTimeoutMs ?? 8_000,
+    now: deps.now,
+    sleep: deps.sleep,
   });
 }
 
@@ -294,6 +373,7 @@ async function bindAndReturn({ managerBaseUrl, profileName, profileId, cdpUrl, t
     target_id: target.id,
     target_url: safeTargetUrl(target.url),
     target_created: targetCreated,
+    ownership_proof: targetCreated ? createBootstrapTargetProof(profileName, profileId, target.id) : null,
     navigation_performed: navigationPerformed,
     page_state: pageState,
     mutations_performed: targetCreated || navigationPerformed,

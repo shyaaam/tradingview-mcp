@@ -24,8 +24,10 @@ function makeHarness({
   targetInventorySequence,
   finalUrl = CHART_URL,
   createResult = { targetId: 'target-new' },
+  extraTargetsAfterCreate = [],
   extraTargetsAfterNavigation = [],
   navigateResult = { frameId: 'main', errorText: null },
+  closeBehavior = 'close',
   browserWebSocketUrl = `ws://manager.test/api/profiles/${profileId}/cdp`,
 } = {}) {
   const state = { targets: targets.map((target) => ({ ...target })) };
@@ -36,7 +38,10 @@ function makeHarness({
     status: profileStatus,
     cdp_url: `/api/profiles/${profileId}/cdp`,
   }];
-  const calls = { createTarget: [], navigate: [], browserWebSockets: [], targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0 };
+  const calls = {
+    createTarget: [], closeTargets: [], browserClosed: 0, navigate: [], browserWebSockets: [],
+    targetWebSockets: [], bound: [], invalidated: 0, targetLists: 0,
+  };
   const deps = {
     managerBaseUrl: BASE_URL,
     fetch: async (url) => {
@@ -68,11 +73,20 @@ function makeHarness({
                 url: 'about:blank',
                 webSocketDebuggerUrl: `ws://${createResult.targetId}`,
               });
+              state.targets.push(...extraTargetsAfterCreate.map((target) => ({ ...target })));
             }
             return createResult;
           },
+          closeTarget: async ({ targetId }) => {
+            calls.closeTargets.push(targetId);
+            if (closeBehavior !== 'persist') {
+              state.targets = state.targets.filter((target) => target.id !== targetId);
+            }
+            if (closeBehavior === 'lost-receipt') throw new Error('CDP close receipt lost.');
+            return { success: true };
+          },
         },
-        close: async () => {},
+        close: async () => { calls.browserClosed += 1; },
       };
     },
     connectTarget: async (webSocketUrl) => {
@@ -92,6 +106,7 @@ function makeHarness({
       };
     },
     sleep: async () => {},
+    getObserverSession: () => null,
     invalidateObserverSession: async () => { calls.invalidated += 1; },
     bindObserverSession: async (binding) => { calls.bound.push(binding); },
   };
@@ -101,8 +116,9 @@ function makeHarness({
 test('opens one exact-profile blank target and navigates it to generic TradingView chart', async () => {
   const harness = makeHarness();
   const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+  const { ownership_proof: ownershipProof, ...resultWithoutProof } = result;
 
-  assert.deepEqual(result, {
+  assert.deepEqual(resultWithoutProof, {
     success: true,
     open_version: 'bootstrap-chart-target-v1',
     profile_name: PROFILE_NAME,
@@ -114,6 +130,7 @@ test('opens one exact-profile blank target and navigates it to generic TradingVi
     page_state: 'generic_chart',
     mutations_performed: true,
   });
+  assert.match(ownershipProof, /^[0-9a-f]{64}$/u);
   z.object(observerToolDefinitions.tv_observer_open_bootstrap_chart_target_v1.inputSchema)
     .parse({ profile_name: PROFILE_NAME });
   z.object(observerToolDefinitions.tv_observer_open_bootstrap_chart_target_v1.outputSchema).parse(result);
@@ -124,6 +141,50 @@ test('opens one exact-profile blank target and navigates it to generic TradingVi
   assert.equal(harness.calls.bound[0].profileId, PROFILE_ID);
   assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
   assert.equal(harness.calls.invalidated, 1);
+  assert.deepEqual(harness.calls.closeTargets, []);
+  assert.equal(harness.calls.browserClosed, 1);
+});
+
+test('failed bootstrap retires its exact newly-created target and preserves prior pages', async () => {
+  const harness = makeHarness({ navigateResult: { errorText: 'navigation rejected' } });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => error.message === 'TradingView generic chart navigation failed.'
+      && error.cleanupState === 'confirmed',
+  );
+  assert.deepEqual(harness.calls.closeTargets, ['target-new']);
+  assert.deepEqual(harness.state.targets.map(({ id, url }) => ({ id, url })), [
+    { id: 'home', url: 'https://www.tradingview.com/' },
+  ]);
+  assert.deepEqual(harness.calls.bound, []);
+});
+
+test('bootstrap cleanup fails closed when another page appears before retirement', async () => {
+  const harness = makeHarness({
+    navigateResult: { errorText: 'navigation rejected' },
+    extraTargetsAfterNavigation: [{ id: 'competing', type: 'page', url: 'https://example.invalid/' }],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => error.failureCode === 'BOOTSTRAP_CLEANUP_FAILED'
+      && error.cleanupState === 'unconfirmed',
+  );
+  assert.deepEqual(harness.calls.closeTargets, []);
+  assert.deepEqual(harness.state.targets.map(({ id }) => id).sort(), ['competing', 'home', 'target-new']);
+});
+
+test('bootstrap does not close a target when ownership readback is ambiguous', async () => {
+  const harness = makeHarness({
+    extraTargetsAfterCreate: [{ id: 'competing', type: 'page', url: 'https://example.invalid/' }],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
+    (error) => /ownership is ambiguous/u.test(error.message)
+      && error.cleanupState === 'not_attempted_ambiguous',
+  );
+  assert.deepEqual(harness.calls.closeTargets, []);
+  assert.deepEqual(harness.calls.navigate, []);
+  assert.deepEqual(harness.calls.bound, []);
 });
 
 test('adopts and navigates the sole exact about:blank target without creating another target', async () => {
@@ -140,6 +201,7 @@ test('adopts and navigates the sole exact about:blank target without creating an
     target_id: 'existing-blank',
     target_url: CHART_URL,
     target_created: false,
+    ownership_proof: null,
     navigation_performed: true,
     page_state: 'generic_chart',
     mutations_performed: true,
@@ -616,7 +678,11 @@ test('rejects a profile endpoint redirected to another profile', async () => {
 
 test('unknown create response leaves no retry or second target creation', async () => {
   const ambiguous = makeHarness({ createResult: {} });
-  await assert.rejects(openBootstrapChartTarget({ profile_name: PROFILE_NAME }, ambiguous.deps), /created target id is required/u);
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, ambiguous.deps),
+    (error) => /created target id is required/u.test(error.message)
+      && error.cleanupState === 'not_attempted_ambiguous',
+  );
   assert.equal(ambiguous.calls.createTarget.length, 1);
   assert.equal(ambiguous.calls.navigate.length, 0);
 

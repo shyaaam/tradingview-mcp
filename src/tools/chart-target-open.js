@@ -44,7 +44,14 @@ export function registerChartTargetOpenTool(server) {
     'Resolve an exact running CloakBrowser profile name and open one generic TradingView chart for fresh-account bootstrap',
     async (input) => {
       try { return jsonResult(await openBootstrapChartTarget(input)); }
-      catch (error) { return jsonResult({ success: false, error: error.message }, true); }
+      catch (error) {
+        return jsonResult({
+          success: false,
+          error: error.message,
+          failure_code: error.failureCode || 'BOOTSTRAP_FAILED',
+          ...(error.cleanupState ? { cleanup_state: error.cleanupState } : {}),
+        }, true);
+      }
     },
   );
 }

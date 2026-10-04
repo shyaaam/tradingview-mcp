@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto';
-import WebSocket from 'ws';
 
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { resolveExactRunningProfile } from './chart-target-open.js';
+import {
+  closeExactPageTargetAndReconcile,
+  connectBoundedBrowser,
+  fetchBoundedJson,
+  normalizePageTargets as pageTargets,
+  requireProfileBrowserWebSocketUrl,
+  samePageInventory,
+  targetIdentity,
+} from './exact-target-close.js';
 import { ACCOUNT_LAYOUT_PROBE, savedChartLayoutMarker } from './saved-chart-authority.js';
 
 const CHART_PAGE = /^https:\/\/www\.tradingview\.com\/chart\//u;
@@ -12,8 +20,6 @@ const AUTHORITY_SCHEMA_VERSION = 'v5-capture-slot-authority-v3';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 100;
 const MAX_RETIREMENT_READ_BYTES = 128 * 1024;
-const MAX_CDP_TARGET_ID_CHARS = 256;
-const MAX_CDP_TARGET_URL_CHARS = 4_096;
 
 class TargetDisappearedDuringIdentityRead extends Error {
   constructor(targetId, cause) {
@@ -34,7 +40,7 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   const now = dependencies.now || (() => performance.now());
   const deadline = { at: now() + timeoutMs, now, timeoutMs };
   const fetchImpl = dependencies.fetch || fetch;
-  const requestJson = (url) => fetchJson(url, fetchImpl, deadline);
+  const requestJson = (url) => fetchBoundedJson(url, fetchImpl, deadline);
   const managerBaseUrl = dependencies.managerBaseUrl
     || await withDeadline(() => resolveCloakManagerBaseUrl({ fetchJson: requestJson }), deadline);
   if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for saved-chart retirement.');
@@ -68,110 +74,6 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   } finally {
     try { await browser.close?.(); } catch { /* preserve retirement outcome */ }
   }
-}
-
-function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
-  if (maxPayload !== MAX_RETIREMENT_READ_BYTES || !Number.isSafeInteger(handshakeTimeoutMs)
-    || handshakeTimeoutMs <= 0) {
-    throw new Error('Browser CDP transport bounds are invalid.');
-  }
-  const socket = new WebSocket(url, {
-    maxPayload,
-    handshakeTimeout: handshakeTimeoutMs,
-    perMessageDeflate: false,
-  });
-  const pending = new Map();
-  let nextId = 1;
-  let opened = false;
-  let rejectOpen;
-  const connected = new Promise((resolve, reject) => {
-    rejectOpen = reject;
-    socket.once('open', () => {
-      opened = true;
-      resolve();
-    });
-  });
-  const failPending = (error) => {
-    for (const request of pending.values()) request.reject(error);
-    pending.clear();
-  };
-  socket.on('error', (error) => {
-    if (!opened) rejectOpen(handshakeError(error, handshakeTimeoutMs));
-    failPending(transportError(error));
-  });
-  socket.on('close', () => {
-    const error = new Error('Browser CDP WebSocket closed.');
-    if (!opened) rejectOpen(error);
-    failPending(error);
-  });
-  socket.on('message', (data) => {
-    const bytes = Buffer.isBuffer(data) ? data.byteLength : Buffer.byteLength(String(data));
-    if (bytes > maxPayload) {
-      socket.terminate();
-      failPending(new Error(`Browser CDP frame exceeds bounded ${maxPayload}-byte transport limit.`));
-      return;
-    }
-    let message;
-    try {
-      message = JSON.parse(data.toString('utf8'));
-    } catch {
-      socket.terminate();
-      failPending(new Error('Browser CDP returned malformed JSON.'));
-      return;
-    }
-    if (!Number.isSafeInteger(message?.id)) return;
-    const request = pending.get(message.id);
-    if (!request) return;
-    pending.delete(message.id);
-    if (message.error) request.reject(new Error(`Browser CDP command failed: ${String(message.error.message || 'unknown error')}`));
-    else request.resolve(message.result || {});
-  });
-
-  const send = (method, params = {}, sessionId) => {
-    if (socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Browser CDP WebSocket is not open.'));
-    }
-    const id = nextId++;
-    const message = { id, method, params };
-    if (sessionId) message.sessionId = sessionId;
-    return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      socket.send(JSON.stringify(message), (error) => {
-        if (!error) return;
-        pending.delete(id);
-        reject(transportError(error));
-      });
-    });
-  };
-  const browser = {
-    Target: {
-      attachToTarget: (params) => send('Target.attachToTarget', params),
-      detachFromTarget: (params) => send('Target.detachFromTarget', params),
-      closeTarget: (params) => send('Target.closeTarget', params),
-    },
-    send,
-    close: () => {
-      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
-    },
-  };
-  return connected.then(() => browser, (error) => {
-    socket.terminate();
-    throw error;
-  });
-}
-
-function handshakeError(error, timeoutMs) {
-  if (/handshake.*timed out/iu.test(String(error?.message || ''))) {
-    return new Error(`Browser CDP WebSocket handshake exceeded bounded ${timeoutMs}ms deadline.`);
-  }
-  return error;
-}
-
-function transportError(error) {
-  if (/max payload size exceeded/iu.test(String(error?.message || ''))) {
-    return new Error(`Browser CDP frame exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte transport limit.`);
-  }
-  return error;
 }
 
 async function retireFromProfile({ expected, dependencies, deadline, browser, requestJson, cdpUrl }) {
@@ -212,38 +114,22 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     || !sameChartViews(beforeViews, preCloseViews)) {
     throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
   }
-  // A lost close receipt does not prove the target remains open. Keep part of
-  // the existing deadline for a fresh exact inventory after the single close.
-  const acknowledgementMs = Math.min(1_000, Math.max(1, Math.floor(remainingMs(deadline) / 2)));
-  const closeDeadline = { ...deadline, at: Math.min(deadline.at, deadline.now() + acknowledgementMs), timeoutMs: acknowledgementMs };
-  let closeAcknowledged = false;
-  try {
-    const closeResult = await withDeadline(
-      () => browser.Target.closeTarget({ targetId: target.id }), closeDeadline,
-    );
-    closeAcknowledged = closeResult?.success === true;
-  } catch { /* fresh inventory, not the receipt, decides convergence */ }
-
   const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  let after = before;
-  let afterViews = beforeViews;
-  while (remainingMs(deadline) > 0) {
-    const afterSnapshot = await readProfileSnapshot({
-      targetListUrl, expected, browser, dependencies, deadline, requestJson,
-      skipTargetId: target.id,
-    });
-    after = afterSnapshot.targets;
-    afterViews = afterSnapshot.views;
-    if (!after.some((entry) => entry.id === target.id)
-      && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
-    if (!closeAcknowledged) {
-      throw new Error('Exact saved-layout target remained open after unacknowledged close.');
-    }
-    await withDeadline(
-      () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
-      deadline,
-    );
-  }
+  const closure = await closeExactPageTargetAndReconcile({
+    targetId: target.id,
+    expectedOtherPageTargets: preClose.filter((entry) => entry.id !== target.id),
+    readTargets: () => requestJson(targetListUrl),
+    browser,
+    timeoutMs: Math.max(1, Math.floor(remainingMs(deadline))),
+    now: deadline.now,
+    sleep,
+  });
+  const afterSnapshot = await readProfileSnapshot({
+    targetListUrl, expected, browser, dependencies, deadline, requestJson,
+    skipTargetId: target.id,
+  });
+  const after = afterSnapshot.targets;
+  const afterViews = afterSnapshot.views;
   if (after.some((entry) => entry.id === target.id)
     || afterViews.some((view) => isExactSavedLayout(view, expected))) {
     throw new Error('Exact saved-layout target remained open after bounded close.');
@@ -251,6 +137,10 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   if (!samePageInventory(before, after, target.id)
     || !sameChartViews(preservedBefore, afterViews)) {
     throw new Error('Saved-layout retirement changed another TradingView chart target.');
+  }
+  if (closure.action === 'already-closed') {
+    return result(expected, null, 'already-closed', chartTargets(after).length, false,
+      beforeIdentity.accountSubjectSha256);
   }
   return result(expected, target.id, 'closed', chartTargets(after).length, true,
     beforeIdentity.accountSubjectSha256);
@@ -335,22 +225,6 @@ function result(expected, targetId, action, remainingChartTargets, mutationsPerf
     action,
     remaining_chart_targets: remainingChartTargets,
     mutations_performed: mutationsPerformed,
-  });
-}
-
-function pageTargets(value) {
-  if (!Array.isArray(value)) throw new Error('CDP target listing is malformed.');
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error('CDP target listing contains a malformed entry.');
-    }
-    if (entry.type !== 'page') return [];
-    if (typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > MAX_CDP_TARGET_ID_CHARS
-      || /[\u0000-\u001f\u007f]/u.test(entry.id)
-      || typeof entry.url !== 'string' || entry.url.length === 0 || entry.url.length > MAX_CDP_TARGET_URL_CHARS) {
-      throw new Error('CDP page target identity is malformed.');
-    }
-    return [entry];
   });
 }
 
@@ -479,106 +353,6 @@ function sameChartViews(left, right) {
     layoutInventorySha256: view.layoutInventorySha256,
   })).sort((a, b) => a.target.id.localeCompare(b.target.id));
   return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
-}
-
-function samePageInventory(left, right, excludedTargetId = null) {
-  const identity = (targets) => targets.filter((target) => target.id !== excludedTargetId)
-    .map(targetIdentity).sort(compareIdentity);
-  return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
-}
-
-function targetIdentity(target) {
-  return { id: target.id, type: target.type, url: target.url };
-}
-
-function requireProfileBrowserWebSocketUrl(value, cdpUrl, profileId) {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error('Browser CDP WebSocket endpoint is unavailable.');
-  }
-  let endpoint;
-  let profileEndpoint;
-  try {
-    endpoint = new URL(value);
-    profileEndpoint = new URL(cdpUrl);
-  } catch {
-    throw new Error('Browser CDP WebSocket endpoint is malformed.');
-  }
-  if (!isExactProfileCdpPath(profileEndpoint.pathname, profileId)
-    || profileEndpoint.username || profileEndpoint.password || profileEndpoint.search || profileEndpoint.hash) {
-    throw new Error('Manager CDP endpoint is outside exact Manager profile authority.');
-  }
-  const expectedProtocol = profileEndpoint.protocol === 'https:' ? 'wss:' : 'ws:';
-  const expectedPath = profileEndpoint.pathname.replace(/\/+$/u, '') || '/';
-  if (endpoint.protocol !== expectedProtocol || endpoint.host !== profileEndpoint.host
-    || endpoint.pathname.replace(/\/+$/u, '') !== expectedPath
-    || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
-    throw new Error('Browser CDP WebSocket endpoint is outside exact Manager profile authority.');
-  }
-  return endpoint.toString();
-}
-
-function isExactProfileCdpPath(pathname, profileId) {
-  let segments;
-  try {
-    segments = pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
-  } catch {
-    return false;
-  }
-  const profilesIndex = segments.lastIndexOf('profiles');
-  return profilesIndex >= 0
-    && segments[profilesIndex + 1] === profileId
-    && segments[profilesIndex + 2] === 'cdp'
-    && profilesIndex + 3 === segments.length;
-}
-
-function compareIdentity(left, right) {
-  return left.id.localeCompare(right.id) || left.url.localeCompare(right.url);
-}
-
-async function fetchJson(url, fetchImpl, deadline) {
-  const controller = new AbortController();
-  return withDeadline(async () => {
-    const response = await fetchImpl(url, { signal: controller.signal });
-    if (!response?.ok) {
-      throw new Error(`request failed: ${response?.status || 'unknown'} ${response?.statusText || ''}`.trim());
-    }
-    const text = await readBoundedResponseText(response, controller);
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error('Manager/CDP response is not valid bounded JSON.');
-    }
-  }, deadline, () => controller.abort());
-}
-
-async function readBoundedResponseText(response, controller) {
-  const contentLength = response.headers?.get?.('content-length');
-  if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > MAX_RETIREMENT_READ_BYTES) {
-    controller.abort();
-    throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
-  }
-  if (response.body === null) return '';
-  const reader = response.body?.getReader?.();
-  if (!reader) throw new Error('Manager/CDP response body stream is unavailable.');
-
-  const chunks = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const item = await reader.read();
-      if (item.done) break;
-      totalBytes += item.value.byteLength;
-      if (totalBytes > MAX_RETIREMENT_READ_BYTES) {
-        controller.abort();
-        await reader.cancel().catch(() => {});
-        throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
-      }
-      chunks.push(Buffer.from(item.value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, totalBytes).toString('utf8');
 }
 
 function remainingMs(deadline) {
