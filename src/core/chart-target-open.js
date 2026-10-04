@@ -109,6 +109,7 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
       profileId,
       cdpUrl,
       targetId: blankTargets[0].id,
+      targetWebSocketDebuggerUrl: blankTargets[0].webSocketDebuggerUrl,
       deps,
     });
   }
@@ -193,7 +194,19 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   });
 }
 
-async function navigateExistingBlankTarget({ managerBaseUrl, profileName, profileId, cdpUrl, targetId, deps }) {
+async function navigateExistingBlankTarget({
+  managerBaseUrl,
+  profileName,
+  profileId,
+  cdpUrl,
+  targetId,
+  targetWebSocketDebuggerUrl,
+  deps,
+}) {
+  if (typeof targetWebSocketDebuggerUrl !== 'string' || !targetWebSocketDebuggerUrl) {
+    throw new Error('Exact existing blank target has no CDP websocket; no navigation was attempted.');
+  }
+
   const currentTargets = await listTargets(cdpUrl, deps);
   const currentPages = currentTargets.filter((target) => target?.type === 'page');
   const target = currentPages.find((entry) => entry.id === targetId);
@@ -203,6 +216,9 @@ async function navigateExistingBlankTarget({ managerBaseUrl, profileName, profil
   }
   if (typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
     throw new Error('Exact existing blank target has no CDP websocket; no navigation was attempted.');
+  }
+  if (target.webSocketDebuggerUrl !== targetWebSocketDebuggerUrl) {
+    throw new Error('Exact existing blank target CDP websocket changed before navigation; refusing websocket drift.');
   }
 
   const page = await (deps.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);

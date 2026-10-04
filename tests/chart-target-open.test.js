@@ -230,7 +230,7 @@ test('refuses blank-target adoption when page inventory is ambiguous', async () 
   }
 });
 
-test('refuses adopted blank target with missing websocket or target-ID drift', async () => {
+test('refuses adopted blank target with missing websocket, target-ID drift, or websocket drift', async () => {
   const missingWebSocket = makeHarness({ targets: [{
     id: 'existing-blank', type: 'page', url: 'about:blank',
   }] });
@@ -254,6 +254,21 @@ test('refuses adopted blank target with missing websocket or target-ID drift', a
   );
   assert.equal(drifted.calls.navigate.length, 0);
   assert.equal(drifted.calls.bound.length, 0);
+
+  const websocketDrift = makeHarness({
+    targets: [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+    targetInventorySequence: [
+      [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://existing-blank' }],
+      [{ id: 'existing-blank', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://replacement-websocket' }],
+    ],
+  });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, websocketDrift.deps),
+    /websocket changed before navigation; refusing websocket drift/u,
+  );
+  assert.equal(websocketDrift.calls.targetWebSockets.length, 0);
+  assert.equal(websocketDrift.calls.navigate.length, 0);
+  assert.equal(websocketDrift.calls.bound.length, 0);
 });
 
 test('refuses adopted target with unexpected landing or a competing target after navigation', async () => {
