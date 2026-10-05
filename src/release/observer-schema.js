@@ -582,6 +582,20 @@ export const observerToolDefinitions = Object.freeze({
       chart_target_url: z.string().nullable(),
     },
   },
+  tv_observer_start_profile_by_name_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact stable CloakBrowser profile name; no UUID or profile selection is accepted.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      profile_name: z.string().min(1).max(160),
+      status: z.literal('running'),
+      launch_performed: z.boolean(),
+      cdp_ready: z.literal(true),
+    },
+  },
   tv_observer_attach_existing_read_only: {
     classification: 'read_only',
     inputSchema: {
@@ -663,25 +677,149 @@ export const observerToolDefinitions = Object.freeze({
     },
     outputSchema: chartTargetHydrationV2Output,
   },
-  tv_observer_retire_saved_chart_v1: {
+  tv_observer_open_bootstrap_chart_target_v1: {
     classification: 'bootstrap_mutation',
     inputSchema: {
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact CloakBrowser profile name; resolves its current Manager UUID on every call.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      open_version: z.literal('bootstrap-chart-target-v1'),
+      profile_name: z.string().min(1).max(160),
+      profile_id: z.string().min(1).max(160)
+        .describe('Current ephemeral Manager UUID resolved by exact profile name; never durable authority.'),
+      target_id: z.string().min(1).max(256),
+      target_url: z.string().url(),
+      target_created: z.boolean(),
+      navigation_performed: z.boolean(),
+      page_state: z.enum(['generic_chart', 'login_route']),
+      mutations_performed: z.boolean(),
+    },
+  },
+  tv_observer_resolve_profile_name_v1: {
+    classification: 'read_only',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160)
+        .describe('Exact CloakBrowser profile name; resolves the current Manager UUID for this call only.'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      profile_name: z.string().min(1).max(160),
+      profile_id: z.string().min(1).max(160)
+        .describe('Ephemeral current Manager UUID; callers must not persist it.'),
+      status: z.string().min(1).max(80),
+    },
+  },
+  tv_observer_saved_chart_authority_preflight_v1: {
+    classification: 'read_only',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
+      expected_profile_id: z.string().min(1).max(160).optional()
+        .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      preflight_version: z.literal('saved-chart-authority-preflight-v1'),
+      profile_name: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      authenticated: z.boolean(),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      action: z.enum(['not_found', 'found', 'multiple']),
+      match_count: z.number().int().nonnegative(),
+      saved_layout_id: z.string().min(1).nullable(),
+      layout_count: z.number().int().nonnegative().nullable(),
+      layout_inventory_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      chart_target_count: z.number().int().nonnegative().nullable(),
+      can_create: z.boolean(),
+      create_preflight_failure_code: z.string().regex(/^[A-Z0-9_]{1,64}$/).nullable(),
+      create_marker_length: z.number().int().positive(),
+      create_input_count: z.number().int().nonnegative().nullable(),
+      create_input_max_length: z.number().int().nullable(),
+      failure_code: z.string().regex(/^[A-Z0-9_]{1,64}$/).nullable(),
+    },
+  },
+  tv_observer_ensure_saved_chart_authority_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
+      expected_profile_id: z.string().min(1).max(160).optional()
+        .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      expected_account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      create_if_absent: z.boolean(),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      authority_ensure_version: z.literal('saved-chart-authority-ensure-v1'),
+      profile_name: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      create_if_absent: z.boolean(),
+      action: z.enum(['unknown', 'multiple', 'not_found', 'created', 'reused']),
+      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      match_count: z.number().int().nonnegative(),
+      saved_layout_id: z.string().min(1).nullable(),
+      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/).nullable(),
+      canonical_chart_url: z.string().url().nullable(),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+      mutations_performed: z.boolean(),
+      temporary_target_closed: z.boolean(),
+      failure_code: z.string().regex(/^[A-Z0-9_]{1,64}$/).nullable(),
+    },
+  },
+  tv_observer_hydrate_saved_layout_v1: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      saved_layout_id: z.string().min(1).max(160),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      hydration_version: z.literal('saved-layout-hydration-v1'),
+      profile_name: z.string().min(1).max(160),
       profile_id: z.string().min(1).max(160),
+      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
+      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      saved_layout_id: z.string().min(1).max(160),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      target_id: z.string().min(1).max(256),
+      target_url: z.string().url(),
+      runtime_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      target_created: z.literal(true),
+      navigation_performed: z.literal(true),
+      state: z.literal('hydrated'),
+      mutations_performed: z.literal(true),
+    },
+  },
+  tv_observer_retire_saved_chart_v2: {
+    classification: 'bootstrap_mutation',
+    inputSchema: {
+      profile_name: z.string().min(1).max(160),
       capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
       layout_code: z.literal('s'),
       authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
       authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
-      chart_url: z.string().url(),
-      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      saved_layout_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       allowed_origins: z.array(z.literal('https://www.tradingview.com')).length(1),
     },
     outputSchema: {
       success: z.literal(true),
-      retirement_version: z.literal('saved-chart-retirement-v1'),
+      retirement_version: z.literal('saved-chart-retirement-v2'),
       authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
       authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
-      profile_id: z.string().min(1).max(160),
-      saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      profile_name: z.string().min(1).max(160),
+      saved_layout_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
+      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
       chart_target_id: z.string().min(1).max(256).nullable(),
       action: z.enum(['closed', 'already-closed']),
       remaining_chart_targets: z.number().int().nonnegative(),
@@ -1044,6 +1182,43 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: emptyInput,
     outputSchema: chartStateOutput,
   },
+  symbol_info: {
+    classification: 'read_only',
+    inputSchema: emptyInput,
+    outputSchema: {
+      success: z.literal(true),
+      symbol: z.string().min(1).max(160),
+      full_name: z.string().min(1).max(256),
+      exchange: z.string().min(1).max(128),
+      description: z.string().max(512),
+      type: z.string().min(1).max(64),
+      pro_name: z.string().min(1).max(256),
+      typespecs: z.array(z.string().min(1).max(128)).max(32).nullable().optional()
+        .describe('Raw TradingView tags; missing, null, or ambiguous values do not prove spot.'),
+      resolution: z.string().min(1).max(32),
+      chart_type: z.number(),
+    },
+  },
+  symbol_search: {
+    classification: 'read_only',
+    inputSchema: {
+      query: z.string().max(512),
+      type: z.string().optional(),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      query: z.string().max(512),
+      source: z.literal('rest_api'),
+      results: z.array(z.object({
+        symbol: z.string().min(1).max(160),
+        description: z.string().max(512),
+        exchange: z.string().max(128),
+        type: z.string().max(64),
+        full_name: z.string().min(1).max(256),
+      })).max(15),
+      count: z.number().int().min(0).max(15),
+    },
+  },
   chart_save_existing_capability_probe: {
     classification: 'read_only',
     inputSchema: {
@@ -1249,7 +1424,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_retire_saved_chart_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_hydrate_saved_layout_v1' && name !== 'tv_observer_retire_saved_chart_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);

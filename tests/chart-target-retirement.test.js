@@ -1,87 +1,180 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { createServer } from 'node:http';
 import test from 'node:test';
+import WebSocket from 'ws';
 
 import { retireSavedChartTarget } from '../src/core/chart-target-retirement.js';
+import { savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
-const INPUT = Object.freeze(makeAuthority());
+const ACCOUNT_HASH = createHash('sha256').update('observer-account', 'utf8').digest('hex');
+const RECONCILIATION_KEY = 'a'.repeat(64);
+const AUTHORITY = Object.freeze(makeAuthority());
+const MARKER = savedChartLayoutMarker(AUTHORITY.capture_slot_id, AUTHORITY.reconciliation_key);
+const OTHER_MARKER = savedChartLayoutMarker('v5-capture-slot-a', 'b'.repeat(64));
+const LAYOUTS = Object.freeze([
+  { layout_id: '206000778', name: OTHER_MARKER },
+  { layout_id: '206146606', name: MARKER },
+]);
+const ROUTE_UID = 'NCJIp2ky';
+const ROUTE = `https://www.tradingview.com/chart/${ROUTE_UID}/`;
+const INPUT = AUTHORITY;
 
 function fixture(initialTargets = [
-  { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-  { id: 'target-b', type: 'page', url: 'https://www.tradingview.com/chart/chart-b/' },
+  { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+  { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+  { id: 'anchor', type: 'page', url: 'about:blank' },
 ]) {
   let targets = initialTargets.map((target) => ({ ...target }));
   const calls = {
-    close: [], fetch: [], webSocketUrls: [], socketCloseCount: 0, closeAcknowledged: true,
-    profileCdpUrl: 'http://manager.test/profiles/profile-a/cdp',
-    browserWebSocketUrl: 'ws://manager.test/profiles/profile-a/cdp',
-    targetUrlAfterClose: null,
+    close: [], fetch: [], inspectedTargetIds: [], attachedTargetIds: [], detachedSessionIds: [],
+    browserWebSocketUrls: [], browserCloseCount: 0,
+    closeAcknowledged: true,
+    loseCloseResponse: false,
+    missingTargetOnAttach: null,
+    keepMissingTargetListed: false,
+    jsonListCallCount: 0,
+    removeTargetOnJsonListCall: null,
+    closeRemovesTarget: true,
+    hangClosedTargetIdentity: false,
+    addPageOnJsonListCall: null,
+    profileCdpUrl: 'http://manager.test/profiles/current-profile/cdp',
+    browserWebSocketUrl: 'ws://manager.test/profiles/current-profile/cdp',
   };
   const fetch = async (url) => {
     calls.fetch.push(url);
     const parsed = new URL(url);
-    if (parsed.pathname === '/profiles') {
-      return ok([{ profile_id: 'profile-a', status: 'running', cdp_url: calls.profileCdpUrl }]);
+    if (parsed.pathname.endsWith('/json/version')) return ok({ webSocketDebuggerUrl: calls.browserWebSocketUrl });
+    if (parsed.pathname.endsWith('/json/list')) {
+      calls.jsonListCallCount += 1;
+      if (calls.jsonListCallCount === calls.removeTargetOnJsonListCall) {
+        targets = targets.filter((target) => target.id !== 'target-b');
+      }
+      if (calls.jsonListCallCount === calls.addPageOnJsonListCall) {
+        targets.push({ id: 'unexpected-page', type: 'page', url: 'about:blank' });
+      }
+      return ok(targets.map((target) => ({ ...target })));
     }
-    if (parsed.pathname.endsWith('/json/version')) {
-      return ok({ webSocketDebuggerUrl: calls.browserWebSocketUrl });
-    }
-    if (parsed.pathname.endsWith('/json/list')) return ok(targets.map((target) => ({ ...target })));
     throw new Error(`Unexpected fixture URL: ${parsed.pathname}`);
   };
-  const createWebSocket = (url) => {
-    calls.webSocketUrls.push(url);
-    const socket = new EventTarget();
-    socket.send = (raw) => {
-      const request = JSON.parse(raw);
-      assert.equal(request.method, 'Target.closeTarget');
-      calls.close.push(request.params.targetId);
-      if (calls.closeAcknowledged) {
-        if (calls.targetUrlAfterClose !== null) {
-          targets = targets.map((target) => target.id === request.params.targetId
-            ? { ...target, url: calls.targetUrlAfterClose }
-            : target);
-        } else {
-          targets = targets.filter((target) => target.id !== request.params.targetId);
+  const targetBySessionId = new Map();
+  const browser = {
+    Target: {
+      attachToTarget: async ({ targetId, flatten }) => {
+        assert.equal(flatten, true);
+        calls.attachedTargetIds.push(targetId);
+        if (calls.missingTargetOnAttach === targetId) {
+          if (!calls.keepMissingTargetListed) {
+            targets = targets.filter((target) => target.id !== targetId);
+            calls.missingTargetOnAttach = null;
+          }
+          throw new Error('Browser CDP command failed: No target with given id found');
         }
+        assert.ok(targets.some((target) => target.id === targetId));
+        const sessionId = `session-${targetId}`;
+        targetBySessionId.set(sessionId, targetId);
+        return { sessionId };
+      },
+      detachFromTarget: async ({ sessionId }) => {
+        calls.detachedSessionIds.push(sessionId);
+        targetBySessionId.delete(sessionId);
+        return {};
+      },
+      closeTarget: async ({ targetId }) => {
+        calls.close.push(targetId);
+        if (calls.closeAcknowledged && calls.closeRemovesTarget) {
+          targets = targets.filter((target) => target.id !== targetId);
+        }
+        if (calls.loseCloseResponse) return await new Promise(() => {});
+        return { success: calls.closeAcknowledged };
+      },
+    },
+    send: async (method, _params, sessionId) => {
+      assert.equal(method, 'Runtime.evaluate');
+      const targetId = targetBySessionId.get(sessionId);
+      const target = targets.find((entry) => entry.id === targetId);
+      assert.ok(target);
+      calls.inspectedTargetIds.push(target.id);
+      if (calls.hangClosedTargetIdentity && target.id === 'target-b' && calls.close.length > 0) {
+        return await new Promise(() => {});
       }
-      queueMicrotask(() => socket.dispatchEvent(new MessageEvent('message', {
-        data: JSON.stringify({ id: request.id, result: { success: calls.closeAcknowledged } }),
-      })));
-    };
-    socket.close = () => {
-      calls.socketCloseCount += 1;
-      socket.dispatchEvent(new Event('close'));
-    };
-    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
-    return socket;
+      const isA = target.id === 'target-a';
+      return { result: { type: 'object', value: {
+        current_url: target.url,
+        account_subject_sha256: ACCOUNT_HASH,
+        active_saved_layout_id: isA ? '206000778' : '206146606',
+        active_saved_layout_name: isA ? OTHER_MARKER : MARKER,
+        layouts: LAYOUTS,
+      } } };
+    },
+    close: async () => { calls.browserCloseCount += 1; },
   };
-  return { fetch, createWebSocket, calls };
+  return {
+    fetch,
+    connectBrowser: async (url) => {
+      calls.browserWebSocketUrls.push(url);
+      return browser;
+    },
+    calls,
+    resolveExactRunningProfile: async (name) => {
+      assert.equal(name, 'tv-observer-1');
+      return {
+        profileId: 'current-profile',
+        cdpUrl: calls.profileCdpUrl,
+      };
+    },
+  };
 }
 
 function ok(value) {
-  return new Response(typeof value === 'string' ? value : JSON.stringify(value), { status: 200 });
+  return new Response(JSON.stringify(value), { status: 200 });
+}
+
+function setLocalCdpEndpoint(deps, port) {
+  const endpoint = `127.0.0.1:${port}/profiles/current-profile/cdp`;
+  deps.calls.profileCdpUrl = `http://${endpoint}`;
+  deps.calls.browserWebSocketUrl = `ws://${endpoint}`;
+  delete deps.connectBrowser;
+}
+
+function listen(server) {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port));
+  });
+}
+
+function once(emitter, event) {
+  return new Promise((resolve, reject) => {
+    emitter.once(event, resolve);
+    emitter.once('error', reject);
+  });
+}
+
+function close(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+  });
 }
 
 function makeAuthority(overrides = {}) {
-  const base = {
-    profile_id: 'profile-a',
-    capture_slot_id: 'v5-capture-slot-a',
+  const value = {
+    profile_name: 'tv-observer-1',
+    capture_slot_id: 'v5-capture-slot-b',
     layout_code: 's',
-    chart_url: 'https://www.tradingview.com/chart/chart-b/',
-    saved_chart_id: 'chart-b',
+    saved_layout_id: '206146606',
+    reconciliation_key: RECONCILIATION_KEY,
     allowed_origins: ['https://www.tradingview.com'],
+    ...overrides,
   };
-  const value = { ...base, ...overrides };
   const authorityHash = createHash('sha256').update(JSON.stringify({
     allowedOrigins: value.allowed_origins,
     captureSlotId: value.capture_slot_id,
-    chartId: value.saved_chart_id,
-    chartUrl: value.chart_url,
     layoutCode: value.layout_code,
-    profileId: value.profile_id,
-    schemaVersion: 'v5-capture-slot-authority-v2',
+    profileId: value.profile_name,
+    savedLayoutId: value.saved_layout_id,
+    schemaVersion: 'v5-capture-slot-authority-v3',
   }), 'utf8').digest('hex');
   return {
     ...value,
@@ -90,306 +183,282 @@ function makeAuthority(overrides = {}) {
   };
 }
 
-function retire(input, dependencies = {}) {
-  return retireSavedChartTarget(input, { reviewedAuthority: INPUT, ...dependencies });
+function retire(input = INPUT, dependencies = {}) {
+  return retireSavedChartTarget(input, { reviewedAuthority: AUTHORITY, ...dependencies });
 }
 
-test('retirement closes exact saved-chart target and preserves every other chart', async () => {
+test('closes exact server layout through target ID despite shared route and swapped page sockets', async () => {
   const deps = fixture();
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
   assert.equal(result.action, 'closed');
   assert.equal(result.chart_target_id, 'target-b');
+  assert.equal(result.saved_layout_id, '206146606');
+  assert.equal(result.account_subject_sha256, ACCOUNT_HASH);
   assert.equal(result.remaining_chart_targets, 1);
   assert.equal(result.mutations_performed, true);
   assert.deepEqual(deps.calls.close, ['target-b']);
-  assert.deepEqual(deps.calls.webSocketUrls, ['ws://manager.test/profiles/profile-a/cdp']);
-  assert.ok(deps.calls.socketCloseCount >= 1);
+  assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a', 'target-b', 'target-a', 'target-b', 'target-a']);
+  assert.deepEqual(deps.calls.attachedTargetIds, deps.calls.inspectedTargetIds);
+  assert.deepEqual(deps.calls.browserWebSocketUrls, ['ws://manager.test/profiles/current-profile/cdp']);
+  assert.equal(deps.calls.browserCloseCount, 1);
 });
 
-test('retirement rejects a browser WebSocket outside the exact Manager profile endpoint', async () => {
+test('fails closed when expected marker is active under a different server layout ID', async () => {
   const deps = fixture();
-  const originalFetch = deps.fetch;
-  deps.fetch = async (url, init) => {
-    if (new URL(url).pathname.endsWith('/json/version')) {
-      return ok({ webSocketDebuggerUrl: 'ws://other-manager.test/profiles/profile-a/cdp' });
-    }
-    return originalFetch(url, init);
+  deps.readTargetIdentity = async (target) => ({
+    href: target.url,
+    account_subject_sha256: ACCOUNT_HASH,
+    saved_layout_id: '206128986',
+    saved_layout_name: MARKER,
+    layouts: LAYOUTS,
+  });
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /conflicts with exact saved-layout authority identity/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+});
+
+test('fails closed when authenticated inventory does not map exact marker to saved layout ID', async () => {
+  const deps = fixture();
+  deps.readTargetIdentity = async (target) => ({
+    href: target.url,
+    account_subject_sha256: ACCOUNT_HASH,
+    saved_layout_id: target.id === 'target-a' ? '206000778' : '206146606',
+    saved_layout_name: target.id === 'target-a' ? OTHER_MARKER : MARKER,
+    layouts: [{ layout_id: '206128986', name: MARKER }],
+  });
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /marker and server ID are missing or ambiguous/u,
+  );
+  assert.deepEqual(deps.calls.close, []);
+});
+
+test('re-reads exact target identity and page inventory immediately before close', async () => {
+  const deps = fixture();
+  let readCount = 0;
+  deps.readTargetIdentity = async (target) => {
+    readCount += 1;
+    return {
+      href: target.url,
+      account_subject_sha256: ACCOUNT_HASH,
+      saved_layout_id: target.id === 'target-a' ? '206000778' : '206146606',
+      saved_layout_name: target.id === 'target-a' ? OTHER_MARKER : MARKER,
+      layouts: readCount === 1 ? LAYOUTS : [{ layout_id: '206000778', name: 'changed' }],
+    };
   };
   await assert.rejects(
     retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /outside exact Manager profile authority/u,
+    /marker and server ID are missing or ambiguous/u,
   );
   assert.deepEqual(deps.calls.close, []);
-  assert.deepEqual(deps.calls.webSocketUrls, []);
 });
 
-test('retirement rejects profile A authority redirected to profile B CDP path', async () => {
-  const deps = fixture();
-  deps.calls.profileCdpUrl = 'http://manager.test/api/profiles/profile-b/cdp';
-  deps.calls.browserWebSocketUrl = 'ws://manager.test/api/profiles/profile-b/cdp';
-  await assert.rejects(
-    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /outside exact Manager profile authority/u,
-  );
+test('reports already closed when no page has exact saved-layout metaInfo identity', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'already-closed');
+  assert.equal(result.chart_target_id, null);
+  assert.equal(result.account_subject_sha256, ACCOUNT_HASH);
+  assert.equal(result.mutations_performed, false);
   assert.deepEqual(deps.calls.close, []);
-  assert.deepEqual(deps.calls.webSocketUrls, []);
+  assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a']);
 });
 
-test('retirement requires positive Target.closeTarget acknowledgement', async () => {
+test('re-reads profile inventory when listed chart target disappears before CDP identity attach', async () => {
   const deps = fixture();
-  deps.calls.closeAcknowledged = false;
-  await assert.rejects(
-    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /close was not acknowledged/u,
-  );
-  assert.deepEqual(deps.calls.close, ['target-b']);
-  assert.equal(deps.calls.socketCloseCount >= 1, true);
+  deps.calls.missingTargetOnAttach = 'target-b';
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'already-closed');
+  assert.equal(result.chart_target_id, null);
+  assert.equal(result.remaining_chart_targets, 1);
+  assert.equal(result.mutations_performed, false);
+  assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.attachedTargetIds, ['target-a', 'target-b', 'target-a']);
+  assert.equal(deps.calls.fetch.filter((url) => url.endsWith('/json/list')).length, 2);
 });
 
-test('retirement fails if exact target ID remains after navigating away from saved chart', async () => {
+test('reports already closed when exact target disappears before pre-close verification', async () => {
   const deps = fixture();
-  deps.calls.targetUrlAfterClose = 'about:blank';
-  const clock = { now: 0 };
-  await assert.rejects(
-    retire(INPUT, {
-      ...deps,
-      managerBaseUrl: 'http://manager.test',
-      timeoutMs: 1_000,
-      now: () => clock.now,
-      sleep: async () => { clock.now += 10; },
-    }),
-    /target remained open/u,
-  );
-  assert.deepEqual(deps.calls.close, ['target-b']);
-});
-
-test('retirement is idempotent when exact saved chart is already absent', async () => {
-  const deps = fixture([{ id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' }]);
+  deps.calls.removeTargetOnJsonListCall = 2;
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
   assert.equal(result.action, 'already-closed');
   assert.equal(result.chart_target_id, null);
   assert.equal(result.mutations_performed, false);
   assert.deepEqual(deps.calls.close, []);
+  assert.deepEqual(deps.calls.inspectedTargetIds, ['target-a', 'target-b', 'target-a']);
 });
 
-test('retirement refuses to report already-closed when profile has no chart targets', async () => {
-  const deps = fixture([]);
+test('fails closed when exact target disappears while another profile page is added', async () => {
+  const deps = fixture();
+  deps.calls.removeTargetOnJsonListCall = 2;
+  deps.calls.addPageOnJsonListCall = 2;
   await assert.rejects(
     retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /No TradingView chart target/u,
+    /page inventory changed before exact saved-layout retirement/u,
   );
   assert.deepEqual(deps.calls.close, []);
 });
 
-test('retirement refuses last, duplicate, wrong-profile, and non-canonical authorities before close', async () => {
-  const lastChart = fixture([{ id: 'target-b', type: 'page', url: INPUT.chart_url }]);
+test('fails closed when CDP says target is missing but fresh profile inventory still lists it', async () => {
+  const deps = fixture();
+  deps.calls.missingTargetOnAttach = 'target-a';
+  deps.calls.keepMissingTargetListed = true;
   await assert.rejects(
-    retire(INPUT, { ...lastChart, managerBaseUrl: 'http://manager.test' }),
-    /Cannot retire the last TradingView chart target/u,
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    /target remained in the current profile inventory/u,
   );
-  assert.deepEqual(lastChart.calls.close, []);
-
-  const duplicate = fixture([
-    { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-    { id: 'target-b1', type: 'page', url: INPUT.chart_url },
-    { id: 'target-b2', type: 'page', url: INPUT.chart_url },
-  ]);
-  await assert.rejects(
-    retire(INPUT, { ...duplicate, managerBaseUrl: 'http://manager.test' }),
-    /ambiguous/u,
-  );
-  assert.deepEqual(duplicate.calls.close, []);
-
-  const nonCanonical = fixture([
-    { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-    { id: 'target-b', type: 'page', url: `${INPUT.chart_url}?symbol=OANDA%3AEURUSD` },
-  ]);
-  await assert.rejects(
-    retire(INPUT, { ...nonCanonical, managerBaseUrl: 'http://manager.test' }),
-    /differs from exact authority/u,
-  );
-  assert.deepEqual(nonCanonical.calls.close, []);
-
-  const wrongProfile = fixture();
-  wrongProfile.fetch = async (url) => {
-    const response = await fixture().fetch(url);
-    if (new URL(url).pathname === '/profiles') {
-      return ok([{ profile_id: 'different-profile', status: 'running', cdp_url: 'http://manager.test/profiles/different-profile/cdp' }]);
-    }
-    return response;
-  };
-  await assert.rejects(
-    retire(INPUT, { ...wrongProfile, managerBaseUrl: 'http://manager.test' }),
-    /missing or ambiguous/u,
-  );
-  assert.deepEqual(wrongProfile.calls.close, []);
-
-  await assert.rejects(retire({ ...INPUT, chart_url: 'https://evil.test/chart/chart-b/' }), /not authorized/u);
-  await assert.rejects(
-    retire({ ...INPUT, authority_hash: 'b'.repeat(64) }),
-    /does not match/u,
-  );
-});
-
-test('retirement rejects query-bearing requested chart URL before Manager or CDP access', async () => {
-  const queryUrl = `${INPUT.chart_url}?symbol=OANDA%3AEURUSD`;
-  const deps = fixture([
-    { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-    { id: 'target-b', type: 'page', url: queryUrl },
-  ]);
-  await assert.rejects(
-    retire({ ...INPUT, chart_url: queryUrl }, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /query parameters are not allowed/u,
-  );
-  assert.deepEqual(deps.calls.fetch, []);
   assert.deepEqual(deps.calls.close, []);
 });
 
-test('retirement rejects caller-minted authority that differs from per-worker reviewed identity', async () => {
-  const forged = makeAuthority({
-    saved_chart_id: 'chart-a',
-    chart_url: 'https://www.tradingview.com/chart/chart-a/',
+test('refuses to close the final browser page', async () => {
+  const lastPage = fixture([{ id: 'target-b', type: 'page', url: ROUTE }]);
+  await assert.rejects(
+    retire(INPUT, { ...lastPage, managerBaseUrl: 'http://manager.test' }),
+    /last browser page/u,
+  );
+  assert.deepEqual(lastPage.calls.close, []);
+
+});
+
+test('retirement fails closed when unacknowledged close leaves exact target present', async () => {
+  const unacknowledged = fixture();
+  unacknowledged.calls.closeAcknowledged = false;
+  await assert.rejects(
+    retire(INPUT, { ...unacknowledged, managerBaseUrl: 'http://manager.test' }),
+    /remained open after unacknowledged close/u,
+  );
+  assert.deepEqual(unacknowledged.calls.close, ['target-b']);
+
+  const lostResponse = fixture();
+  lostResponse.calls.loseCloseResponse = true;
+  lostResponse.calls.closeAcknowledged = false;
+  await assert.rejects(
+    retire(INPUT, { ...lostResponse, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
+    /remained open after unacknowledged close/u,
+  );
+  assert.deepEqual(lostResponse.calls.close, ['target-b']);
+});
+
+test('retirement confirms exact absence after lost close response within existing deadline', async () => {
+  const deps = fixture();
+  deps.calls.loseCloseResponse = true;
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 });
+  assert.equal(result.action, 'closed');
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.equal(deps.calls.jsonListCallCount, 3);
+});
+
+test('retirement waits for closing target to leave inventory without evaluating its disappearing session', async () => {
+  const deps = fixture();
+  deps.calls.closeRemovesTarget = false;
+  deps.calls.hangClosedTargetIdentity = true;
+  deps.calls.removeTargetOnJsonListCall = 4;
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 2_000 });
+  assert.equal(result.action, 'closed');
+  assert.deepEqual(deps.calls.close, ['target-b']);
+  assert.equal(deps.calls.jsonListCallCount, 4);
+  assert.equal(deps.calls.inspectedTargetIds.filter((id) => id === 'target-b').length, 2);
+  assert.ok(deps.calls.inspectedTargetIds.includes('target-a'));
+});
+
+test('lost close response cannot conceal changes to other pages', async () => {
+  const deps = fixture();
+  deps.calls.loseCloseResponse = true;
+  deps.calls.addPageOnJsonListCall = 3;
+  await assert.rejects(
+    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 200 }),
+    /changed another TradingView chart target/u,
+  );
+  assert.deepEqual(deps.calls.close, ['target-b']);
+});
+
+test('retirement requires exact profile CDP authority', async () => {
+
+  const wrongEndpoint = fixture();
+  wrongEndpoint.calls.browserWebSocketUrl = 'ws://other.test/profiles/current-profile/cdp';
+  await assert.rejects(
+    retire(INPUT, { ...wrongEndpoint, managerBaseUrl: 'http://manager.test' }),
+    /outside exact Manager profile authority/u,
+  );
+  assert.deepEqual(wrongEndpoint.calls.close, []);
+});
+
+test('aborts a stalled exact-profile CDP WebSocket handshake within its deadline', async () => {
+  const server = createServer();
+  const sockets = new Set();
+  server.on('upgrade', (_request, socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
   });
+  const port = await listen(server);
+  const deps = fixture();
+  setLocalCdpEndpoint(deps, port);
+  try {
+    await assert.rejects(
+      retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 300 }),
+      /WebSocket handshake exceeded bounded \d+ms deadline/u,
+    );
+    assert.deepEqual(deps.calls.close, []);
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    await close(server);
+  }
+});
+
+test('rejects oversized CDP frames at WebSocket transport before identity parsing or close', async () => {
+  const server = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
+  await once(server, 'listening');
+  server.on('connection', (socket) => {
+    socket.on('message', (data) => {
+      const request = JSON.parse(data.toString('utf8'));
+      if (request.method === 'Target.attachToTarget') {
+        socket.send(JSON.stringify({ id: request.id, result: { sessionId: 'session-target-a' } }));
+      } else if (request.method === 'Runtime.evaluate') {
+        socket.send(JSON.stringify({
+          id: request.id,
+          result: { result: { type: 'object', value: { padding: 'x'.repeat(140 * 1024) } } },
+        }));
+      }
+    });
+  });
+  const port = server.address().port;
+  const deps = fixture();
+  setLocalCdpEndpoint(deps, port);
+  try {
+    await assert.rejects(
+      retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 2_000 }),
+      /frame exceeds bounded 131072-byte transport limit/u,
+    );
+    assert.deepEqual(deps.calls.close, []);
+  } finally {
+    for (const socket of server.clients) socket.terminate();
+    await close(server);
+  }
+});
+
+test('retirement rejects caller-minted or cross-slot authority before profile access', async () => {
   const deps = fixture();
   await assert.rejects(
-    retire(forged, { ...deps, managerBaseUrl: 'http://manager.test' }),
+    retire(makeAuthority({ capture_slot_id: 'v5-capture-slot-a' }), { ...deps, managerBaseUrl: 'http://manager.test' }),
     /differs from the per-worker reviewed/u,
   );
   assert.deepEqual(deps.calls.fetch, []);
   assert.deepEqual(deps.calls.close, []);
 });
 
-test('retirement enforces authority from per-worker environment used by production adapter', async () => {
-  const previous = process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON;
-  process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON = JSON.stringify(INPUT);
-  const deps = fixture();
-  try {
-    const result = await retireSavedChartTarget(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
-    assert.equal(result.action, 'closed');
-    assert.deepEqual(deps.calls.close, ['target-b']);
-  } finally {
-    if (previous === undefined) delete process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON;
-    else process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON = previous;
-  }
-});
-
-test('malformed page target inventory fails closed before retirement', async () => {
-  const deps = fixture();
-  const originalFetch = deps.fetch;
-  deps.fetch = async (url, init) => {
-    if (new URL(url).pathname.endsWith('/json/list')) {
-      return ok([
-        { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-        { type: 'page', url: INPUT.chart_url },
-      ]);
-    }
-    return originalFetch(url, init);
-  };
-  await assert.rejects(
-    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /page target identity is malformed/u,
-  );
-  assert.deepEqual(deps.calls.close, []);
-});
-
-test('bounded Manager and CDP response bodies fail closed before chart close', async (t) => {
-  for (const responseKind of ['manager', 'cdp']) {
-    await t.test(responseKind, async () => {
-      const deps = fixture();
-      const originalFetch = deps.fetch;
-      deps.fetch = async (url, init) => {
-        const pathname = new URL(url).pathname;
-        const oversized = responseKind === 'manager'
-          ? pathname === '/profiles'
-          : pathname.endsWith('/json/list');
-        if (oversized) return new Response('x'.repeat(128 * 1024 + 1), { status: 200 });
-        return originalFetch(url, init);
-      };
-      await assert.rejects(
-        retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-        /exceeds bounded 131072-byte read limit/u,
-      );
-      assert.deepEqual(deps.calls.close, []);
-    });
-  }
-});
-
-test('oversized CDP target IDs are rejected before close and output schema caps echoed IDs', async () => {
-  const deps = fixture([
-    { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-    { id: 'x'.repeat(257), type: 'page', url: INPUT.chart_url },
-  ]);
-  await assert.rejects(
-    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /page target identity is malformed/u,
-  );
-  assert.deepEqual(deps.calls.close, []);
-
-  const targetIdSchema = observerToolDefinitions.tv_observer_retire_saved_chart_v1.outputSchema.chart_target_id;
-  assert.equal(targetIdSchema.safeParse('x'.repeat(256)).success, true);
-  assert.equal(targetIdSchema.safeParse('x'.repeat(257)).success, false);
-  assert.equal(targetIdSchema.safeParse(null).success, true);
-});
-
-test('retirement rechecks complete chart inventory immediately before exact close', async () => {
-  const deps = fixture();
-  const originalFetch = deps.fetch;
-  let listReads = 0;
-  deps.fetch = async (url, init) => {
-    if (new URL(url).pathname.endsWith('/json/list')) {
-      listReads += 1;
-      if (listReads === 2) {
-        return ok([
-          { id: 'target-a', type: 'page', url: 'https://www.tradingview.com/chart/chart-a/' },
-          { id: 'target-b', type: 'page', url: 'https://www.tradingview.com/chart/chart-c/' },
-        ]);
-      }
-    }
-    return originalFetch(url, init);
-  };
-  await assert.rejects(
-    retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' }),
-    /inventory changed before exact/u,
-  );
-  assert.deepEqual(deps.calls.close, []);
-});
-
-test('retirement applies one end-to-end deadline to Manager fetch and browser CDP close', async () => {
-  const pendingFetch = fixture();
-  pendingFetch.fetch = async () => new Promise(() => {});
-  const fetchStart = performance.now();
-  await assert.rejects(
-    retire(INPUT, {
-      ...pendingFetch,
-      managerBaseUrl: 'http://manager.test',
-      timeoutMs: 25,
-    }),
-    /bounded 25ms deadline/u,
-  );
-  assert.ok(performance.now() - fetchStart < 500);
-
-  const pendingClose = fixture();
-  let closeRequested = false;
-  pendingClose.createWebSocket = () => {
-    const socket = new EventTarget();
-    socket.send = () => { closeRequested = true; };
-    socket.close = () => {
-      pendingClose.calls.socketCloseCount += 1;
-      socket.dispatchEvent(new Event('close'));
-    };
-    queueMicrotask(() => socket.dispatchEvent(new Event('open')));
-    return socket;
-  };
-  const closeStart = performance.now();
-  await assert.rejects(
-    retire(INPUT, {
-      ...pendingClose,
-      managerBaseUrl: 'http://manager.test',
-      timeoutMs: 25,
-    }),
-    /bounded 25ms deadline/u,
-  );
-  assert.ok(performance.now() - closeStart < 500);
-  assert.equal(closeRequested, true);
-  assert.ok(pendingClose.calls.socketCloseCount >= 1);
+test('retirement contract requires stable saved-layout authority', () => {
+  const definition = observerToolDefinitions.tv_observer_retire_saved_chart_v2;
+  assert.deepEqual(Object.keys(definition.inputSchema).sort(), [
+    'allowed_origins', 'authority_hash', 'authority_id', 'capture_slot_id',
+    'layout_code', 'profile_name', 'reconciliation_key', 'saved_layout_id',
+  ].sort());
+  assert.deepEqual(definition.outputSchema.retirement_version.safeParse('saved-chart-retirement-v2'), {
+    success: true,
+    data: 'saved-chart-retirement-v2',
+  });
 });

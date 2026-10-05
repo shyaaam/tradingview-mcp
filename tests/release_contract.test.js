@@ -25,6 +25,8 @@ import { registerPaneTools } from '../src/tools/pane.js';
 import { registerChartTools } from '../src/tools/chart.js';
 import { registerChartTargetHydrationTool } from '../src/tools/chart-target-hydration.js';
 import { registerChartTargetHydrationV2Tool } from '../src/tools/chart-target-hydration-v2.js';
+import { registerChartTargetOpenTool } from '../src/tools/chart-target-open.js';
+import { registerSavedChartAuthorityTools } from '../src/tools/saved-chart-authority.js';
 import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
 import { registerChartRuntimeReadinessTools } from '../src/tools/chart-runtime-readiness.js';
 import { registerChartRuntimeTargetLifecycleTools } from '../src/tools/chart-runtime-target-lifecycle.js';
@@ -72,6 +74,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'tv_observer_contract',
     'tv_health_check',
     'tv_observer_prepare',
+    'tv_observer_start_profile_by_name_v1',
     'tv_observer_attach_existing_read_only',
     'chart_runtime_readiness_probe_v1',
     'chart_runtime_wait_ready_v1',
@@ -80,7 +83,12 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_runtime_content_snapshot_v2',
     'tv_observer_hydrate_chart_target',
     'tv_observer_hydrate_chart_target_v2',
-    'tv_observer_retire_saved_chart_v1',
+    'tv_observer_open_bootstrap_chart_target_v1',
+    'tv_observer_resolve_profile_name_v1',
+    'tv_observer_saved_chart_authority_preflight_v1',
+    'tv_observer_ensure_saved_chart_authority_v1',
+    'tv_observer_hydrate_saved_layout_v1',
+    'tv_observer_retire_saved_chart_v2',
     'tv_observer_identity',
     'chart_saved_layout_identity',
     'tv_observer_capture_candle',
@@ -107,6 +115,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'chart_save_existing_scoped_v2',
     'chart_set_symbol',
     'chart_set_timeframe',
+    'symbol_info',
+    'symbol_search',
     'pine_apply_scoped',
     'pine_upsert_named',
   ]);
@@ -133,6 +143,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: classifications.chart_saved_layout_identity,
     chart_save_existing_scoped_v2: classifications.chart_save_existing_scoped_v2,
     tv_observer_capture_pane_telemetry_ohlcv: classifications.tv_observer_capture_pane_telemetry_ohlcv,
+    symbol_info: classifications.symbol_info,
+    symbol_search: classifications.symbol_search,
     pine_apply_scoped: classifications.pine_apply_scoped,
     pine_upsert_named: classifications.pine_upsert_named,
   }, {
@@ -145,6 +157,8 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
     tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    symbol_info: 'read_only',
+    symbol_search: 'read_only',
     pine_apply_scoped: 'chart_mutation',
     pine_upsert_named: 'chart_mutation',
   });
@@ -158,6 +172,41 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
   }
 });
 
+test('symbol metadata capabilities expose bounded read-only observer contracts', () => {
+  const { z } = require('zod');
+  const symbolInfo = observerToolDefinitions.symbol_info;
+  const symbolSearch = observerToolDefinitions.symbol_search;
+  assert.equal(symbolInfo.classification, 'read_only');
+  assert.equal(symbolSearch.classification, 'read_only');
+
+  const symbolInfoOutput = z.object(symbolInfo.outputSchema);
+  const symbolInfoFixture = {
+    success: true,
+    symbol: 'BTCUSDT',
+    full_name: 'BYBIT:BTCUSDT',
+    exchange: 'BYBIT',
+    description: 'Bitcoin / TetherUS',
+    type: 'crypto',
+    pro_name: 'BYBIT:BTCUSDT',
+    typespecs: ['crypto'],
+    resolution: '60',
+    chart_type: 1,
+  };
+  assert.equal(symbolInfoOutput.safeParse(symbolInfoFixture).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: undefined }).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: null }).success, true);
+  assert.equal(symbolInfoOutput.safeParse({ ...symbolInfoFixture, typespecs: ['x'.repeat(129)] }).success, false);
+
+  const symbolSearchOutput = z.object(symbolSearch.outputSchema);
+  const result = { symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', exchange: 'BYBIT', type: 'crypto', full_name: 'BYBIT:BTCUSDT' };
+  const symbolSearchFixture = { success: true, query: 'BTCUSDT', source: 'rest_api', results: [result], count: 1 };
+  assert.equal(symbolSearch.inputSchema.query.parse('BTCUSDT'), 'BTCUSDT');
+  assert.equal(symbolSearch.inputSchema.query.safeParse('x'.repeat(513)).success, false);
+  assert.equal(symbolSearch.inputSchema.type.parse('crypto'), 'crypto');
+  assert.equal(symbolSearchOutput.safeParse(symbolSearchFixture).success, true);
+  assert.equal(symbolSearchOutput.safeParse({ ...symbolSearchFixture, results: Array(16).fill(result), count: 16 }).success, false);
+});
+
 test('every observer capability is registered by the MCP tool groups', () => {
   const registered = new Set();
   const fakeServer = { tool: (name) => { registered.add(name); } };
@@ -169,6 +218,8 @@ test('every observer capability is registered by the MCP tool groups', () => {
   registerChartTools(fakeServer);
   registerChartTargetHydrationTool(fakeServer);
   registerChartTargetHydrationV2Tool(fakeServer);
+  registerChartTargetOpenTool(fakeServer);
+  registerSavedChartAuthorityTools(fakeServer);
   registerChartTargetRetirementTool(fakeServer);
   registerChartRuntimeReadinessTools(fakeServer);
   registerChartRuntimeTargetLifecycleTools(fakeServer);
@@ -204,6 +255,9 @@ test('observer result fixtures satisfy registered output schemas', () => {
       success: true, manager_base_url: 'http://127.0.0.1:8080/api', profile_id: 'profile-a', restart_requested: false,
       status: 'running', cdp_ready: true, cdp_url: 'http://127.0.0.1:8080/api/profiles/profile-a/cdp',
       browser: 'Chrome/146', user_agent: 'test-agent', chart_target_id: 'chart-1', chart_target_url: 'https://www.tradingview.com/chart/x/',
+    },
+    tv_observer_start_profile_by_name_v1: {
+      success: true, profile_name: 'tv-observer-1', status: 'running', launch_performed: true, cdp_ready: true,
     },
     tv_observer_attach_existing_read_only: {
       success: true,
@@ -259,13 +313,87 @@ test('observer result fixtures satisfy registered output schemas', () => {
       state: 'renderer-verified',
       mutations_performed: true,
     },
-    tv_observer_retire_saved_chart_v1: {
+    tv_observer_open_bootstrap_chart_target_v1: {
       success: true,
-      retirement_version: 'saved-chart-retirement-v1',
+      open_version: 'bootstrap-chart-target-v1',
+      profile_name: 'tv-observer-1',
+      profile_id: 'profile-a',
+      target_id: 'target-new',
+      target_url: 'https://www.tradingview.com/chart/',
+      target_created: true,
+      navigation_performed: true,
+      page_state: 'generic_chart',
+      mutations_performed: true,
+    },
+    tv_observer_resolve_profile_name_v1: {
+      success: true, profile_name: 'tv-observer-1', profile_id: 'ephemeral-profile-id', status: 'running',
+    },
+    tv_observer_saved_chart_authority_preflight_v1: {
+      success: true,
+      preflight_version: 'saved-chart-authority-preflight-v1',
+      profile_name: 'tv-observer-1',
+      capture_slot_id: 'v5-capture-slot-a',
+      reconciliation_key: 'a'.repeat(64),
+      layout_marker: `V5OBS-A-${'a'.repeat(32)}`,
+      authenticated: true,
+      account_subject_sha256: 'b'.repeat(64),
+      action: 'not_found',
+      match_count: 0,
+      saved_layout_id: null,
+      layout_count: 3,
+      layout_inventory_sha256: 'c'.repeat(64),
+      chart_target_count: 1,
+      can_create: true,
+      create_preflight_failure_code: null,
+      create_marker_length: 40,
+      create_input_count: 1,
+      create_input_max_length: -1,
+      failure_code: null,
+    },
+    tv_observer_ensure_saved_chart_authority_v1: {
+      success: true,
+      authority_ensure_version: 'saved-chart-authority-ensure-v1',
+      profile_name: 'tv-observer-1',
+      capture_slot_id: 'v5-capture-slot-a',
+      reconciliation_key: 'a'.repeat(64),
+      create_if_absent: true,
+      action: 'created',
+      layout_marker: `V5OBS-A-${'a'.repeat(32)}`,
+      match_count: 1,
+      saved_layout_id: '206000778',
+      saved_chart_id: 'new-chart',
+      canonical_chart_url: 'https://www.tradingview.com/chart/new-chart/',
+      account_subject_sha256: 'b'.repeat(64),
+      mutations_performed: true,
+      temporary_target_closed: true,
+      failure_code: null,
+    },
+    tv_observer_hydrate_saved_layout_v1: {
+      success: true,
+      hydration_version: 'saved-layout-hydration-v1',
+      profile_name: 'tv-observer-1',
+      profile_id: 'ephemeral-profile-id',
+      capture_slot_id: 'v5-capture-slot-a',
+      reconciliation_key: 'a'.repeat(64),
+      layout_marker: `V5OBS-A-${'a'.repeat(32)}`,
+      saved_layout_id: '206000778',
+      account_subject_sha256: 'b'.repeat(64),
+      target_id: 'target-a',
+      target_url: 'https://www.tradingview.com/chart/route-a/',
+      runtime_chart_id: 'route-a',
+      target_created: true,
+      navigation_performed: true,
+      state: 'hydrated',
+      mutations_performed: true,
+    },
+    tv_observer_retire_saved_chart_v2: {
+      success: true,
+      retirement_version: 'saved-chart-retirement-v2',
       authority_id: `v5-capture-slot:${'a'.repeat(64)}`,
       authority_hash: 'a'.repeat(64),
-      profile_id: 'profile-a',
-      saved_chart_id: 'chart-b',
+      profile_name: 'tv-observer-1',
+      saved_layout_id: '206146606',
+      account_subject_sha256: 'b'.repeat(64),
       chart_target_id: 'target-b',
       action: 'closed',
       remaining_chart_targets: 1,
@@ -791,6 +919,25 @@ test('observer result fixtures satisfy registered output schemas', () => {
       focus: { success: true, focused_index: 0 },
     },
     chart_get_state: { success: true, symbol: 'AAPL', resolution: '60', chartType: 1, studies: [{ id: 'study-1', name: 'Volume' }] },
+    symbol_info: {
+      success: true,
+      symbol: 'BTCUSDT',
+      full_name: 'BYBIT:BTCUSDT',
+      exchange: 'BYBIT',
+      description: 'Bitcoin / TetherUS',
+      type: 'crypto',
+      pro_name: 'BYBIT:BTCUSDT',
+      typespecs: ['crypto'],
+      resolution: '60',
+      chart_type: 1,
+    },
+    symbol_search: {
+      success: true,
+      query: 'BTCUSDT',
+      source: 'rest_api',
+      results: [{ symbol: 'BTCUSDT', description: 'Bitcoin / TetherUS', exchange: 'BYBIT', type: 'crypto', full_name: 'BYBIT:BTCUSDT' }],
+      count: 1,
+    },
     chart_save_existing_capability_probe: {
       success: true,
       probe_version: 'chart-save-existing-capability-probe-v1',
