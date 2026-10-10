@@ -41,7 +41,7 @@ export function registerChartTargetOpenTool(server) {
   registerObserverTool(
     server,
     'tv_observer_open_bootstrap_chart_target_v1',
-    'Resolve an exact running CloakBrowser profile name and open one generic TradingView chart for fresh-account bootstrap',
+    'Resolve an exact running CloakBrowser profile and open a generic TradingView chart; an optional exact disposable blank target ID may be reused after fail-closed identity checks',
     async (input) => {
       try { return jsonResult(await openBootstrapChartTarget(input)); }
       catch (error) { return jsonResult({ success: false, error: error.message }, true); }

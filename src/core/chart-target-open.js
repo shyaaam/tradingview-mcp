@@ -89,6 +89,9 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
 /** Open one fresh generic chart target in an explicitly named, already-running profile. */
 export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   const profileName = requireText(input.profile_name, 'profile_name');
+  const reuseBlankTargetId = input.reuse_blank_target_id === undefined
+    ? null
+    : requireText(input.reuse_blank_target_id, 'reuse_blank_target_id');
   const deps = dependencies;
   await (deps.invalidateObserverSession || invalidateObserverSession)();
 
@@ -96,6 +99,29 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   const version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), deps);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);
   const before = await listTargets(cdpUrl, deps);
+  if (reuseBlankTargetId !== null) {
+    const targetMatches = before.filter((target) => target.id === reuseBlankTargetId);
+    const blankPages = before.filter((target) => target.type === 'page' && isBlankUrl(target.url));
+    const target = targetMatches[0];
+    if (targetMatches.length !== 1 || target?.type !== 'page' || target.url !== 'about:blank'
+      || blankPages.length !== 1 || blankPages[0].id !== reuseBlankTargetId) {
+      throw new Error('Requested target is not the exact sole about:blank page in the exact profile.');
+    }
+    if (before.some((entry) => (isTradingViewChartTarget(entry) && isGenericChartUrl(entry.url))
+      || isTradingViewLoginTarget(entry))) {
+      throw new Error('A competing generic chart or login target exists; refusing blank-target navigation.');
+    }
+    return navigateExistingBlankTarget({
+      managerBaseUrl,
+      profileName,
+      profileId,
+      cdpUrl,
+      targetId: reuseBlankTargetId,
+      targetWebSocketDebuggerUrl: target.webSocketDebuggerUrl,
+      deps,
+    });
+  }
+
   const chartTargets = before.filter(isTradingViewChartTarget);
   const genericTargets = chartTargets.filter((target) => isGenericChartUrl(target.url));
   if (genericTargets.length > 1) {
@@ -174,6 +200,71 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
     cdpUrl,
     target: finalTarget,
     targetCreated: true,
+    navigationPerformed: true,
+    pageState: classifyPage(finalTarget.url),
+    deps,
+  });
+}
+
+async function navigateExistingBlankTarget({
+  managerBaseUrl,
+  profileName,
+  profileId,
+  cdpUrl,
+  targetId,
+  targetWebSocketDebuggerUrl,
+  deps,
+}) {
+  if (typeof targetWebSocketDebuggerUrl !== 'string' || !targetWebSocketDebuggerUrl) {
+    throw new Error('Exact existing blank target has no CDP websocket; no navigation was attempted.');
+  }
+
+  const currentTargets = await listTargets(cdpUrl, deps);
+  const currentMatches = currentTargets.filter((target) => target.id === targetId);
+  const currentBlankPages = currentTargets.filter((target) => target.type === 'page' && isBlankUrl(target.url));
+  const target = currentMatches[0];
+  if (currentMatches.length !== 1 || target?.type !== 'page' || target.url !== 'about:blank'
+    || currentBlankPages.length !== 1 || currentBlankPages[0].id !== targetId) {
+    throw new Error('Exact requested blank target changed before navigation; refusing target-ID drift or ambiguity.');
+  }
+  if (target.webSocketDebuggerUrl !== targetWebSocketDebuggerUrl) {
+    throw new Error('Exact requested blank target CDP websocket changed before navigation; refusing websocket drift.');
+  }
+  if (currentTargets.some((entry) => entry.id !== targetId
+    && ((isTradingViewChartTarget(entry) && isGenericChartUrl(entry.url)) || isTradingViewLoginTarget(entry)))) {
+    throw new Error('A competing generic chart or login target appeared; refusing blank-target navigation.');
+  }
+
+  const page = await (deps.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl);
+  let navigateResult;
+  try {
+    await page.Page.enable();
+    navigateResult = await page.Page.navigate({ url: GENERIC_CHART_URL });
+  } finally {
+    try { await page.close?.(); } catch { /* preserve navigation result */ }
+  }
+  if (navigateResult?.errorText) throw new Error('TradingView generic chart navigation failed.');
+
+  const landing = await waitForBootstrapLanding(cdpUrl, targetId, deps);
+  if (!landing) throw new Error('Requested blank target did not reach the exact generic chart or login route.');
+  const finalTargets = await listTargets(cdpUrl, deps);
+  const finalMatches = finalTargets.filter((entry) => entry.id === targetId);
+  const finalTarget = finalMatches[0];
+  if (finalMatches.length !== 1 || finalTarget?.type !== 'page'
+    || finalTarget.webSocketDebuggerUrl !== targetWebSocketDebuggerUrl
+    || !(isGenericChartUrl(finalTarget.url) || isTradingViewLoginTarget(finalTarget))
+    || finalTargets.some((entry) => entry.id !== targetId
+      && ((isTradingViewChartTarget(entry) && isGenericChartUrl(entry.url)) || isTradingViewLoginTarget(entry)))) {
+    throw new Error('Requested blank target landing changed or became ambiguous; refusing to bind the target.');
+  }
+
+  return bindAndReturn({
+    managerBaseUrl,
+    profileName,
+    profileId,
+    cdpUrl,
+    target: finalTarget,
+    targetCreated: false,
     navigationPerformed: true,
     pageState: classifyPage(finalTarget.url),
     deps,

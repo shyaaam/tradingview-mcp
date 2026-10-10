@@ -682,6 +682,8 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: {
       profile_name: z.string().min(1).max(160)
         .describe('Exact CloakBrowser profile name; resolves its current Manager UUID on every call.'),
+      reuse_blank_target_id: z.string().min(1).max(256).optional()
+        .describe('Optional exact disposable target ID. Reuses it only while it remains the sole about:blank page in the exact profile.'),
     },
     outputSchema: {
       success: z.literal(true),
