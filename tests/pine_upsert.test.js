@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { applyScopedSavedPine, chartStudyBindsOwnedSavedScript, chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, chartStudyIsPublicPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent } from '../src/core/pine.js';
+import { applyScopedSavedPine, chartStudyBindsOwnedSavedScript, chartStudyBindsSavedScript, chartStudyIsOwnedPineScript, chartStudyIsPublicPineScript, normalizePineScriptName, pineSourceSha256, pineSourcesEquivalent, readSavedPineSourceIdentity } from '../src/core/pine.js';
 
 test('pine named-upsert request normalizes exact names and hashes source', () => {
   assert.equal(normalizePineScriptName('  Repo BOS  '), 'Repo BOS');
@@ -49,6 +49,46 @@ test('pine named-upsert treats TradingView newline normalization as equivalent',
   const source = '//@version=6\nindicator("Repo BOS")\nplot(close)';
   assert.equal(pineSourcesEquivalent(source, source.replaceAll('\n', '\r\n')), true);
   assert.equal(pineSourcesEquivalent(source, `${source}\nplot(open)`), false);
+});
+
+test('saved Pine source identity reads exact ID/version and hashes raw source without editor or chart mutation', async () => {
+  const source = '//@version=6\r\nindicator("Cipher-B")\r\nplot(close)';
+  const calls = [];
+  const result = await readSavedPineSourceIdentity({
+    scriptId: 'USER;7cd1160bd4ed47d188bb8a43aab96d1d',
+    version: '1.0',
+    _deps: {
+      async evaluateAsync(expression) {
+        calls.push(expression);
+        return { source };
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    success: true,
+    identity_version: 'pine-saved-source-identity-v1',
+    script_id: 'USER;7cd1160bd4ed47d188bb8a43aab96d1d',
+    version: '1.0',
+    source_sha256: pineSourceSha256(source),
+    source_utf8_bytes: Buffer.byteLength(source, 'utf8'),
+    mutations_performed: false,
+  });
+  assert.notEqual(result.source_sha256, pineSourceSha256(source.replaceAll('\r\n', '\n')));
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /pine-facade\/get\/'/u);
+  assert.match(calls[0], /"USER;7cd1160bd4ed47d188bb8a43aab96d1d" \+ '\/' \+ "1\.0"/u);
+  assert.match(calls[0], /credentials: 'include'/u);
+  assert.doesNotMatch(calls[0], /Monaco|editor|TradingViewApi|createStudy|saveNew|saveNext/u);
+});
+
+test('saved Pine source identity rejects unsafe IDs, missing source, and failed retrieval', async () => {
+  let calls = 0;
+  const deps = { async evaluateAsync() { calls += 1; return { source: '//@version=6' }; } };
+  await assert.rejects(readSavedPineSourceIdentity({ scriptId: 'USER;id/other', version: '1', _deps: deps }), /path-safe/u);
+  assert.equal(calls, 0, 'unsafe script IDs fail before provider access');
+  await assert.rejects(readSavedPineSourceIdentity({ scriptId: 'USER;id', version: '1', _deps: { async evaluateAsync() { return { source: '' }; } } }), /EMPTY_OR_INVALID/u);
+  await assert.rejects(readSavedPineSourceIdentity({ scriptId: 'USER;id', version: '1', _deps: { async evaluateAsync() { return { error: 'PINE_SAVED_SOURCE_HTTP_ERROR: 404' }; } } }), /HTTP_ERROR: 404/u);
 });
 
 test('scoped saved-Pine apply fails closed before source access without identity fences', async () => {

@@ -55,6 +55,7 @@ const CAPABILITY_NAMES = [
   'symbol_search',
   'pine_apply_scoped',
   'pine_upsert_named',
+  'pine_read_saved_source_v1',
 ];
 if (new Set(CAPABILITY_NAMES).size !== CAPABILITY_NAMES.length) {
   throw new Error('Observer capability manifest contains duplicate names.');

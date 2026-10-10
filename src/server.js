@@ -67,6 +67,7 @@ Changing the chart:
 - pine_apply_scoped → apply exact repository-controlled saved Pine on an explicit profile/tab/pane and verify exact source binding
 
 Pine Script development:
+- pine_read_saved_source_v1 → read one exact saved script ID/version and return raw-source SHA-256 without opening the editor or mutating the chart
 - pine_set_source → inject code, pine_smart_compile → compile + check errors, pine_upsert_named → exact repository-controlled saved-script upsert
 - pine_get_errors → read errors, pine_get_console → read log output
 - WARNING: pine_get_source can return 200KB+ for complex scripts — avoid unless editing

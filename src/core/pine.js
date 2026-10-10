@@ -655,14 +655,62 @@ async function readSavedScripts(_deps) {
 }
 
 async function readSavedScriptSource(script, _deps) {
-  return (_deps?.evaluateAsync || evaluateAsync)(`
-    fetch('https://pine-facade.tradingview.com/pine-facade/get/'
-      + ${JSON.stringify(script.scriptIdPart)} + '/' + ${JSON.stringify(script.version || 1)},
-      { credentials: 'include' })
-      .then(function(response) { return response.json(); })
-      .then(function(data) { return { source: data.source || '' }; })
-      .catch(function(error) { return { source: '', error: error.message }; })
+  try {
+    return { source: await readSavedPineSourceByIdVersion({
+      scriptId: script.scriptIdPart,
+      version: script.version || 1,
+      _deps,
+    }) };
+  } catch (error) {
+    return { source: '', error: error.message };
+  }
+}
+
+export async function readSavedPineSourceByIdVersion({ scriptId, version, _deps } = {}) {
+  if (typeof scriptId !== 'string' || !/^[A-Z]+;[A-Za-z0-9_-]+$/u.test(scriptId)) {
+    throw new Error('Saved Pine script ID must be an exact path-safe TradingView script ID');
+  }
+  if ((typeof version !== 'string' && typeof version !== 'number')
+    || !/^[0-9]+(?:\.[0-9]+)*$/u.test(String(version))) {
+    throw new Error('Saved Pine script version must be an exact numeric version');
+  }
+
+  const exactVersion = String(version);
+  const result = await (_deps?.evaluateAsync || evaluateAsync)(`
+    (async function() {
+      try {
+        var response = await fetch('https://pine-facade.tradingview.com/pine-facade/get/'
+          + ${JSON.stringify(scriptId)} + '/' + ${JSON.stringify(exactVersion)},
+          { credentials: 'include' });
+        if (!response.ok) return { error: 'PINE_SAVED_SOURCE_HTTP_ERROR: ' + response.status };
+        var data = await response.json();
+        if (!data || typeof data.source !== 'string' || data.source.length === 0) {
+          return { error: 'PINE_SAVED_SOURCE_EMPTY_OR_INVALID' };
+        }
+        return { source: data.source };
+      } catch (error) {
+        return { error: 'PINE_SAVED_SOURCE_READ_FAILED' };
+      }
+    })()
   `);
+  if (result?.error) throw new Error(result.error);
+  if (typeof result?.source !== 'string' || result.source.length === 0) {
+    throw new Error('PINE_SAVED_SOURCE_EMPTY_OR_INVALID');
+  }
+  return result.source;
+}
+
+export async function readSavedPineSourceIdentity({ scriptId, version, _deps } = {}) {
+  const source = await readSavedPineSourceByIdVersion({ scriptId, version, _deps });
+  return {
+    success: true,
+    identity_version: 'pine-saved-source-identity-v1',
+    script_id: scriptId,
+    version: String(version),
+    source_sha256: pineSourceSha256(source),
+    source_utf8_bytes: Buffer.byteLength(source, 'utf8'),
+    mutations_performed: false,
+  };
 }
 
 async function ensureSavedPineScriptNamed({ name, source, allowUpdate = true, _deps }) {

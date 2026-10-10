@@ -1375,6 +1375,22 @@ export const observerToolDefinitions = Object.freeze({
       source_bound: z.boolean(),
     },
   },
+  pine_read_saved_source_v1: {
+    classification: 'read_only',
+    inputSchema: {
+      script_id: z.string().regex(/^[A-Z]+;[A-Za-z0-9_-]+$/u).describe('Exact scriptIdPart from pine_list_scripts'),
+      version: z.string().regex(/^[0-9]+(?:\.[0-9]+)*$/u).describe('Exact saved script version from pine_list_scripts'),
+    },
+    outputSchema: {
+      success: z.literal(true),
+      identity_version: z.literal('pine-saved-source-identity-v1'),
+      script_id: z.string().regex(/^[A-Z]+;[A-Za-z0-9_-]+$/u),
+      version: z.string().regex(/^[0-9]+(?:\.[0-9]+)*$/u),
+      source_sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      source_utf8_bytes: z.number().int().positive(),
+      mutations_performed: z.literal(false),
+    },
+  },
   pine_apply_scoped: {
     classification: 'chart_mutation',
     inputSchema: {
