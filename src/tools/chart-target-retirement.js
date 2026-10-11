@@ -5,7 +5,7 @@ import {
 } from '../core/chart-target-retirement.js';
 import { registerObserverTool } from '../release/observer-schema.js';
 
-export function registerChartTargetRetirementTool(server) {
+export function registerChartTargetRetirementTool(server, ownedRetirementDependencies = {}) {
   registerObserverTool(
     server,
     'tv_observer_retire_saved_chart_v2',
@@ -22,7 +22,7 @@ export function registerChartTargetRetirementTool(server) {
     'Close only a V5-receipted exact target ID after rechecking account, profile, layout identity, and all other target state',
     async (input) => {
       try {
-        const result = await retireOwnedSavedLayoutTarget(input, { resolveExactRunningProfile });
+        const result = await retireOwnedSavedLayoutTarget(input, ownedRetirementDependencies);
         return jsonResult({
           ...result,
           retirement_version: 'owned-saved-layout-retirement-v1',

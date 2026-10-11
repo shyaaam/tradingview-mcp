@@ -8,6 +8,8 @@ import {
   retireOwnedSavedLayoutTarget,
   retireSavedChartTarget,
 } from '../src/core/chart-target-retirement.js';
+import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
+import { clearObserverSession, setObserverSession } from '../src/core/observer-session.js';
 import { savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
@@ -257,6 +259,50 @@ test('owned receipt closes only its exact fresh target while preserving duplicat
   assert.deepEqual(deps.calls.close, ['target-c']);
   assert.ok(deps.calls.inspectedTargetIds.includes('target-a'));
   assert.ok(deps.calls.inspectedTargetIds.includes('target-b'));
+});
+
+test('registered owned-retirement tool closes receipt-named target through core resolver', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  const handlers = new Map();
+  setObserverSession({
+    managerBaseUrl: 'http://manager.test',
+    profileId: AUTHORITY.profile_name,
+    cdpUrl: 'http://manager.test/profiles/current-profile/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: ROUTE,
+  });
+  try {
+    registerChartTargetRetirementTool({
+      registerTool(name, _definition, handler) { handlers.set(name, handler); },
+    }, {
+      reviewedAuthority: AUTHORITY,
+      ...deps,
+      managerBaseUrl: 'http://manager.test',
+      resolveExactRunningProfile: async () => ({
+        profileId: 'current-profile',
+        cdpUrl: 'http://manager.test/profiles/current-profile/cdp',
+      }),
+    });
+    const response = await handlers.get('tv_observer_retire_owned_saved_layout_target_v1')({
+      ...AUTHORITY,
+      target_id: 'target-c',
+      expected_account_subject_sha256: ACCOUNT_HASH,
+      ownership_receipt: ownedReceipt(),
+    });
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.success, true);
+    assert.equal(result.action, 'closed');
+    assert.equal(result.target_id, 'target-c');
+    assert.equal(result.preserved_other_targets, true);
+    assert.deepEqual(deps.calls.close, ['target-c']);
+  } finally {
+    clearObserverSession();
+  }
 });
 
 test('owned close lost acknowledgement converges only after exact target absence readback', async () => {
