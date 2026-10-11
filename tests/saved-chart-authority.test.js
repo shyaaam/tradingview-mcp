@@ -1314,6 +1314,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(result.ownership_receipt.created_by_this_attempt, true);
   assert.equal(result.ownership_receipt.target_id, targetId);
   assert.deepEqual(result.ownership_receipt.prior_target_ids, []);
+  const firstFreshTargetUrl = lastTemporaryTargetUrl;
   assert.equal(result.mutations_performed, true);
   assert.equal(loadedRequestedRecord, savedChartRecord);
   assert.equal(loaded, true, 'hydration must await TradingView loadChartFromServer completion');
@@ -1356,6 +1357,8 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(recovered.target_id, targetId);
   assert.equal(recovered.target_created, true);
   assert.ok(recovered.ownership_receipt.prior_target_ids.includes('fresh-layout-target-1'));
+  assert.notEqual(lastTemporaryTargetUrl, firstFreshTargetUrl,
+    'each fresh attempt must use an unguessable target marker so another start cannot claim its lost acknowledgement');
   assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
   assert.equal(targetCreateCount, 2);
   assert.equal(targetCloseCount, 0);

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import CDP from 'chrome-remote-interface';
 
 import {
@@ -262,11 +262,13 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   return `V5OBS-${slot}-${digest}`;
 }
 
-function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId) {
-  const digest = createHash('sha256')
-    .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
-    .digest('base64url').slice(0, 32);
-  return `about:blank#v5-hydrate-${digest}`;
+function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId, requireFreshTarget) {
+  const token = requireFreshTarget
+    ? randomBytes(24).toString('base64url')
+    : createHash('sha256')
+      .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
+      .digest('base64url').slice(0, 32);
+  return `about:blank#v5-hydrate-${token}`;
 }
 
 /** Read-only current-account and exact deterministic-layout preflight. */
@@ -500,7 +502,9 @@ export function verifySavedLayoutTargetCreationReceipt(receipt, expected) {
 async function openAndLoadSavedLayout(expected, dependencies) {
   const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
     requireFreshTarget, accountSubjectSha256, priorLayouts } = expected;
-  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId);
+  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(
+    profileName, captureSlotId, savedLayoutId, requireFreshTarget,
+  );
   const version = await fetchJson(
     new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
     createAuthorityReadDeadline(dependencies),
@@ -531,7 +535,11 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     priorTargetIds = [...priorIds].sort();
     const existingMarkedTargets = beforeTargets.filter((target) => target?.url === temporaryTargetUrl);
     existingTargetObserved = existingMarkedTargets.length > 0;
-    if (existingMarkedTargets.length > 1 || (requireFreshTarget && existingMarkedTargets.length > 0)) {
+    const priorHydrationTargets = requireFreshTarget
+      ? beforeTargets.filter((target) => isSavedLayoutHydrationTargetUrl(target?.url))
+      : [];
+    if (priorHydrationTargets.length > 0 || existingMarkedTargets.length > 1
+      || (requireFreshTarget && existingMarkedTargets.length > 0)) {
       const error = new Error('SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN');
       error.temporaryTargetClosed = false;
       throw error;
@@ -712,6 +720,11 @@ function sameTargetInventory(before, after, excludedTargetId) {
     .map((target) => canonicalTarget(target))
     .sort((left, right) => left.id.localeCompare(right.id));
   return JSON.stringify(identity(before)) === JSON.stringify(identity(after));
+}
+
+function isSavedLayoutHydrationTargetUrl(value) {
+  return typeof value === 'string'
+    && /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u.test(value);
 }
 
 async function closeCreatedHydrationTarget({ profile, browser, priorTargets, targetId, dependencies }) {
