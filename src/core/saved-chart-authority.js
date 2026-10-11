@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import CDP from 'chrome-remote-interface';
 
 import {
@@ -262,11 +262,13 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   return `V5OBS-${slot}-${digest}`;
 }
 
-function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId) {
-  const digest = createHash('sha256')
-    .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
-    .digest('base64url').slice(0, 32);
-  return `about:blank#v5-hydrate-${digest}`;
+function savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId, requireFreshTarget) {
+  const token = requireFreshTarget
+    ? randomBytes(24).toString('base64url')
+    : createHash('sha256')
+      .update(`tv-observer-v5:hydration-target:${profileName}:${captureSlotId}:${savedLayoutId}`, 'utf8')
+      .digest('base64url').slice(0, 32);
+  return `about:blank#v5-hydrate-${token}`;
 }
 
 /** Read-only current-account and exact deterministic-layout preflight. */
@@ -444,6 +446,8 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
   const captureSlotId = input.captureSlotId ?? input.capture_slot_id;
   const reconciliationKey = input.reconciliationKey ?? input.reconciliation_key;
   const savedLayoutId = requireText(input.savedLayoutId ?? input.saved_layout_id, 'saved_layout_id');
+  const requireFreshTarget = input.requireFreshTarget ?? input.require_fresh_target ?? false;
+  if (typeof requireFreshTarget !== 'boolean') throw new Error('require_fresh_target must be boolean');
   if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
     throw new Error('Saved-layout hydration authority is invalid');
   }
@@ -466,15 +470,41 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
     reconciliationKey,
     marker,
     savedLayoutId,
+    requireFreshTarget,
     accountSubjectSha256: inventory.accountSubjectSha256,
     priorLayouts: inventory.layouts,
   }, dependencies);
 }
 
+/** Validate the short-lived V5 receipt before allowing target-ID-scoped closure. */
+export function verifySavedLayoutTargetCreationReceipt(receipt, expected) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
+    || receipt.schema_version !== 'saved-layout-created-target-v1'
+    || receipt.created_by_this_attempt !== true
+    || typeof receipt.profile_id !== 'string' || receipt.profile_id.length < 1 || receipt.profile_id.length > 160
+    || (expected.profileId !== undefined && receipt.profile_id !== expected.profileId)
+    || receipt.target_id !== expected.targetId
+    || receipt.saved_layout_id !== expected.savedLayoutId
+    || receipt.capture_slot_id !== expected.captureSlotId
+    || receipt.reconciliation_key !== expected.reconciliationKey
+    || receipt.layout_marker !== savedChartLayoutMarker(expected.captureSlotId, expected.reconciliationKey)
+    || receipt.account_subject_sha256 !== expected.accountSubjectSha256
+    || !Array.isArray(receipt.prior_target_ids)
+    || receipt.prior_target_ids.length > 256
+    || receipt.prior_target_ids.some((id) => typeof id !== 'string' || id.length < 1 || id.length > 256)
+    || new Set(receipt.prior_target_ids).size !== receipt.prior_target_ids.length
+    || receipt.prior_target_ids.includes(expected.targetId)) {
+    return false;
+  }
+  return true;
+}
+
 async function openAndLoadSavedLayout(expected, dependencies) {
   const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
-    accountSubjectSha256, priorLayouts } = expected;
-  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(profileName, captureSlotId, savedLayoutId);
+    requireFreshTarget, accountSubjectSha256, priorLayouts } = expected;
+  const temporaryTargetUrl = savedLayoutHydrationTargetUrl(
+    profileName, captureSlotId, savedLayoutId, requireFreshTarget,
+  );
   const version = await fetchJson(
     new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
     createAuthorityReadDeadline(dependencies),
@@ -485,18 +515,32 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     createAuthorityReadDeadline(dependencies),
   );
   let targetId = null;
+  let targetCreated = false;
+  let priorTargetIds = [];
+  let initialTargetInventory = null;
   let page = null;
   let operationError = null;
-  let failed = false;
-  let closeResult = null;
+  let targetCreationAttempted = false;
+  let existingTargetObserved = false;
   try {
     const beforeTargets = await listTargets(
       profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
     );
+    initialTargetInventory = beforeTargets;
     const priorIds = new Set(beforeTargets.map((target) => target?.id).filter((id) => typeof id === 'string'));
+    if (beforeTargets.length > 256 || priorIds.size !== beforeTargets.length
+      || [...priorIds].some((id) => id.length < 1 || id.length > 256)) {
+      throw new Error('PROFILE_TARGET_INVENTORY_EXCEEDS_OWNERSHIP_RECEIPT_BOUND');
+    }
+    priorTargetIds = [...priorIds].sort();
     const existingMarkedTargets = beforeTargets.filter((target) => target?.url === temporaryTargetUrl);
-    if (existingMarkedTargets.length > 1) {
-      const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS');
+    existingTargetObserved = existingMarkedTargets.length > 0;
+    const priorHydrationTargets = requireFreshTarget
+      ? beforeTargets.filter((target) => isSavedLayoutHydrationTargetUrl(target?.url))
+      : [];
+    if (priorHydrationTargets.length > 0 || existingMarkedTargets.length > 1
+      || (requireFreshTarget && existingMarkedTargets.length > 0)) {
+      const error = new Error('SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN');
       error.temporaryTargetClosed = false;
       throw error;
     }
@@ -508,7 +552,9 @@ async function openAndLoadSavedLayout(expected, dependencies) {
         throw error;
       }
       targetId = existing.id;
+      targetCreated = false;
     } else {
+      targetCreationAttempted = true;
       try {
         const created = await withAuthorityReadDeadline(
           () => browser.Target.createTarget({ url: temporaryTargetUrl }),
@@ -516,29 +562,35 @@ async function openAndLoadSavedLayout(expected, dependencies) {
         );
         const createdTargetId = requireText(created?.targetId, 'created target id');
         if (priorIds.has(createdTargetId)) {
-          const error = new Error('SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT');
-          error.temporaryTargetClosed = true;
+          const error = new Error('SAVED_LAYOUT_TARGET_ID_ALREADY_PRESENT');
+          error.temporaryTargetClosed = false;
           throw error;
         }
         targetId = createdTargetId;
+        targetCreated = true;
       } catch (error) {
-        if (error?.message === 'SAVED_LAYOUT_TEMPORARY_TARGET_ID_ALREADY_PRESENT') throw error;
-        let afterTargets = [];
+        if (error?.message === 'SAVED_LAYOUT_TARGET_ID_ALREADY_PRESENT') throw error;
+        let afterCreateTargets;
         try {
-          afterTargets = await listTargets(
+          afterCreateTargets = await listTargets(
             profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
           );
-        } catch { /* a lost create response remains unknown */ }
-        const recoveredTargets = afterTargets.filter((target) => target?.url === temporaryTargetUrl);
-        if (recoveredTargets.length === 1 && recoveredTargets[0].type === 'page'
-          && typeof recoveredTargets[0].id === 'string' && recoveredTargets[0].id.length > 0
-          && !priorIds.has(recoveredTargets[0].id)) {
-          targetId = recoveredTargets[0].id;
+        } catch {
+          const failure = new Error('SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
+          failure.temporaryTargetClosed = false;
+          throw failure;
+        }
+        const createdCandidates = afterCreateTargets.filter((candidate) =>
+          !priorIds.has(candidate?.id) && candidate?.type === 'page' && candidate?.url === temporaryTargetUrl);
+        if (createdCandidates.length === 1
+          && afterCreateTargets.filter((candidate) => !priorIds.has(candidate?.id)).length === 1
+          && sameTargetInventory(beforeTargets, afterCreateTargets, createdCandidates[0].id)) {
+          // Lost create acknowledgement is recoverable only from a unique
+          // post-call inventory delta; URL matching alone is never ownership.
+          targetId = createdCandidates[0].id;
+          targetCreated = true;
         } else {
-          const code = recoveredTargets.length > 1
-            ? 'SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS'
-            : 'SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN';
-          const failure = new Error(code, { cause: error });
+          const failure = new Error('SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN', { cause: error });
           failure.temporaryTargetClosed = false;
           throw failure;
         }
@@ -550,6 +602,15 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     if (!target || target.type !== 'page' || target.url !== temporaryTargetUrl
       || typeof target.webSocketDebuggerUrl !== 'string' || !target.webSocketDebuggerUrl) {
       throw new Error('SAVED_LAYOUT_TARGET_NOT_EXACT');
+    }
+    if (targetCreated) {
+      const createdInventory = await listTargets(
+        profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+      );
+      if (createdInventory.filter((entry) => entry?.id === targetId).length !== 1
+        || !sameTargetInventory(beforeTargets, createdInventory, targetId)) {
+        throw new Error('SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN');
+      }
     }
     page = await withAuthorityReadDeadline(
       () => (dependencies.connectTarget || ((url) => CDP({ target: url, local: true })))(target.webSocketDebuggerUrl),
@@ -580,31 +641,57 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     if (!currentTarget || currentTarget.url !== canonicalUrl || probe.current_url !== canonicalUrl) {
       throw new Error('SAVED_LAYOUT_RUNTIME_ROUTE_READBACK_MISMATCH');
     }
+    const finalTargets = await listTargets(
+      profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies),
+    );
+    if (targetCreated && !sameTargetInventory(beforeTargets, finalTargets, targetId)) {
+      throw new Error('SAVED_LAYOUT_TARGET_INVENTORY_CHANGED');
+    }
     return savedLayoutHydrationResult({
       profileName, profileId: profile.profileId, marker, savedLayoutId,
       captureSlotId, reconciliationKey,
       accountSubjectSha256, targetId, targetUrl: canonicalUrl, chartId: probe.chart_uid,
+      targetCreated, priorTargetIds,
     });
   } catch (error) {
-    failed = true;
     operationError = error;
+    let cleanupConfirmed = targetId === null && !targetCreationAttempted && !existingTargetObserved;
+    if (targetCreated && targetId !== null && Array.isArray(initialTargetInventory)) {
+      try {
+        cleanupConfirmed = await closeCreatedHydrationTarget({
+          profile,
+          browser,
+          priorTargets: initialTargetInventory,
+          targetId,
+          dependencies,
+        });
+      } catch { cleanupConfirmed = false; }
+    }
+    operationError = withFinalTemporaryTargetCloseEvidence(operationError, cleanupConfirmed);
   } finally {
     if (page) await closePage(page, createAuthorityReadDeadline(dependencies));
-    if (failed && targetId) {
-      try {
-        closeResult = await withAuthorityReadDeadline(
-          () => browser.Target.closeTarget({ targetId }), createAuthorityReadDeadline(dependencies),
-        );
-      } catch { closeResult = null; }
-    }
+    // A failed hydration did not return a V5-held creation receipt. Leave its
+    // target untouched; the next process must report the orphan, not guess.
     try {
       await withAuthorityReadDeadline(() => browser.close?.(), createAuthorityReadDeadline(dependencies));
     } catch { /* preserve target outcome */ }
   }
-  throw withTemporaryTargetCloseEvidence(operationError, targetId === null || closeResult?.success === true);
+  throw operationError;
 }
 
 function savedLayoutHydrationResult(input) {
+  const ownershipReceipt = input.targetCreated ? Object.freeze({
+    schema_version: 'saved-layout-created-target-v1',
+    created_by_this_attempt: true,
+    profile_id: input.profileId,
+    target_id: input.targetId,
+    capture_slot_id: input.captureSlotId,
+    reconciliation_key: input.reconciliationKey,
+    prior_target_ids: Object.freeze([...input.priorTargetIds]),
+    saved_layout_id: input.savedLayoutId,
+    layout_marker: input.marker,
+    account_subject_sha256: input.accountSubjectSha256,
+  }) : null;
   return Object.freeze({
     success: true,
     hydration_version: 'saved-layout-hydration-v1',
@@ -618,11 +705,52 @@ function savedLayoutHydrationResult(input) {
     target_id: input.targetId,
     target_url: input.targetUrl,
     runtime_chart_id: input.chartId,
-    target_created: true,
+    target_created: input.targetCreated,
+    ownership_receipt: ownershipReceipt,
     navigation_performed: true,
     state: 'hydrated',
     mutations_performed: true,
   });
+}
+
+function sameTargetInventory(before, after, excludedTargetId) {
+  if (!Array.isArray(before) || !Array.isArray(after)) return false;
+  const identity = (targets) => targets
+    .filter((target) => target?.id !== excludedTargetId)
+    .map((target) => canonicalTarget(target))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return JSON.stringify(identity(before)) === JSON.stringify(identity(after));
+}
+
+function isSavedLayoutHydrationTargetUrl(value) {
+  return typeof value === 'string'
+    && /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u.test(value);
+}
+
+async function closeCreatedHydrationTarget({ profile, browser, priorTargets, targetId, dependencies }) {
+  const beforeClose = await listTargets(profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies));
+  const matches = beforeClose.filter((target) => target.id === targetId);
+  if (matches.length === 0) return sameTargetInventory(priorTargets, beforeClose, targetId);
+  if (matches.length !== 1 || matches[0].type !== 'page'
+    || priorTargets.some((target) => target.id === targetId)
+    || !sameTargetInventory(priorTargets, beforeClose, targetId)) return false;
+  try {
+    await withAuthorityReadDeadline(
+      () => browser.Target.closeTarget({ targetId }), createAuthorityReadDeadline(dependencies),
+    );
+  } catch { /* post-close exact inventory decides whether closure converged */ }
+  const afterClose = await listTargets(profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies));
+  return !afterClose.some((target) => target.id === targetId)
+    && sameTargetInventory(priorTargets, afterClose, targetId);
+}
+
+function canonicalTarget(target) {
+  if (!target || typeof target !== 'object' || Array.isArray(target)
+    || typeof target.id !== 'string' || typeof target.type !== 'string'
+    || typeof target.url !== 'string') {
+    throw new Error('PROFILE_TARGET_INVENTORY_MALFORMED');
+  }
+  return Object.fromEntries(Object.entries(target).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function preflightResult(input, marker, state) {
@@ -823,6 +951,18 @@ function withTemporaryTargetCloseEvidence(error, closeConfirmed) {
   }
   const wrapped = new Error(error instanceof Error ? error.message : safeFailureCode(error), { cause: error });
   wrapped.temporaryTargetClosed = temporaryTargetClosed;
+  return wrapped;
+}
+
+function withFinalTemporaryTargetCloseEvidence(error, closeConfirmed) {
+  if (error instanceof Error) {
+    try {
+      error.temporaryTargetClosed = closeConfirmed;
+      return error;
+    } catch { /* wrap immutable provider errors below */ }
+  }
+  const wrapped = new Error(error instanceof Error ? error.message : safeFailureCode(error), { cause: error });
+  wrapped.temporaryTargetClosed = closeConfirmed;
   return wrapped;
 }
 

@@ -4,7 +4,12 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
 
-import { retireSavedChartTarget } from '../src/core/chart-target-retirement.js';
+import {
+  retireOwnedSavedLayoutTarget,
+  retireSavedChartTarget,
+} from '../src/core/chart-target-retirement.js';
+import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
+import { clearObserverSession, setObserverSession } from '../src/core/observer-session.js';
 import { savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
@@ -187,6 +192,22 @@ function retire(input = INPUT, dependencies = {}) {
   return retireSavedChartTarget(input, { reviewedAuthority: AUTHORITY, ...dependencies });
 }
 
+function ownedReceipt(targetId = 'target-c', overrides = {}) {
+  return {
+    schema_version: 'saved-layout-created-target-v1',
+    created_by_this_attempt: true,
+    profile_id: 'current-profile',
+    target_id: targetId,
+    capture_slot_id: AUTHORITY.capture_slot_id,
+    reconciliation_key: AUTHORITY.reconciliation_key,
+    prior_target_ids: ['target-a', 'target-b', 'anchor'],
+    saved_layout_id: AUTHORITY.saved_layout_id,
+    layout_marker: MARKER,
+    account_subject_sha256: ACCOUNT_HASH,
+    ...overrides,
+  };
+}
+
 test('closes exact server layout through target ID despite shared route and swapped page sockets', async () => {
   const deps = fixture();
   const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
@@ -201,6 +222,161 @@ test('closes exact server layout through target ID despite shared route and swap
   assert.deepEqual(deps.calls.attachedTargetIds, deps.calls.inspectedTargetIds);
   assert.deepEqual(deps.calls.browserWebSocketUrls, ['ws://manager.test/profiles/current-profile/cdp']);
   assert.equal(deps.calls.browserCloseCount, 1);
+});
+
+test('duplicate exact saved-layout targets return typed ambiguity without closing either target', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  const result = await retire(INPUT, { ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'ambiguous');
+  assert.equal(result.failure_code, 'DUPLICATE_EXACT_SAVED_LAYOUT_TARGETS');
+  assert.equal(result.matching_saved_layout_targets, 2);
+  assert.equal(result.chart_target_id, null);
+  assert.equal(result.mutations_performed, false);
+  assert.deepEqual(deps.calls.close, []);
+});
+
+test('owned receipt closes only its exact fresh target while preserving duplicate authorities', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  const result = await retireOwnedSavedLayoutTarget({
+    ...INPUT,
+    target_id: 'target-c',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: ownedReceipt(),
+  }, { reviewedAuthority: AUTHORITY, ...deps, managerBaseUrl: 'http://manager.test' });
+  assert.equal(result.action, 'closed');
+  assert.equal(result.chart_target_id, 'target-c');
+  assert.equal(result.matching_saved_layout_targets, 1);
+  assert.deepEqual(deps.calls.close, ['target-c']);
+  assert.ok(deps.calls.inspectedTargetIds.includes('target-a'));
+  assert.ok(deps.calls.inspectedTargetIds.includes('target-b'));
+});
+
+test('registered owned-retirement tool closes receipt-named target through core resolver', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  const handlers = new Map();
+  setObserverSession({
+    managerBaseUrl: 'http://manager.test',
+    profileId: AUTHORITY.profile_name,
+    cdpUrl: 'http://manager.test/profiles/current-profile/cdp',
+    chartTargetId: 'target-a',
+    chartTargetUrl: ROUTE,
+  });
+  try {
+    registerChartTargetRetirementTool({
+      registerTool(name, _definition, handler) { handlers.set(name, handler); },
+    }, {
+      reviewedAuthority: AUTHORITY,
+      ...deps,
+      managerBaseUrl: 'http://manager.test',
+      resolveExactRunningProfile: async () => ({
+        profileId: 'current-profile',
+        cdpUrl: 'http://manager.test/profiles/current-profile/cdp',
+      }),
+    });
+    const response = await handlers.get('tv_observer_retire_owned_saved_layout_target_v1')({
+      ...AUTHORITY,
+      target_id: 'target-c',
+      expected_account_subject_sha256: ACCOUNT_HASH,
+      ownership_receipt: ownedReceipt(),
+    });
+    const result = JSON.parse(response.content[0].text);
+    assert.equal(result.success, true);
+    assert.equal(result.action, 'closed');
+    assert.equal(result.target_id, 'target-c');
+    assert.equal(result.preserved_other_targets, true);
+    assert.deepEqual(deps.calls.close, ['target-c']);
+  } finally {
+    clearObserverSession();
+  }
+});
+
+test('owned close lost acknowledgement converges only after exact target absence readback', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  deps.calls.loseCloseResponse = true;
+  const result = await retireOwnedSavedLayoutTarget({
+    ...INPUT,
+    target_id: 'target-c',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: ownedReceipt(),
+  }, { reviewedAuthority: AUTHORITY, ...deps, managerBaseUrl: 'http://manager.test', timeoutMs: 300 });
+  assert.equal(result.action, 'closed');
+  assert.equal(result.chart_target_id, 'target-c');
+  assert.equal(result.mutations_performed, true);
+  assert.deepEqual(deps.calls.close, ['target-c']);
+});
+
+test('owned target close rejects altered receipts before profile inspection', async () => {
+  for (const overrides of [
+    { account_subject_sha256: 'f'.repeat(64) },
+    { profile_id: 'another-profile' },
+    { target_id: 'target-b' },
+    { prior_target_ids: ['target-a', 'target-b', 'anchor', 'target-c'] },
+  ]) {
+    const deps = fixture();
+    await assert.rejects(retireOwnedSavedLayoutTarget({
+      ...INPUT,
+      target_id: 'target-c',
+      expected_account_subject_sha256: ACCOUNT_HASH,
+      ownership_receipt: ownedReceipt('target-c', overrides),
+    }, { reviewedAuthority: AUTHORITY, ...deps, managerBaseUrl: 'http://manager.test' }));
+    assert.deepEqual(deps.calls.fetch, []);
+    assert.deepEqual(deps.calls.close, []);
+  }
+});
+
+test('owned target close fails closed when receipt target is present with another identity', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: 'about:blank' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  await assert.rejects(retireOwnedSavedLayoutTarget({
+    ...INPUT,
+    target_id: 'target-c',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: ownedReceipt(),
+  }, { reviewedAuthority: AUTHORITY, ...deps, managerBaseUrl: 'http://manager.test' }),
+  /present but no longer matches/u);
+  assert.deepEqual(deps.calls.close, []);
+});
+
+test('owned target close detects page inventory race before close', async () => {
+  const deps = fixture([
+    { id: 'target-a', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-a' },
+    { id: 'target-b', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-b' },
+    { id: 'target-c', type: 'page', url: ROUTE, webSocketDebuggerUrl: 'ws://local/devtools/page/target-c' },
+    { id: 'anchor', type: 'page', url: 'about:blank' },
+  ]);
+  deps.calls.addPageOnJsonListCall = 2;
+  await assert.rejects(retireOwnedSavedLayoutTarget({
+    ...INPUT,
+    target_id: 'target-c',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: ownedReceipt(),
+  }, { reviewedAuthority: AUTHORITY, ...deps, managerBaseUrl: 'http://manager.test' }),
+  /page inventory changed before/u);
+  assert.deepEqual(deps.calls.close, []);
 });
 
 test('fails closed when expected marker is active under a different server layout ID', async () => {
