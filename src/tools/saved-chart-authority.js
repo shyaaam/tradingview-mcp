@@ -7,13 +7,14 @@ export function registerSavedChartAuthorityTools(server) {
     server,
     'tv_observer_hydrate_saved_layout_v1',
     'Hydrate one exact current-account saved-layout ID into a disposable TradingView target and verify marker plus runtime readback',
-    async ({ profile_name, capture_slot_id, reconciliation_key, saved_layout_id }) => {
+    async ({ profile_name, capture_slot_id, reconciliation_key, saved_layout_id, require_fresh_target }) => {
       try {
         return jsonResult(await hydrateSavedChartLayout({
           profileName: profile_name,
           captureSlotId: capture_slot_id,
           reconciliationKey: reconciliation_key,
           savedLayoutId: saved_layout_id,
+          requireFreshTarget: require_fresh_target,
         }));
       } catch (error) {
         return jsonResult({ success: false, error: error.message }, true);

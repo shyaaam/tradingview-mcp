@@ -1165,6 +1165,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   let simulateHungReadback = false;
   let simulateLostTargetCreateResponse = false;
   let simulateUnknownTargetCreateResponse = false;
+  let simulateConcurrentTargetDuringCreateResponse = false;
   const page = {
     Runtime: {
       enable: async () => {},
@@ -1249,6 +1250,14 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
         });
         if (simulateLostTargetCreateResponse) {
           simulateLostTargetCreateResponse = false;
+          if (simulateConcurrentTargetDuringCreateResponse) {
+            simulateConcurrentTargetDuringCreateResponse = false;
+            const competingId = `competing-layout-target-${targetSequence}`;
+            targets.set(competingId, {
+              id: competingId, type: 'page', url,
+              webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${competingId}`,
+            });
+          }
           return await new Promise(() => {});
         }
         return { targetId };
@@ -1266,6 +1275,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     captureSlotId: INPUT.captureSlotId,
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId,
+    requireFreshTarget: true,
   }, {
     readProfileInventory: async () => ({
       ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
@@ -1300,6 +1310,10 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
   assert.equal(result.target_id, targetId);
   assert.equal(result.runtime_chart_id, runtimeChartId);
   assert.equal(result.target_url, `https://www.tradingview.com/chart/${runtimeChartId}/`);
+  assert.equal(result.target_created, true);
+  assert.equal(result.ownership_receipt.created_by_this_attempt, true);
+  assert.equal(result.ownership_receipt.target_id, targetId);
+  assert.deepEqual(result.ownership_receipt.prior_target_ids, []);
   assert.equal(result.mutations_performed, true);
   assert.equal(loadedRequestedRecord, savedChartRecord);
   assert.equal(loaded, true, 'hydration must await TradingView loadChartFromServer completion');
@@ -1316,6 +1330,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     captureSlotId: INPUT.captureSlotId,
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId,
+    requireFreshTarget: true,
   }, {
     authorityReadTimeoutMs: 300,
     readProfileInventory: async () => ({
@@ -1337,11 +1352,47 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     },
     sleep: async () => {},
   });
-  assert.equal(recovered.state, 'hydrated', 'lost create response must reconcile the exact marked target');
+  assert.equal(recovered.state, 'hydrated', 'lost create response must recover only from a unique inventory delta');
   assert.equal(recovered.target_id, targetId);
+  assert.equal(recovered.target_created, true);
+  assert.ok(recovered.ownership_receipt.prior_target_ids.includes('fresh-layout-target-1'));
   assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
   assert.equal(targetCreateCount, 2);
   assert.equal(targetCloseCount, 0);
+
+  simulateLostTargetCreateResponse = true;
+  simulateConcurrentTargetDuringCreateResponse = true;
+  const targetsBeforeAmbiguousAck = [...targets.keys()].sort();
+  await assert.rejects(hydrateSavedChartLayout({
+    profileName: INPUT.profileName,
+    captureSlotId: INPUT.captureSlotId,
+    reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId,
+    requireFreshTarget: true,
+  }, {
+    authorityReadTimeoutMs: 300,
+    readProfileInventory: async () => ({
+      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
+      close: async () => {},
+    }),
+    fetch: async (value) => {
+      const url = new URL(String(value));
+      const body = url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl }
+        : [...targets.values()];
+      return { ok: true, json: async () => body };
+    },
+    connectBrowser: async () => browser,
+    connectTarget: async (webSocketUrl) => {
+      targetId = String(webSocketUrl).split('/').at(-1);
+      return page;
+    },
+    sleep: async () => {},
+  }), /SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN/u);
+  assert.equal(targetCloseCount, 0, 'ambiguous create acknowledgement must not close either new target');
+  assert.ok(targetsBeforeAmbiguousAck.every((id) => targets.has(id)));
+  assert.ok(targets.size > targetsBeforeAmbiguousAck.length, 'unowned targets remain as reported orphans');
 
   const orphanTargetId = 'orphaned-hydration-target';
   targets.set(orphanTargetId, {
@@ -1351,11 +1402,12 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${orphanTargetId}`,
   });
   loaded = false;
-  const rehydrated = await hydrateSavedChartLayout({
+  await assert.rejects(hydrateSavedChartLayout({
     profileName: INPUT.profileName,
     captureSlotId: INPUT.captureSlotId,
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId,
+    requireFreshTarget: true,
   }, {
     readProfileInventory: async () => ({
       ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
@@ -1375,10 +1427,10 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
       return page;
     },
     sleep: async () => {},
-  });
-  assert.equal(rehydrated.state, 'hydrated', 'fresh invocation must reuse exact marked orphan without another target create');
-  assert.equal(rehydrated.target_id, orphanTargetId);
-  assert.equal(targetCreateCount, 2);
+  }), /SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN/u);
+  assert.equal(targets.has(orphanTargetId), true, 'crash orphan must remain untouched');
+  assert.equal(targetCreateCount, 3, 'uncertain prior targets block another fresh target');
+  assert.equal(targetCloseCount, 0);
 
   targets.clear();
   simulateUnknownTargetCreateResponse = true;
@@ -1445,7 +1497,7 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     },
     sleep: async () => {},
   }), (error) => {
-    assert.equal(error.message, 'SAVED_LAYOUT_TEMPORARY_TARGET_AMBIGUOUS');
+    assert.equal(error.message, 'SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN');
     assert.equal(error.temporaryTargetClosed, false);
     return true;
   });

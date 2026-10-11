@@ -4,7 +4,11 @@ import WebSocket from 'ws';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { resolveExactRunningProfile } from './chart-target-open.js';
-import { ACCOUNT_LAYOUT_PROBE, savedChartLayoutMarker } from './saved-chart-authority.js';
+import {
+  ACCOUNT_LAYOUT_PROBE,
+  savedChartLayoutMarker,
+  verifySavedLayoutTargetCreationReceipt,
+} from './saved-chart-authority.js';
 
 const CHART_PAGE = /^https:\/\/www\.tradingview\.com\/chart\//u;
 const CHART_ORIGIN = 'https://www.tradingview.com';
@@ -41,6 +45,9 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
   const resolveProfile = dependencies.resolveExactRunningProfile || resolveExactRunningProfile;
   const profile = await resolveProfile(expected.profileName, { ...dependencies, managerBaseUrl });
   const profileId = requireText(profile.profileId, 'current profile ID');
+  if (dependencies.expectedProfileId !== undefined && profileId !== dependencies.expectedProfileId) {
+    throw new Error('Current profile ID differs from owned target creation receipt.');
+  }
   const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
   const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
   const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
@@ -64,10 +71,43 @@ export async function retireSavedChartTarget(input = {}, dependencies = {}) {
       browser,
       requestJson,
       cdpUrl,
+      ownedTargetId: dependencies.ownedTargetId ?? null,
+      ownedAccountSubjectSha256: dependencies.ownedAccountSubjectSha256 ?? null,
     });
   } finally {
     try { await browser.close?.(); } catch { /* preserve retirement outcome */ }
   }
+}
+
+/** Close only target named by V5's successful fresh-hydration receipt. */
+export async function retireOwnedSavedLayoutTarget(input = {}, dependencies = {}) {
+  const requested = normalizeInput(input);
+  const reviewedInput = dependencies.reviewedAuthority ?? readReviewedAuthority();
+  const expected = normalizeInput(reviewedInput);
+  if (!sameAuthority(requested, expected)) {
+    throw new Error('Retirement request differs from per-worker reviewed capture-slot authority.');
+  }
+  const receipt = input.ownership_receipt;
+  const targetId = requirePattern(input.target_id, 'target_id', /^[A-Za-z0-9_-]{1,256}$/u);
+  const accountSubjectSha256 = requirePattern(
+    input.expected_account_subject_sha256, 'expected_account_subject_sha256', /^[0-9a-f]{64}$/u,
+  );
+  if (!verifySavedLayoutTargetCreationReceipt(receipt, {
+    profileName: expected.profileName,
+    captureSlotId: expected.captureSlotId,
+    reconciliationKey: expected.reconciliationKey,
+    savedLayoutId: expected.savedLayoutId,
+    targetId,
+    accountSubjectSha256,
+  })) {
+    throw new Error('Owned saved-layout target receipt is invalid or belongs to another authority.');
+  }
+  return await retireSavedChartTarget(input, {
+    ...dependencies,
+    expectedProfileId: receipt.profile_id,
+    ownedTargetId: targetId,
+    ownedAccountSubjectSha256: accountSubjectSha256,
+  });
 }
 
 function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
@@ -174,7 +214,10 @@ function transportError(error) {
   return error;
 }
 
-async function retireFromProfile({ expected, dependencies, deadline, browser, requestJson, cdpUrl }) {
+async function retireFromProfile({
+  expected, dependencies, deadline, browser, requestJson, cdpUrl,
+  ownedTargetId = null, ownedAccountSubjectSha256 = null,
+}) {
   const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
   const beforeSnapshot = await readProfileSnapshot({
     targetListUrl, expected, browser, dependencies, deadline, requestJson,
@@ -184,12 +227,30 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   const beforeViews = beforeSnapshot.views;
   assertNoConflictingSavedLayoutTarget(beforeViews, expected);
   const exact = beforeViews.filter((view) => isExactSavedLayout(view, expected));
-  if (exact.length > 1) throw new Error('Exact saved-layout is open in multiple targets; refusing retirement.');
+  if (ownedTargetId === null && exact.length > 1) {
+    return result(expected, null, 'ambiguous', beforeCharts.length, false,
+      beforeViews[0]?.accountSubjectSha256 ?? null, 'DUPLICATE_EXACT_SAVED_LAYOUT_TARGETS', exact.length);
+  }
+  if (ownedTargetId !== null) {
+    if (!before.some((target) => target.id === ownedTargetId)) {
+      return result(expected, null, 'already-closed', beforeCharts.length, false,
+        ownedAccountSubjectSha256, null, exact.length);
+    }
+    if (!exact.some((view) => view.target.id === ownedTargetId)) {
+      throw new Error('Owned target ID is present but no longer matches its saved-layout authority.');
+    }
+    if (exact.filter((view) => view.target.id === ownedTargetId).length !== 1
+      || exact.find((view) => view.target.id === ownedTargetId).accountSubjectSha256 !== ownedAccountSubjectSha256) {
+      throw new Error('Owned target no longer matches its account-bound saved-layout receipt.');
+    }
+  }
   if (exact.length === 0) {
     return result(expected, null, 'already-closed', beforeCharts.length, false,
-      beforeViews[0]?.accountSubjectSha256 ?? null);
+      beforeViews[0]?.accountSubjectSha256 ?? null, null, 0);
   }
-  const beforeIdentity = exact[0];
+  const beforeIdentity = ownedTargetId === null
+    ? exact[0]
+    : exact.find((view) => view.target.id === ownedTargetId);
   const target = beforeIdentity.target;
   if (before.length <= 1) throw new Error('Cannot retire the last browser page in the exact profile.');
   const preCloseSnapshot = await readProfileSnapshot({
@@ -201,13 +262,16 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
   assertNoConflictingSavedLayoutTarget(preCloseViews, expected);
   const currentExact = preCloseViews.filter((view) => isExactSavedLayout(view, expected));
   const preservedBefore = beforeViews.filter((view) => view.target.id !== target.id);
-  if (currentExact.length === 0 && !preClose.some((entry) => entry.id === target.id)
+  if (ownedTargetId === null && currentExact.length === 0 && !preClose.some((entry) => entry.id === target.id)
     && samePageInventory(before, preClose, target.id)
     && sameChartViews(preservedBefore, preCloseViews)) {
     return result(expected, null, 'already-closed', preCloseCharts.length, false,
-      beforeIdentity.accountSubjectSha256);
+      beforeIdentity.accountSubjectSha256, null, 0);
   }
-  if (currentExact.length !== 1 || currentExact[0].target.id !== target.id
+  const currentTargetIdentities = currentExact.filter((view) => view.target.id === target.id);
+  if (currentTargetIdentities.length !== 1
+    || currentTargetIdentities[0].accountSubjectSha256 !== beforeIdentity.accountSubjectSha256
+    || (ownedTargetId === null && currentExact.length !== 1)
     || !samePageInventory(before, preClose)
     || !sameChartViews(beforeViews, preCloseViews)) {
     throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
@@ -235,7 +299,7 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     after = afterSnapshot.targets;
     afterViews = afterSnapshot.views;
     if (!after.some((entry) => entry.id === target.id)
-      && !afterViews.some((view) => isExactSavedLayout(view, expected))) break;
+      && (ownedTargetId !== null || !afterViews.some((view) => isExactSavedLayout(view, expected)))) break;
     if (!closeAcknowledged) {
       throw new Error('Exact saved-layout target remained open after unacknowledged close.');
     }
@@ -245,7 +309,7 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     );
   }
   if (after.some((entry) => entry.id === target.id)
-    || afterViews.some((view) => isExactSavedLayout(view, expected))) {
+    || (ownedTargetId === null && afterViews.some((view) => isExactSavedLayout(view, expected)))) {
     throw new Error('Exact saved-layout target remained open after bounded close.');
   }
   if (!samePageInventory(before, after, target.id)
@@ -253,7 +317,8 @@ async function retireFromProfile({ expected, dependencies, deadline, browser, re
     throw new Error('Saved-layout retirement changed another TradingView chart target.');
   }
   return result(expected, target.id, 'closed', chartTargets(after).length, true,
-    beforeIdentity.accountSubjectSha256);
+    beforeIdentity.accountSubjectSha256, null,
+    afterViews.filter((view) => isExactSavedLayout(view, expected)).length);
 }
 
 async function readProfileSnapshot({
@@ -322,7 +387,10 @@ function normalizeInput(input) {
   });
 }
 
-function result(expected, targetId, action, remainingChartTargets, mutationsPerformed, accountSubjectSha256) {
+function result(
+  expected, targetId, action, remainingChartTargets, mutationsPerformed,
+  accountSubjectSha256, failureCode = null, matchingSavedLayoutTargets = 0,
+) {
   return Object.freeze({
     success: true,
     retirement_version: 'saved-chart-retirement-v2',
@@ -333,6 +401,8 @@ function result(expected, targetId, action, remainingChartTargets, mutationsPerf
     account_subject_sha256: accountSubjectSha256,
     chart_target_id: targetId,
     action,
+    failure_code: failureCode,
+    matching_saved_layout_targets: matchingSavedLayoutTargets,
     remaining_chart_targets: remainingChartTargets,
     mutations_performed: mutationsPerformed,
   });
@@ -488,7 +558,7 @@ function samePageInventory(left, right, excludedTargetId = null) {
 }
 
 function targetIdentity(target) {
-  return { id: target.id, type: target.type, url: target.url };
+  return Object.fromEntries(Object.entries(target).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function requireProfileBrowserWebSocketUrl(value, cdpUrl, profileId) {
