@@ -383,9 +383,10 @@ test('observer result fixtures satisfy registered output schemas', () => {
       runtime_chart_id: 'route-a',
       target_created: true,
       ownership_receipt: {
-        schema_version: 'saved-layout-created-target-v1',
+        schema_version: 'saved-layout-created-target-v2',
         created_by_this_attempt: true,
-        profile_id: 'ephemeral-profile-id',
+        profile_name: 'tv-observer-1',
+        profile_instance_sha256: 'c'.repeat(64),
         target_id: 'target-a',
         capture_slot_id: 'v5-capture-slot-a',
         reconciliation_key: 'a'.repeat(64),

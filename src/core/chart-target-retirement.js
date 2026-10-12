@@ -6,6 +6,7 @@ import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { assertExactProfileBrowserWebSocket, resolveExactRunningProfile } from './chart-target-open.js';
 import {
   ACCOUNT_LAYOUT_PROBE,
+  profileInstanceSha256,
   savedChartLayoutMarker,
   verifySavedLayoutTargetCreationReceipt,
 } from './saved-chart-authority.js';
@@ -47,7 +48,9 @@ export async function retireOwnedSavedLayoutTarget(input = {}, dependencies = {}
     expected.profileName, { ...dependencies, managerBaseUrl },
   );
   const profileId = requireText(profile.profileId, 'current profile ID');
-  if (profileId !== receipt.profile_id) throw new Error('Current profile differs from owned target receipt.');
+  if (profileInstanceSha256(profileId) !== receipt.profile_instance_sha256) {
+    throw new Error('Current profile instance differs from owned target receipt.');
+  }
   const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
   const version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), fetchImpl, deadline);
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);

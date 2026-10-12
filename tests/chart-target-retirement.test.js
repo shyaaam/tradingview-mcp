@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import { retireOwnedSavedLayoutTarget } from '../src/core/chart-target-retirement.js';
 import { registerChartTargetRetirementTool } from '../src/tools/chart-target-retirement.js';
-import { savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
+import { profileInstanceSha256, savedChartLayoutMarker } from '../src/core/saved-chart-authority.js';
 import { observerToolDefinitions } from '../src/release/observer-schema.js';
 
 const ACCOUNT_HASH = createHash('sha256').update('observer-account', 'utf8').digest('hex');
@@ -12,11 +12,14 @@ const RECONCILIATION_KEY = 'a'.repeat(64);
 const SLOT = 'v5-capture-slot-b';
 const MARKER = savedChartLayoutMarker(SLOT, RECONCILIATION_KEY);
 const ROUTE = 'https://www.tradingview.com/chart/runtime-chart/';
+const PROFILE_NAME = 'tv-observer-1';
+const PROFILE_ID = 'current-profile';
 const AUTHORITY = makeAuthority();
 const RECEIPT = Object.freeze({
-  schema_version: 'saved-layout-created-target-v1',
+  schema_version: 'saved-layout-created-target-v2',
   created_by_this_attempt: true,
-  profile_id: 'current-profile',
+  profile_name: PROFILE_NAME,
+  profile_instance_sha256: profileInstanceSha256(PROFILE_ID),
   target_id: 'owned-target',
   capture_slot_id: SLOT,
   reconciliation_key: RECONCILIATION_KEY,
@@ -98,13 +101,14 @@ function fixture(overrides = {}) {
     async fetch(url) {
       calls.fetch.push(String(url));
       return new Response(JSON.stringify({
-        webSocketDebuggerUrl: 'ws://manager.test/profiles/current-profile/cdp',
+        webSocketDebuggerUrl: `ws://manager.test/profiles/${overrides.profileId ?? PROFILE_ID}/cdp`,
       }), { status: 200 });
     },
     connectBrowser: async () => browser,
     resolveExactRunningProfile: async (name) => {
-      assert.equal(name, 'tv-observer-1');
-      return { profileId: 'current-profile', cdpUrl: 'http://manager.test/profiles/current-profile/cdp' };
+      assert.equal(name, PROFILE_NAME);
+      const profileId = overrides.profileId ?? PROFILE_ID;
+      return { profileId, cdpUrl: `http://manager.test/profiles/${profileId}/cdp` };
     },
   };
 }
@@ -130,7 +134,12 @@ test('fresh receipt closes only its target and leaves duplicate user tabs untouc
 });
 
 test('missing or altered ownership receipt fails before browser access', async () => {
-  for (const ownershipReceipt of [null, { ...RECEIPT, target_id: 'user-tab-a' }]) {
+  for (const ownershipReceipt of [
+    null,
+    { ...RECEIPT, target_id: 'user-tab-a' },
+    { ...RECEIPT, schema_version: 'saved-layout-created-target-v1' },
+    { ...RECEIPT, profile_instance_sha256: 'not-a-fingerprint' },
+  ]) {
     const deps = fixture();
     await assert.rejects(retireOwnedSavedLayoutTarget({
       ...AUTHORITY,
@@ -141,6 +150,20 @@ test('missing or altered ownership receipt fails before browser access', async (
     assert.deepEqual(deps.calls.fetch, []);
     assert.deepEqual(deps.calls.closed, []);
   }
+});
+
+test('replaced profile instance fails before CDP access and leaves receipt target open', async () => {
+  const deps = fixture({ profileId: 'replacement-profile' });
+  await assert.rejects(retireOwnedSavedLayoutTarget({
+    ...AUTHORITY,
+    target_id: RECEIPT.target_id,
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: RECEIPT,
+  }, { ...deps, reviewedAuthority: AUTHORITY, managerBaseUrl: 'http://manager.test' }),
+  /Current profile instance differs from owned target receipt/u);
+  assert.deepEqual(deps.calls.fetch, []);
+  assert.deepEqual(deps.calls.closed, []);
+  assert.equal(deps.targets.has('owned-target'), true);
 });
 
 test('account or saved-layout mismatch leaves receipt target open', async () => {

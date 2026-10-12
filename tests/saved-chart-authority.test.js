@@ -1229,6 +1229,11 @@ test('fresh hydration ignores duplicate existing tabs and returns exact target o
   assert.equal(result.target_id, targetId);
   assert.equal(result.runtime_chart_id, runtimeChartId);
   assert.equal(result.ownership_receipt.target_id, targetId);
+  assert.equal(result.ownership_receipt.schema_version, 'saved-layout-created-target-v2');
+  assert.equal(result.ownership_receipt.profile_name, INPUT.profileName);
+  assert.equal(result.ownership_receipt.profile_instance_sha256,
+    createHash('sha256').update(profileId, 'utf8').digest('hex'));
+  assert.equal(Object.hasOwn(result.ownership_receipt, 'profile_id'), false);
   assert.equal(result.ownership_receipt.account_subject_sha256, ACCOUNT_HASH);
   assert.equal(result.ownership_receipt.saved_layout_id, savedLayoutId);
   assert.equal(Object.hasOwn(result.ownership_receipt, 'prior_target_ids'), false);
