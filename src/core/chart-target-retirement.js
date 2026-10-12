@@ -3,95 +3,31 @@ import WebSocket from 'ws';
 
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
-import { resolveExactRunningProfile } from './chart-target-open.js';
+import { assertExactProfileBrowserWebSocket, resolveExactRunningProfile } from './chart-target-open.js';
 import {
   ACCOUNT_LAYOUT_PROBE,
   savedChartLayoutMarker,
   verifySavedLayoutTargetCreationReceipt,
 } from './saved-chart-authority.js';
 
-const CHART_PAGE = /^https:\/\/www\.tradingview\.com\/chart\//u;
+const CHART_ROUTE = /^https:\/\/www\.tradingview\.com\/chart\/([A-Za-z0-9_-]{1,160})\/$/u;
 const CHART_ORIGIN = 'https://www.tradingview.com';
 const AUTHORITY_SCHEMA_VERSION = 'v5-capture-slot-authority-v3';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const POLL_INTERVAL_MS = 100;
-const MAX_RETIREMENT_READ_BYTES = 128 * 1024;
-const MAX_CDP_TARGET_ID_CHARS = 256;
-const MAX_CDP_TARGET_URL_CHARS = 4_096;
+const MAX_READ_BYTES = 128 * 1024;
 
-class TargetDisappearedDuringIdentityRead extends Error {
-  constructor(targetId, cause) {
-    super('CDP target disappeared during exact identity read.', { cause });
-    this.targetId = targetId;
-  }
-}
-
-/** Close only one exact saved-chart target; the durable saved chart is not deleted. */
-export async function retireSavedChartTarget(input = {}, dependencies = {}) {
-  const requested = normalizeInput(input);
-  const reviewedInput = dependencies.reviewedAuthority ?? readReviewedAuthority();
-  const expected = normalizeInput(reviewedInput);
-  if (!sameAuthority(requested, expected)) {
-    throw new Error('Retirement request differs from the per-worker reviewed capture-slot authority.');
-  }
-  const timeoutMs = boundedPositiveInteger(dependencies.timeoutMs, DEFAULT_TIMEOUT_MS);
-  const now = dependencies.now || (() => performance.now());
-  const deadline = { at: now() + timeoutMs, now, timeoutMs };
-  const fetchImpl = dependencies.fetch || fetch;
-  const requestJson = (url) => fetchJson(url, fetchImpl, deadline);
-  const managerBaseUrl = dependencies.managerBaseUrl
-    || await withDeadline(() => resolveCloakManagerBaseUrl({ fetchJson: requestJson }), deadline);
-  if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for saved-chart retirement.');
-  const resolveProfile = dependencies.resolveExactRunningProfile || resolveExactRunningProfile;
-  const profile = await resolveProfile(expected.profileName, { ...dependencies, managerBaseUrl });
-  const profileId = requireText(profile.profileId, 'current profile ID');
-  if (dependencies.expectedProfileId !== undefined && profileId !== dependencies.expectedProfileId) {
-    throw new Error('Current profile ID differs from owned target creation receipt.');
-  }
-  const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
-  const version = await requestJson(new URL('json/version', `${cdpUrl}/`).toString());
-  const browserWebSocketUrl = requireProfileBrowserWebSocketUrl(
-    version?.webSocketDebuggerUrl,
-    cdpUrl,
-    profileId,
-  );
-  const connectBrowser = dependencies.connectBrowser || connectBoundedBrowser;
-  const browser = await withDeadline(
-    () => connectBrowser(browserWebSocketUrl, {
-      maxPayload: MAX_RETIREMENT_READ_BYTES,
-      handshakeTimeoutMs: Math.max(1, Math.floor(remainingMs(deadline) - POLL_INTERVAL_MS)),
-    }),
-    deadline,
-  );
-  try {
-    return await retireFromProfile({
-      expected,
-      dependencies,
-      deadline,
-      browser,
-      requestJson,
-      cdpUrl,
-      ownedTargetId: dependencies.ownedTargetId ?? null,
-      ownedAccountSubjectSha256: dependencies.ownedAccountSubjectSha256 ?? null,
-    });
-  } finally {
-    try { await browser.close?.(); } catch { /* preserve retirement outcome */ }
-  }
-}
-
-/** Close only target named by V5's successful fresh-hydration receipt. */
+/** Close only target named by V5's verified creation receipt. */
 export async function retireOwnedSavedLayoutTarget(input = {}, dependencies = {}) {
-  const requested = normalizeInput(input);
-  const reviewedInput = dependencies.reviewedAuthority ?? readReviewedAuthority();
-  const expected = normalizeInput(reviewedInput);
-  if (!sameAuthority(requested, expected)) {
-    throw new Error('Retirement request differs from per-worker reviewed capture-slot authority.');
-  }
-  const receipt = input.ownership_receipt;
+  const expected = normalizeAuthority(input);
+  const reviewed = normalizeAuthority(dependencies.reviewedAuthority ?? readReviewedAuthority());
+  if (!sameAuthority(expected, reviewed)) throw new Error('Retirement request differs from reviewed capture-slot authority.');
+
   const targetId = requirePattern(input.target_id, 'target_id', /^[A-Za-z0-9_-]{1,256}$/u);
   const accountSubjectSha256 = requirePattern(
     input.expected_account_subject_sha256, 'expected_account_subject_sha256', /^[0-9a-f]{64}$/u,
   );
+  const receipt = input.ownership_receipt;
   if (!verifySavedLayoutTargetCreationReceipt(receipt, {
     profileName: expected.profileName,
     captureSlotId: expected.captureSlotId,
@@ -99,62 +35,145 @@ export async function retireOwnedSavedLayoutTarget(input = {}, dependencies = {}
     savedLayoutId: expected.savedLayoutId,
     targetId,
     accountSubjectSha256,
-  })) {
-    throw new Error('Owned saved-layout target receipt is invalid or belongs to another authority.');
+  })) throw new Error('Owned saved-layout target receipt is invalid or belongs to another authority.');
+
+  const timeoutMs = boundedTimeout(dependencies.timeoutMs);
+  const deadline = { at: Date.now() + timeoutMs, timeoutMs };
+  const fetchImpl = dependencies.fetch ?? fetch;
+  const managerBaseUrl = dependencies.managerBaseUrl
+    ?? await resolveCloakManagerBaseUrl({ fetchJson: (url) => fetchJson(url, fetchImpl, deadline) });
+  if (!managerBaseUrl) throw new Error('CloakBrowser Manager is required for owned target cleanup.');
+  const profile = await (dependencies.resolveExactRunningProfile ?? resolveExactRunningProfile)(
+    expected.profileName, { ...dependencies, managerBaseUrl },
+  );
+  const profileId = requireText(profile.profileId, 'current profile ID');
+  if (profileId !== receipt.profile_id) throw new Error('Current profile differs from owned target receipt.');
+  const cdpUrl = resolveManagerCdpUrl(managerBaseUrl, profileId, profile.cdpUrl);
+  const version = await fetchJson(new URL('json/version', `${cdpUrl}/`).toString(), fetchImpl, deadline);
+  assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);
+  const browser = await withDeadline(
+    () => (dependencies.connectBrowser ?? connectBoundedBrowser)(version.webSocketDebuggerUrl, deadline),
+    deadline,
+  );
+
+  try {
+    if (!await readTargetIdentity(browser, targetId, expected, accountSubjectSha256, deadline, dependencies)) {
+      return result(expected, targetId, accountSubjectSha256, 'already-closed', false);
+    }
+
+    try {
+      await withDeadline(() => browser.Target.closeTarget({ targetId }), deadline);
+    } catch { /* Exact target readback below decides whether close completed. */ }
+    await waitForTargetClose(browser, targetId, deadline, dependencies);
+    return result(expected, targetId, accountSubjectSha256, 'closed', true);
+  } finally {
+    try { await browser.close?.(); } catch { /* Preserve target-close result. */ }
   }
-  return await retireSavedChartTarget(input, {
-    ...dependencies,
-    expectedProfileId: receipt.profile_id,
-    ownedTargetId: targetId,
-    ownedAccountSubjectSha256: accountSubjectSha256,
+}
+
+function result(expected, targetId, accountSubjectSha256, action, mutationsPerformed) {
+  return Object.freeze({
+    success: true,
+    retirement_version: 'owned-saved-layout-retirement-v1',
+    authority_id: expected.authorityId,
+    authority_hash: expected.authorityHash,
+    profile_name: expected.profileName,
+    saved_layout_id: expected.savedLayoutId,
+    account_subject_sha256: accountSubjectSha256,
+    target_id: targetId,
+    action,
+    mutations_performed: mutationsPerformed,
   });
 }
 
-function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
-  if (maxPayload !== MAX_RETIREMENT_READ_BYTES || !Number.isSafeInteger(handshakeTimeoutMs)
-    || handshakeTimeoutMs <= 0) {
-    throw new Error('Browser CDP transport bounds are invalid.');
+async function readTargetIdentity(browser, targetId, expected, accountSubjectSha256, deadline, dependencies) {
+  let targetInfo;
+  try {
+    const response = await withDeadline(() => browser.Target.getTargetInfo({ targetId }), deadline);
+    targetInfo = response?.targetInfo;
+  } catch (error) {
+    if (/No target with given id found/iu.test(String(error?.message ?? error))) return false;
+    throw error;
   }
+  if (targetInfo?.targetId !== targetId || targetInfo.type !== 'page' || !CHART_ROUTE.test(targetInfo.url)) {
+    throw new Error('Receipt target no longer identifies a TradingView chart page.');
+  }
+
+  const attached = await withDeadline(
+    () => browser.Target.attachToTarget({ targetId, flatten: true }), deadline,
+  );
+  const sessionId = requireText(attached?.sessionId, 'target session ID');
+  try {
+    const response = await withDeadline(() => browser.send('Runtime.evaluate', {
+      expression: ACCOUNT_LAYOUT_PROBE,
+      awaitPromise: true,
+      returnByValue: true,
+    }, sessionId), deadline);
+    const value = response?.result?.value;
+    if (!value || typeof value !== 'object' || response?.exceptionDetails) {
+      throw new Error('Owned target did not return saved-layout identity.');
+    }
+    const route = CHART_ROUTE.exec(targetInfo.url);
+    const layouts = Array.isArray(value.layouts) ? value.layouts : [];
+    const idMatches = layouts.filter((layout) => layout?.layout_id === expected.savedLayoutId);
+    const markerMatches = layouts.filter((layout) => layout?.name === expected.marker);
+    if (value.authenticated !== true || value.account_subject_sha256 !== accountSubjectSha256
+      || value.current_url !== targetInfo.url || value.chart_uid !== route?.[1]
+      || value.active_saved_layout_id !== expected.savedLayoutId
+      || value.active_saved_layout_name !== expected.marker || idMatches.length !== 1
+      || markerMatches.length !== 1 || idMatches[0]?.name !== expected.marker
+      || markerMatches[0]?.layout_id !== expected.savedLayoutId) {
+      throw new Error('Receipt target no longer matches its account and saved-layout identity.');
+    }
+    return true;
+  } finally {
+    try { await withDeadline(() => browser.Target.detachFromTarget({ sessionId }), deadline); }
+    catch { /* Closing the profile-scoped connection releases the session. */ }
+  }
+}
+
+async function waitForTargetClose(browser, targetId, deadline, dependencies) {
+  const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  while (Date.now() < deadline.at) {
+    try {
+      const response = await withDeadline(() => browser.Target.getTargetInfo({ targetId }), deadline);
+      if (response?.targetInfo?.targetId !== targetId) throw new Error('Target readback is invalid.');
+    } catch (error) {
+      if (/No target with given id found/iu.test(String(error?.message ?? error))) return;
+      throw error;
+    }
+    await withDeadline(() => sleep(Math.min(POLL_INTERVAL_MS, deadline.at - Date.now())), deadline);
+  }
+  throw new Error('Owned TradingView target remained open after bounded close.');
+}
+
+function connectBoundedBrowser(url, deadline) {
   const socket = new WebSocket(url, {
-    maxPayload,
-    handshakeTimeout: handshakeTimeoutMs,
+    maxPayload: MAX_READ_BYTES,
+    handshakeTimeout: Math.max(1, deadline.at - Date.now()),
     perMessageDeflate: false,
   });
   const pending = new Map();
   let nextId = 1;
-  let opened = false;
-  let rejectOpen;
   const connected = new Promise((resolve, reject) => {
-    rejectOpen = reject;
-    socket.once('open', () => {
-      opened = true;
-      resolve();
-    });
+    socket.once('open', resolve);
+    socket.once('error', reject);
   });
   const failPending = (error) => {
     for (const request of pending.values()) request.reject(error);
     pending.clear();
   };
-  socket.on('error', (error) => {
-    if (!opened) rejectOpen(handshakeError(error, handshakeTimeoutMs));
-    failPending(transportError(error));
-  });
-  socket.on('close', () => {
-    const error = new Error('Browser CDP WebSocket closed.');
-    if (!opened) rejectOpen(error);
-    failPending(error);
-  });
+  socket.on('error', failPending);
+  socket.on('close', () => failPending(new Error('Browser CDP WebSocket closed.')));
   socket.on('message', (data) => {
-    const bytes = Buffer.isBuffer(data) ? data.byteLength : Buffer.byteLength(String(data));
-    if (bytes > maxPayload) {
+    if (Buffer.byteLength(data) > MAX_READ_BYTES) {
       socket.terminate();
-      failPending(new Error(`Browser CDP frame exceeds bounded ${maxPayload}-byte transport limit.`));
+      failPending(new Error('Browser CDP frame exceeds bounded read limit.'));
       return;
     }
     let message;
-    try {
-      message = JSON.parse(data.toString('utf8'));
-    } catch {
+    try { message = JSON.parse(data.toString('utf8')); }
+    catch {
       socket.terminate();
       failPending(new Error('Browser CDP returned malformed JSON.'));
       return;
@@ -163,36 +182,32 @@ function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
     const request = pending.get(message.id);
     if (!request) return;
     pending.delete(message.id);
-    if (message.error) request.reject(new Error(`Browser CDP command failed: ${String(message.error.message || 'unknown error')}`));
-    else request.resolve(message.result || {});
+    if (message.error) request.reject(new Error(String(message.error.message || 'Browser CDP command failed.')));
+    else request.resolve(message.result ?? {});
   });
 
   const send = (method, params = {}, sessionId) => {
-    if (socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Browser CDP WebSocket is not open.'));
-    }
+    if (socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Browser CDP WebSocket is not open.'));
     const id = nextId++;
-    const message = { id, method, params };
-    if (sessionId) message.sessionId = sessionId;
+    const message = { id, method, params, ...(sessionId ? { sessionId } : {}) };
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       socket.send(JSON.stringify(message), (error) => {
         if (!error) return;
         pending.delete(id);
-        reject(transportError(error));
+        reject(error);
       });
     });
   };
   const browser = {
     Target: {
+      getTargetInfo: (params) => send('Target.getTargetInfo', params),
       attachToTarget: (params) => send('Target.attachToTarget', params),
       detachFromTarget: (params) => send('Target.detachFromTarget', params),
       closeTarget: (params) => send('Target.closeTarget', params),
     },
     send,
-    close: () => {
-      if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
-    },
+    close: () => { if (socket.readyState !== WebSocket.CLOSED) socket.terminate(); },
   };
   return connected.then(() => browser, (error) => {
     socket.terminate();
@@ -200,519 +215,56 @@ function connectBoundedBrowser(url, { maxPayload, handshakeTimeoutMs }) {
   });
 }
 
-function handshakeError(error, timeoutMs) {
-  if (/handshake.*timed out/iu.test(String(error?.message || ''))) {
-    return new Error(`Browser CDP WebSocket handshake exceeded bounded ${timeoutMs}ms deadline.`);
-  }
-  return error;
-}
-
-function transportError(error) {
-  if (/max payload size exceeded/iu.test(String(error?.message || ''))) {
-    return new Error(`Browser CDP frame exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte transport limit.`);
-  }
-  return error;
-}
-
-async function retireFromProfile({
-  expected, dependencies, deadline, browser, requestJson, cdpUrl,
-  ownedTargetId = null, ownedAccountSubjectSha256 = null,
-}) {
-  const targetListUrl = new URL('json/list', `${cdpUrl}/`).toString();
-  const beforeSnapshot = await readProfileSnapshot({
-    targetListUrl, expected, browser, dependencies, deadline, requestJson,
-  });
-  const before = beforeSnapshot.targets;
-  const beforeCharts = beforeSnapshot.chartTargets;
-  const beforeViews = beforeSnapshot.views;
-  assertNoConflictingSavedLayoutTarget(beforeViews, expected);
-  const exact = beforeViews.filter((view) => isExactSavedLayout(view, expected));
-  if (ownedTargetId === null && exact.length > 1) {
-    return result(expected, null, 'ambiguous', beforeCharts.length, false,
-      beforeViews[0]?.accountSubjectSha256 ?? null, 'DUPLICATE_EXACT_SAVED_LAYOUT_TARGETS', exact.length);
-  }
-  if (ownedTargetId !== null) {
-    if (!before.some((target) => target.id === ownedTargetId)) {
-      return result(expected, null, 'already-closed', beforeCharts.length, false,
-        ownedAccountSubjectSha256, null, exact.length);
-    }
-    if (!exact.some((view) => view.target.id === ownedTargetId)) {
-      throw new Error('Owned target ID is present but no longer matches its saved-layout authority.');
-    }
-    if (exact.filter((view) => view.target.id === ownedTargetId).length !== 1
-      || exact.find((view) => view.target.id === ownedTargetId).accountSubjectSha256 !== ownedAccountSubjectSha256) {
-      throw new Error('Owned target no longer matches its account-bound saved-layout receipt.');
-    }
-  }
-  if (exact.length === 0) {
-    return result(expected, null, 'already-closed', beforeCharts.length, false,
-      beforeViews[0]?.accountSubjectSha256 ?? null, null, 0);
-  }
-  const beforeIdentity = ownedTargetId === null
-    ? exact[0]
-    : exact.find((view) => view.target.id === ownedTargetId);
-  const target = beforeIdentity.target;
-  if (before.length <= 1) throw new Error('Cannot retire the last browser page in the exact profile.');
-  const preCloseSnapshot = await readProfileSnapshot({
-    targetListUrl, expected, browser, dependencies, deadline, requestJson,
-  });
-  const preClose = preCloseSnapshot.targets;
-  const preCloseCharts = preCloseSnapshot.chartTargets;
-  const preCloseViews = preCloseSnapshot.views;
-  assertNoConflictingSavedLayoutTarget(preCloseViews, expected);
-  const currentExact = preCloseViews.filter((view) => isExactSavedLayout(view, expected));
-  const preservedBefore = beforeViews.filter((view) => view.target.id !== target.id);
-  if (ownedTargetId === null && currentExact.length === 0 && !preClose.some((entry) => entry.id === target.id)
-    && samePageInventory(before, preClose, target.id)
-    && sameChartViews(preservedBefore, preCloseViews)) {
-    return result(expected, null, 'already-closed', preCloseCharts.length, false,
-      beforeIdentity.accountSubjectSha256, null, 0);
-  }
-  const currentTargetIdentities = currentExact.filter((view) => view.target.id === target.id);
-  if (currentTargetIdentities.length !== 1
-    || currentTargetIdentities[0].accountSubjectSha256 !== beforeIdentity.accountSubjectSha256
-    || (ownedTargetId === null && currentExact.length !== 1)
-    || !samePageInventory(before, preClose)
-    || !sameChartViews(beforeViews, preCloseViews)) {
-    throw new Error('TradingView page inventory changed before exact saved-layout retirement.');
-  }
-  // A lost close receipt does not prove the target remains open. Keep part of
-  // the existing deadline for a fresh exact inventory after the single close.
-  const acknowledgementMs = Math.min(1_000, Math.max(1, Math.floor(remainingMs(deadline) / 2)));
-  const closeDeadline = { ...deadline, at: Math.min(deadline.at, deadline.now() + acknowledgementMs), timeoutMs: acknowledgementMs };
-  let closeAcknowledged = false;
-  try {
-    const closeResult = await withDeadline(
-      () => browser.Target.closeTarget({ targetId: target.id }), closeDeadline,
-    );
-    closeAcknowledged = closeResult?.success === true;
-  } catch { /* fresh inventory, not the receipt, decides convergence */ }
-
-  const sleep = dependencies.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-  let after = before;
-  let afterViews = beforeViews;
-  while (remainingMs(deadline) > 0) {
-    const afterSnapshot = await readProfileSnapshot({
-      targetListUrl, expected, browser, dependencies, deadline, requestJson,
-      skipTargetId: target.id,
-    });
-    after = afterSnapshot.targets;
-    afterViews = afterSnapshot.views;
-    if (!after.some((entry) => entry.id === target.id)
-      && (ownedTargetId !== null || !afterViews.some((view) => isExactSavedLayout(view, expected)))) break;
-    if (!closeAcknowledged) {
-      throw new Error('Exact saved-layout target remained open after unacknowledged close.');
-    }
-    await withDeadline(
-      () => sleep(Math.min(POLL_INTERVAL_MS, remainingMs(deadline))),
-      deadline,
-    );
-  }
-  if (after.some((entry) => entry.id === target.id)
-    || (ownedTargetId === null && afterViews.some((view) => isExactSavedLayout(view, expected)))) {
-    throw new Error('Exact saved-layout target remained open after bounded close.');
-  }
-  if (!samePageInventory(before, after, target.id)
-    || !sameChartViews(preservedBefore, afterViews)) {
-    throw new Error('Saved-layout retirement changed another TradingView chart target.');
-  }
-  return result(expected, target.id, 'closed', chartTargets(after).length, true,
-    beforeIdentity.accountSubjectSha256, null,
-    afterViews.filter((view) => isExactSavedLayout(view, expected)).length);
-}
-
-async function readProfileSnapshot({
-  targetListUrl, expected, browser, dependencies, deadline, requestJson, skipTargetId = null,
-}) {
-  let targets = pageTargets(await requestJson(targetListUrl));
-  let reconciledDisappearedTarget = false;
-  while (true) {
-    const currentChartTargets = chartTargets(targets);
-    try {
-      const inspectionTargets = skipTargetId === null
-        ? currentChartTargets
-        : currentChartTargets.filter((target) => target.id !== skipTargetId);
-      const views = await inspectChartTargets(inspectionTargets, expected, browser, dependencies, deadline);
-      return { targets, chartTargets: currentChartTargets, views };
-    } catch (error) {
-      if (!(error instanceof TargetDisappearedDuringIdentityRead) || reconciledDisappearedTarget) throw error;
-      const refreshed = pageTargets(await requestJson(targetListUrl));
-      if (refreshed.some((target) => target.id === error.targetId)) {
-        throw new Error('CDP target remained in the current profile inventory after an exact missing-target response.', {
-          cause: error,
-        });
-      }
-      targets = refreshed;
-      reconciledDisappearedTarget = true;
-    }
-  }
-}
-
-function normalizeInput(input) {
-  const profileName = requirePattern(input.profile_name, 'profile_name', /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,159}$/u);
-  const captureSlotId = requirePattern(input.capture_slot_id, 'capture_slot_id', /^v5-capture-slot-[ab]$/u);
-  const layoutCode = requirePattern(input.layout_code, 'layout_code', /^s$/u);
-  const authorityId = requirePattern(input.authority_id, 'authority_id', /^v5-capture-slot:[0-9a-f]{64}$/u);
-  const authorityHash = requirePattern(input.authority_hash, 'authority_hash', /^[0-9a-f]{64}$/u);
-  if (authorityId !== `v5-capture-slot:${authorityHash}`) {
-    throw new Error('authority_id does not match authority_hash.');
-  }
-  const savedLayoutId = requirePattern(input.saved_layout_id, 'saved_layout_id', /^[A-Za-z0-9_-]{1,160}$/u);
-  const reconciliationKey = requirePattern(input.reconciliation_key, 'reconciliation_key', /^[0-9a-f]{64}$/u);
-  const allowedOrigins = Array.isArray(input.allowed_origins) ? input.allowed_origins : [];
-  if (allowedOrigins.length !== 1 || allowedOrigins[0] !== CHART_ORIGIN) {
+function normalizeAuthority(input) {
+  const profileName = requirePattern(input.profile_name ?? input.profileName, 'profile_name', /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,159}$/u);
+  const captureSlotId = requirePattern(input.capture_slot_id ?? input.captureSlotId, 'capture_slot_id', /^v5-capture-slot-[ab]$/u);
+  const layoutCode = requirePattern(input.layout_code ?? input.layoutCode, 'layout_code', /^s$/u);
+  const savedLayoutId = requirePattern(input.saved_layout_id ?? input.savedLayoutId, 'saved_layout_id', /^[A-Za-z0-9_-]{1,160}$/u);
+  const reconciliationKey = requirePattern(input.reconciliation_key ?? input.reconciliationKey, 'reconciliation_key', /^[0-9a-f]{64}$/u);
+  const allowedOrigins = input.allowed_origins ?? input.allowedOrigins;
+  if (!Array.isArray(allowedOrigins) || allowedOrigins.length !== 1 || allowedOrigins[0] !== CHART_ORIGIN) {
     throw new Error('allowed_origins must equal the reviewed TradingView chart origin.');
   }
-  const marker = savedChartLayoutMarker(captureSlotId, reconciliationKey);
-  const computedHash = captureSlotAuthorityHash({
-    captureSlotId,
-    profileName,
-    savedLayoutId,
-    layoutCode,
-    allowedOrigins,
-  });
-  if (authorityHash !== computedHash || authorityId !== `v5-capture-slot:${computedHash}`) {
-    throw new Error('Capture-slot authority hash does not bind the stable profile and saved layout.');
+  const authorityHash = captureSlotAuthorityHash({ captureSlotId, profileName, savedLayoutId, layoutCode, allowedOrigins });
+  const authorityId = `v5-capture-slot:${authorityHash}`;
+  if ((input.authority_hash ?? input.authorityHash) !== authorityHash
+    || (input.authority_id ?? input.authorityId) !== authorityId) {
+    throw new Error('Capture-slot authority hash does not bind the reviewed profile and saved layout.');
   }
   return Object.freeze({
-    profileName,
-    captureSlotId,
-    layoutCode,
-    authorityId,
-    authorityHash,
-    savedLayoutId,
-    reconciliationKey,
-    marker,
-    allowedOrigins: Object.freeze([...allowedOrigins]),
+    profileName, captureSlotId, layoutCode, savedLayoutId, reconciliationKey,
+    allowedOrigins: Object.freeze([...allowedOrigins]), authorityHash, authorityId,
+    marker: savedChartLayoutMarker(captureSlotId, reconciliationKey),
   });
 }
 
-function result(
-  expected, targetId, action, remainingChartTargets, mutationsPerformed,
-  accountSubjectSha256, failureCode = null, matchingSavedLayoutTargets = 0,
-) {
-  return Object.freeze({
-    success: true,
-    retirement_version: 'saved-chart-retirement-v2',
-    authority_id: expected.authorityId,
-    authority_hash: expected.authorityHash,
-    profile_name: expected.profileName,
-    saved_layout_id: expected.savedLayoutId,
-    account_subject_sha256: accountSubjectSha256,
-    chart_target_id: targetId,
-    action,
-    failure_code: failureCode,
-    matching_saved_layout_targets: matchingSavedLayoutTargets,
-    remaining_chart_targets: remainingChartTargets,
-    mutations_performed: mutationsPerformed,
-  });
-}
-
-function pageTargets(value) {
-  if (!Array.isArray(value)) throw new Error('CDP target listing is malformed.');
-  return value.flatMap((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error('CDP target listing contains a malformed entry.');
-    }
-    if (entry.type !== 'page') return [];
-    if (typeof entry.id !== 'string' || entry.id.length === 0 || entry.id.length > MAX_CDP_TARGET_ID_CHARS
-      || /[\u0000-\u001f\u007f]/u.test(entry.id)
-      || typeof entry.url !== 'string' || entry.url.length === 0 || entry.url.length > MAX_CDP_TARGET_URL_CHARS) {
-      throw new Error('CDP page target identity is malformed.');
-    }
-    return [entry];
-  });
-}
-
-function chartTargets(targets) {
-  return targets.filter((target) => CHART_PAGE.test(target.url));
-}
-
-async function readTargetIdentity(browser, target, deadline) {
-  const attached = await withDeadline(
-    () => browser.Target.attachToTarget({ targetId: target.id, flatten: true }),
-    deadline,
-    () => browser.close?.(),
-  );
-  const sessionId = requireText(attached?.sessionId, 'exact target CDP session ID');
-  try {
-    const response = await withDeadline(() => browser.send('Runtime.evaluate', {
-      expression: ACCOUNT_LAYOUT_PROBE,
-      awaitPromise: true,
-      returnByValue: true,
-    }, sessionId), deadline, () => browser.close?.());
-    if (response?.exceptionDetails || response?.result?.type !== 'object'
-      || !response.result.value || typeof response.result.value !== 'object') {
-      throw new Error('TradingView saved-layout identity readback failed.');
-    }
-    let encoded;
-    try { encoded = JSON.stringify(response.result.value); } catch { encoded = null; }
-    if (typeof encoded !== 'string' || Buffer.byteLength(encoded, 'utf8') > MAX_RETIREMENT_READ_BYTES) {
-      throw new Error('TradingView saved-layout identity readback is malformed or exceeds its bounded read limit.');
-    }
-    const value = response.result.value;
-    return {
-      href: value.current_url,
-      account_subject_sha256: value.account_subject_sha256,
-      saved_layout_id: value.active_saved_layout_id,
-      saved_layout_name: value.active_saved_layout_name,
-      layouts: Array.isArray(value.layouts)
-        ? value.layouts.map(({ layout_id: layoutId, name }) => ({ layout_id: layoutId, name }))
-        : value.layouts,
-    };
-  } finally {
-    try {
-      await withDeadline(() => browser.Target.detachFromTarget({ sessionId }), deadline, () => browser.close?.());
-    } catch { /* closing the exact-profile browser connection releases the session */ }
-  }
-}
-
-async function inspectChartTargets(targets, expected, browser, dependencies, deadline) {
-  if (targets.length === 0) return Object.freeze([]);
-  const inspect = dependencies.readTargetIdentity || ((target) => readTargetIdentity(browser, target, deadline));
-  const views = [];
-  for (const target of targets) {
-    let raw;
-    try {
-      raw = await withDeadline(() => inspect(target), deadline);
-    } catch (error) {
-      if (/No target with given id found/iu.test(String(error?.message || error))) {
-        throw new TargetDisappearedDuringIdentityRead(target.id, error);
-      }
-      throw error;
-    }
-    views.push(normalizeTargetIdentity(raw, target, expected));
-  }
-  views.sort((left, right) => left.target.id.localeCompare(right.target.id));
-  const accountHashes = new Set(views.map((view) => view.accountSubjectSha256));
-  const inventoryHashes = new Set(views.map((view) => view.layoutInventorySha256));
-  if (accountHashes.size !== 1 || inventoryHashes.size !== 1) {
-    throw new Error('TradingView account or saved-layout inventory changed across exact profile targets.');
-  }
-  return Object.freeze(views);
-}
-
-function normalizeTargetIdentity(value, target, expected) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)
-    || value.href !== target.url
-    || typeof value.account_subject_sha256 !== 'string'
-    || !/^[0-9a-f]{64}$/u.test(value.account_subject_sha256)
-    || typeof value.saved_layout_id !== 'string'
-    || !/^[A-Za-z0-9_-]{1,160}$/u.test(value.saved_layout_id)
-    || typeof value.saved_layout_name !== 'string'
-    || value.saved_layout_name.length < 1 || value.saved_layout_name.length > 160
-    || !Array.isArray(value.layouts)) {
-    throw new Error('TradingView page did not prove authenticated active saved-layout metadata.');
-  }
-  const layouts = value.layouts.map((layout, index) => {
-    if (!layout || typeof layout !== 'object' || Array.isArray(layout)
-      || typeof layout.layout_id !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/u.test(layout.layout_id)
-      || typeof layout.name !== 'string' || layout.name.length === 0 || layout.name.length > 160) {
-      throw new Error(`TradingView saved-layout inventory entry ${index} is malformed.`);
-    }
-    return { layout_id: layout.layout_id, name: layout.name };
-  }).sort((left, right) => left.layout_id.localeCompare(right.layout_id) || left.name.localeCompare(right.name));
-  const exactMarker = layouts.filter((layout) => layout.name === expected.marker);
-  if (exactMarker.length !== 1 || exactMarker[0].layout_id !== expected.savedLayoutId) {
-    throw new Error('Exact saved-layout marker and server ID are missing or ambiguous in current account.');
-  }
-  const activeSavedLayoutId = requirePattern(value.saved_layout_id, 'active saved-layout ID', /^[A-Za-z0-9_-]{1,160}$/u);
-  const activeSavedLayoutName = requireText(value.saved_layout_name, 'active saved-layout name');
-  const layoutInventorySha256 = createHash('sha256').update(JSON.stringify(layouts), 'utf8').digest('hex');
-  return Object.freeze({
-    target,
-    activeSavedLayoutId,
-    activeSavedLayoutName,
-    accountSubjectSha256: value.account_subject_sha256,
-    layoutInventorySha256,
-  });
-}
-
-function isExactSavedLayout(view, expected) {
-  return view.activeSavedLayoutId === expected.savedLayoutId
-    && view.activeSavedLayoutName === expected.marker;
-}
-
-function assertNoConflictingSavedLayoutTarget(views, expected) {
-  if (views.some((view) => (view.activeSavedLayoutId === expected.savedLayoutId
-    || view.activeSavedLayoutName === expected.marker) && !isExactSavedLayout(view, expected))) {
-    throw new Error('Active TradingView page conflicts with exact saved-layout authority identity.');
-  }
-}
-
-function sameChartViews(left, right) {
-  const identity = (views) => views.map((view) => ({
-    target: targetIdentity(view.target),
-    activeSavedLayoutId: view.activeSavedLayoutId,
-    activeSavedLayoutName: view.activeSavedLayoutName,
-    accountSubjectSha256: view.accountSubjectSha256,
-    layoutInventorySha256: view.layoutInventorySha256,
-  })).sort((a, b) => a.target.id.localeCompare(b.target.id));
-  return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
-}
-
-function samePageInventory(left, right, excludedTargetId = null) {
-  const identity = (targets) => targets.filter((target) => target.id !== excludedTargetId)
-    .map(targetIdentity).sort(compareIdentity);
-  return JSON.stringify(identity(left)) === JSON.stringify(identity(right));
-}
-
-function targetIdentity(target) {
-  return Object.fromEntries(Object.entries(target).sort(([left], [right]) => left.localeCompare(right)));
-}
-
-function requireProfileBrowserWebSocketUrl(value, cdpUrl, profileId) {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new Error('Browser CDP WebSocket endpoint is unavailable.');
-  }
-  let endpoint;
-  let profileEndpoint;
-  try {
-    endpoint = new URL(value);
-    profileEndpoint = new URL(cdpUrl);
-  } catch {
-    throw new Error('Browser CDP WebSocket endpoint is malformed.');
-  }
-  if (!isExactProfileCdpPath(profileEndpoint.pathname, profileId)
-    || profileEndpoint.username || profileEndpoint.password || profileEndpoint.search || profileEndpoint.hash) {
-    throw new Error('Manager CDP endpoint is outside exact Manager profile authority.');
-  }
-  const expectedProtocol = profileEndpoint.protocol === 'https:' ? 'wss:' : 'ws:';
-  const expectedPath = profileEndpoint.pathname.replace(/\/+$/u, '') || '/';
-  if (endpoint.protocol !== expectedProtocol || endpoint.host !== profileEndpoint.host
-    || endpoint.pathname.replace(/\/+$/u, '') !== expectedPath
-    || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
-    throw new Error('Browser CDP WebSocket endpoint is outside exact Manager profile authority.');
-  }
-  return endpoint.toString();
-}
-
-function isExactProfileCdpPath(pathname, profileId) {
-  let segments;
-  try {
-    segments = pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
-  } catch {
-    return false;
-  }
-  const profilesIndex = segments.lastIndexOf('profiles');
-  return profilesIndex >= 0
-    && segments[profilesIndex + 1] === profileId
-    && segments[profilesIndex + 2] === 'cdp'
-    && profilesIndex + 3 === segments.length;
-}
-
-function compareIdentity(left, right) {
-  return left.id.localeCompare(right.id) || left.url.localeCompare(right.url);
-}
-
-async function fetchJson(url, fetchImpl, deadline) {
-  const controller = new AbortController();
-  return withDeadline(async () => {
-    const response = await fetchImpl(url, { signal: controller.signal });
-    if (!response?.ok) {
-      throw new Error(`request failed: ${response?.status || 'unknown'} ${response?.statusText || ''}`.trim());
-    }
-    const text = await readBoundedResponseText(response, controller);
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error('Manager/CDP response is not valid bounded JSON.');
-    }
-  }, deadline, () => controller.abort());
-}
-
-async function readBoundedResponseText(response, controller) {
-  const contentLength = response.headers?.get?.('content-length');
-  if (contentLength && /^\d+$/u.test(contentLength) && Number(contentLength) > MAX_RETIREMENT_READ_BYTES) {
-    controller.abort();
-    throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
-  }
-  if (response.body === null) return '';
-  const reader = response.body?.getReader?.();
-  if (!reader) throw new Error('Manager/CDP response body stream is unavailable.');
-
-  const chunks = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      const item = await reader.read();
-      if (item.done) break;
-      totalBytes += item.value.byteLength;
-      if (totalBytes > MAX_RETIREMENT_READ_BYTES) {
-        controller.abort();
-        await reader.cancel().catch(() => {});
-        throw new Error(`Manager/CDP response exceeds bounded ${MAX_RETIREMENT_READ_BYTES}-byte read limit.`);
-      }
-      chunks.push(Buffer.from(item.value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, totalBytes).toString('utf8');
-}
-
-function remainingMs(deadline) {
-  return deadline.at - deadline.now();
-}
-
-function withDeadline(operation, deadline, onTimeout = () => {}) {
-  const remaining = remainingMs(deadline);
-  if (remaining <= 0) return Promise.reject(deadlineError(deadline.timeoutMs));
-  let timer;
-  const work = Promise.resolve().then(operation);
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      try { onTimeout(); } catch { /* preserve timeout */ }
-      reject(deadlineError(deadline.timeoutMs));
-    }, remaining);
-  });
-  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
-}
-
-function deadlineError(timeoutMs) {
-  return new Error(`Saved-chart retirement exceeded bounded ${timeoutMs}ms deadline.`);
+function captureSlotAuthorityHash({ captureSlotId, profileName, savedLayoutId, layoutCode, allowedOrigins }) {
+  return createHash('sha256').update(JSON.stringify({
+    allowedOrigins, captureSlotId, layoutCode, profileId: profileName, savedLayoutId,
+    schemaVersion: AUTHORITY_SCHEMA_VERSION,
+  }), 'utf8').digest('hex');
 }
 
 function readReviewedAuthority() {
-  const raw = String(process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON || '');
-  if (!raw) throw new Error('Per-worker reviewed capture-slot authority is required for retirement.');
   try {
-    const value = JSON.parse(raw);
+    const value = JSON.parse(String(process.env.V5_CAPTURE_SLOT_AUTHORITY_JSON || ''));
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
     return value;
   } catch {
-    throw new Error('Per-worker reviewed capture-slot authority is malformed.');
+    throw new Error('Per-worker reviewed capture-slot authority is missing or malformed.');
   }
 }
 
 function sameAuthority(left, right) {
-  return left.profileName === right.profileName
-    && left.captureSlotId === right.captureSlotId
-    && left.layoutCode === right.layoutCode
-    && left.authorityId === right.authorityId
-    && left.authorityHash === right.authorityHash
-    && left.savedLayoutId === right.savedLayoutId
-    && left.reconciliationKey === right.reconciliationKey
-    && left.marker === right.marker
-    && JSON.stringify(left.allowedOrigins) === JSON.stringify(right.allowedOrigins);
-}
-
-function captureSlotAuthorityHash({ captureSlotId, profileName, savedLayoutId, layoutCode, allowedOrigins }) {
-  const canonical = JSON.stringify({
-    allowedOrigins,
-    captureSlotId,
-    layoutCode,
-    profileId: profileName,
-    savedLayoutId,
-    schemaVersion: AUTHORITY_SCHEMA_VERSION,
-  });
-  return createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return left.profileName === right.profileName && left.captureSlotId === right.captureSlotId
+    && left.layoutCode === right.layoutCode && left.savedLayoutId === right.savedLayoutId
+    && left.reconciliationKey === right.reconciliationKey && left.authorityHash === right.authorityHash;
 }
 
 function requireText(value, name) {
-  const text = String(value || '').trim();
-  if (!text || text !== value || /[\u0000-\u001f\u007f]/u.test(text)) throw new Error(`${name} is invalid.`);
-  return text;
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value
+    || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error(`${name} is invalid.`);
+  return value;
 }
 
 function requirePattern(value, name, pattern) {
@@ -721,10 +273,67 @@ function requirePattern(value, name, pattern) {
   return text;
 }
 
-function boundedPositiveInteger(value, fallback) {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value <= 0 || value > 30_000) {
-    throw new Error('Retirement timeout must be a positive integer no greater than 30000ms.');
+function boundedTimeout(value) {
+  const timeout = value ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30_000) {
+    throw new Error('Retirement timeout must be between 1ms and 30000ms.');
   }
-  return value;
+  return timeout;
+}
+
+async function fetchJson(url, fetchImpl, deadline) {
+  const controller = new AbortController();
+  return await withDeadline(async () => {
+    const response = await fetchImpl(url, { signal: controller.signal });
+    if (!response?.ok) throw new Error(`Manager/CDP request failed (${response?.status ?? 'unknown'}).`);
+    return await readBoundedJson(response);
+  }, deadline, () => controller.abort());
+}
+
+async function readBoundedJson(response) {
+  const declaredBytes = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declaredBytes) && declaredBytes > MAX_READ_BYTES) {
+    throw new Error('Manager/CDP response exceeds bounded read limit.');
+  }
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > MAX_READ_BYTES) throw new Error('Manager/CDP response exceeds bounded read limit.');
+    return parseJson(text);
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_READ_BYTES) {
+        try { await reader.cancel(); } catch { /* Preserve size failure. */ }
+        throw new Error('Manager/CDP response exceeds bounded read limit.');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return parseJson(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8'));
+}
+
+function parseJson(text) {
+  try { return JSON.parse(text); } catch { throw new Error('Manager/CDP response is malformed JSON.'); }
+}
+
+function withDeadline(operation, deadline, onTimeout = () => {}) {
+  const remaining = deadline.at - Date.now();
+  if (remaining <= 0) return Promise.reject(new Error(`Owned-target cleanup exceeded ${deadline.timeoutMs}ms.`));
+  let timer;
+  const work = Promise.resolve().then(operation);
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      try { onTimeout(); } catch { /* Preserve timeout. */ }
+      reject(new Error(`Owned-target cleanup exceeded ${deadline.timeoutMs}ms.`));
+    }, remaining);
+  });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }

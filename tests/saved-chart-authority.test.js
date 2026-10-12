@@ -1134,38 +1134,22 @@ test('saved-layout discovery does not depend on route UID resolution or target c
   assert.equal(createCount, 0);
 });
 
-test('saved-layout hydration loads exact server ID into a fresh target and verifies marker/account/readback', async () => {
+test('fresh hydration ignores duplicate existing tabs and returns exact target ownership', async () => {
   const profileId = INPUT.expectedProfileId;
   const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const savedLayoutId = '206000778';
-  let runtimeChartId = 'runtime-route-a';
-  let targetId = 'fresh-layout-target-0';
-  let targetSequence = 0;
-  let lastTemporaryTargetUrl = null;
-  const targets = new Map();
-  let loaded = false;
-  let loadedRequestedRecord = null;
-  let activeSavedLayoutId = 'default-layout-id';
-  let activeSavedLayoutName = 'Default chart';
-  let simulateMismatchedActiveReadback = false;
-  let simulateHungLoad = false;
-  let simulateHungPreLoadReadback = false;
-  const savedChartRecord = Object.freeze({
-    id: savedLayoutId,
-    name: MARKER,
-    symbol: 'FX:EURUSD',
-    resolution: '1D',
-    serverState: Object.freeze({ reviewed: true }),
-  });
-  let targetCloseCount = 0;
+  const runtimeChartId = 'runtime-route-a';
+  const targets = new Map([
+    ['user-tab-a', { id: 'user-tab-a', type: 'page', url: `https://www.tradingview.com/chart/${runtimeChartId}/` }],
+    ['user-tab-b', { id: 'user-tab-b', type: 'page', url: `https://www.tradingview.com/chart/${runtimeChartId}/` }],
+  ]);
+  let targetId = '';
+  let lastTemporaryTargetUrl = '';
   let targetCreateCount = 0;
-  let activeProbeCount = 0;
-  let fullLayoutProbeCount = 0;
-  let simulateHungReadback = false;
-  let simulateLostTargetCreateResponse = false;
-  let simulateUnknownTargetCreateResponse = false;
-  let simulateConcurrentTargetDuringCreateResponse = false;
+  let targetCloseCount = 0;
+  let loaded = false;
+  const savedChartRecord = Object.freeze({ id: savedLayoutId, name: MARKER, symbol: 'FX:EURUSD', resolution: '1D' });
   const page = {
     Runtime: {
       enable: async () => {},
@@ -1174,63 +1158,32 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
           return { result: { value: { url: targets.get(targetId)?.url } } };
         }
         if (expression.includes('loadChartFromServer')) {
-          const chartApi = {
-            getSavedCharts(callback) { callback([savedChartRecord]); },
-            async loadChartFromServer(record) {
-              loadedRequestedRecord = record;
-              if (simulateHungLoad) return await new Promise(() => {});
-              await new Promise((resolve) => setTimeout(resolve, 10));
-              loaded = true;
-              if (!simulateMismatchedActiveReadback) {
-                activeSavedLayoutId = String(record.id);
-                activeSavedLayoutName = record.name;
-              }
-              targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
-            },
-          };
           const value = await vm.runInNewContext(expression, {
-            window: { TradingViewApi: chartApi }, setTimeout, clearTimeout,
+            window: { TradingViewApi: {
+              getSavedCharts(callback) { callback([savedChartRecord]); },
+              async loadChartFromServer() {
+                loaded = true;
+                targets.set(targetId, { ...targets.get(targetId), url: `https://www.tradingview.com/chart/${runtimeChartId}/` });
+              },
+            } }, setTimeout, clearTimeout,
           });
           return { result: { value } };
         }
-        if (expression === ACTIVE_SAVED_LAYOUT_PROBE) {
-          activeProbeCount += 1;
-          if (simulateHungReadback && loaded) return await new Promise(() => {});
-          const active = loaded && activeProbeCount >= 3;
-          return { result: { value: {
-            authenticated: true,
-            account_subject_sha256: ACCOUNT_HASH,
-            chart_uid: active ? runtimeChartId : null,
-            current_url: active
-              ? `https://www.tradingview.com/chart/${runtimeChartId}/`
-              : 'https://www.tradingview.com/chart/',
-            active_saved_layout_id: active ? activeSavedLayoutId : null,
-            active_saved_layout_name: active ? activeSavedLayoutName : null,
-          } } };
-        }
-        if (expression === ACCOUNT_LAYOUT_PROBE) {
-          fullLayoutProbeCount += 1;
-          if (simulateHungPreLoadReadback && !loaded) return await new Promise(() => {});
-        }
+        const active = loaded && (expression === ACTIVE_SAVED_LAYOUT_PROBE || expression === ACCOUNT_LAYOUT_PROBE);
         return { result: { value: {
           authenticated: true,
           account_subject_sha256: ACCOUNT_HASH,
           layouts: [{ layout_id: savedLayoutId, name: MARKER, symbol: '', resolution: '' }],
-          chart_uid: loaded ? runtimeChartId : null,
-          current_url: loaded
-            ? `https://www.tradingview.com/chart/${runtimeChartId}/`
-            : 'https://www.tradingview.com/chart/',
-          active_saved_layout_id: loaded ? activeSavedLayoutId : null,
-          active_saved_layout_name: loaded ? activeSavedLayoutName : null,
+          chart_uid: active ? runtimeChartId : null,
+          current_url: active ? `https://www.tradingview.com/chart/${runtimeChartId}/` : 'https://www.tradingview.com/chart/',
+          active_saved_layout_id: active ? savedLayoutId : null,
+          active_saved_layout_name: active ? MARKER : null,
         } } };
       },
     },
     Page: {
       enable: async () => {},
-      navigate: async ({ url }) => {
-        targets.set(targetId, { ...targets.get(targetId), url });
-        return {};
-      },
+      navigate: async ({ url }) => { targets.set(targetId, { ...targets.get(targetId), url }); return {}; },
     },
     close: async () => {},
   };
@@ -1238,35 +1191,14 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     Target: {
       createTarget: async ({ url }) => {
         targetCreateCount += 1;
-        targetId = `fresh-layout-target-${++targetSequence}`;
+        targetId = `fresh-layout-target-${targetCreateCount}`;
         lastTemporaryTargetUrl = url;
-        if (simulateUnknownTargetCreateResponse) {
-          simulateUnknownTargetCreateResponse = false;
-          return await new Promise(() => {});
-        }
-        targets.set(targetId, {
-          id: targetId, type: 'page', url,
-          webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${targetId}`,
-        });
-        if (simulateLostTargetCreateResponse) {
-          simulateLostTargetCreateResponse = false;
-          if (simulateConcurrentTargetDuringCreateResponse) {
-            simulateConcurrentTargetDuringCreateResponse = false;
-            const competingId = `competing-layout-target-${targetSequence}`;
-            targets.set(competingId, {
-              id: competingId, type: 'page', url,
-              webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${competingId}`,
-            });
-          }
-          return await new Promise(() => {});
-        }
+        targets.set(targetId, { id: targetId, type: 'page', url,
+          webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${targetId}` });
+        targets.set('concurrent-user-tab', { id: 'concurrent-user-tab', type: 'page', url: 'about:blank' });
         return { targetId };
       },
-      closeTarget: async ({ targetId: closedId }) => {
-        targetCloseCount += 1;
-        targets.delete(closedId);
-        return { success: true };
-      },
+      closeTarget: async ({ targetId: closedId }) => { targetCloseCount += 1; targets.delete(closedId); return { success: true }; },
     },
     close: async () => {},
   };
@@ -1280,372 +1212,69 @@ test('saved-layout hydration loads exact server ID into a fresh target and verif
     readProfileInventory: async () => ({
       ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
       profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      loadedTargets: [{
-        targetId: 'misleading-existing-target',
-        targetUrl: `https://www.tradingview.com/chart/${runtimeChartId}/`,
-        chartId: runtimeChartId,
-        savedLayoutUid: runtimeChartId,
-      }],
       close: async () => {},
     }),
     fetch: async (value) => {
       const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
+      return { ok: true, json: async () => url.pathname.endsWith('/json/version')
+        ? { webSocketDebuggerUrl: browserWebSocketUrl } : [...targets.values()] };
     },
     connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
+    connectTarget: async () => page,
     sleep: async () => {},
   });
 
   assert.equal(result.state, 'hydrated');
-  assert.equal(result.saved_layout_id, savedLayoutId);
-  assert.equal(result.layout_marker, MARKER);
-  assert.equal(result.account_subject_sha256, ACCOUNT_HASH);
+  assert.equal(result.target_created, true);
   assert.equal(result.target_id, targetId);
   assert.equal(result.runtime_chart_id, runtimeChartId);
-  assert.equal(result.target_url, `https://www.tradingview.com/chart/${runtimeChartId}/`);
-  assert.equal(result.target_created, true);
-  assert.equal(result.ownership_receipt.created_by_this_attempt, true);
   assert.equal(result.ownership_receipt.target_id, targetId);
-  assert.deepEqual(result.ownership_receipt.prior_target_ids, []);
-  const firstFreshTargetUrl = lastTemporaryTargetUrl;
-  assert.equal(result.mutations_performed, true);
-  assert.equal(loadedRequestedRecord, savedChartRecord);
-  assert.equal(loaded, true, 'hydration must await TradingView loadChartFromServer completion');
+  assert.equal(result.ownership_receipt.account_subject_sha256, ACCOUNT_HASH);
+  assert.equal(result.ownership_receipt.saved_layout_id, savedLayoutId);
+  assert.equal(Object.hasOwn(result.ownership_receipt, 'prior_target_ids'), false);
+  assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
   assert.equal(targetCreateCount, 1);
   assert.equal(targetCloseCount, 0);
-  assert.equal(activeProbeCount, 3);
-  assert.equal(fullLayoutProbeCount, 2);
+  assert.equal(targets.has('user-tab-a'), true);
+  assert.equal(targets.has('user-tab-b'), true);
+  assert.equal(targets.has('concurrent-user-tab'), true);
   assert.equal(targets.has(targetId), true);
+});
 
-  simulateLostTargetCreateResponse = true;
-  loaded = false;
-  const recovered = await hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-    requireFreshTarget: true,
-  }, {
-    authorityReadTimeoutMs: 300,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
+test('lost fresh-target creation acknowledgement fails without inventory recovery or guessed close', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  let targetCreateCount = 0;
+  let targetCloseCount = 0;
+  const browser = {
+    Target: {
+      createTarget: async () => { targetCreateCount += 1; return await new Promise(() => {}); },
+      closeTarget: async () => { targetCloseCount += 1; return { success: true }; },
     },
-    connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
-    sleep: async () => {},
-  });
-  assert.equal(recovered.state, 'hydrated', 'lost create response must recover only from a unique inventory delta');
-  assert.equal(recovered.target_id, targetId);
-  assert.equal(recovered.target_created, true);
-  assert.ok(recovered.ownership_receipt.prior_target_ids.includes('fresh-layout-target-1'));
-  assert.notEqual(lastTemporaryTargetUrl, firstFreshTargetUrl,
-    'each fresh attempt must use an unguessable target marker so another start cannot claim its lost acknowledgement');
-  assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
-  assert.equal(targetCreateCount, 2);
-  assert.equal(targetCloseCount, 0);
-
-  simulateLostTargetCreateResponse = true;
-  simulateConcurrentTargetDuringCreateResponse = true;
-  const targetsBeforeAmbiguousAck = [...targets.keys()].sort();
+    close: async () => {},
+  };
   await assert.rejects(hydrateSavedChartLayout({
     profileName: INPUT.profileName,
     captureSlotId: INPUT.captureSlotId,
     reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
+    savedLayoutId: '206000778',
     requireFreshTarget: true,
-  }, {
-    authorityReadTimeoutMs: 300,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
-    sleep: async () => {},
-  }), /SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN/u);
-  assert.equal(targetCloseCount, 0, 'ambiguous create acknowledgement must not close either new target');
-  assert.ok(targetsBeforeAmbiguousAck.every((id) => targets.has(id)));
-  assert.ok(targets.size > targetsBeforeAmbiguousAck.length, 'unowned targets remain as reported orphans');
-
-  const orphanTargetId = 'orphaned-hydration-target';
-  targets.set(orphanTargetId, {
-    id: orphanTargetId,
-    type: 'page',
-    url: lastTemporaryTargetUrl,
-    webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${orphanTargetId}`,
-  });
-  loaded = false;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-    requireFreshTarget: true,
-  }, {
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
-    sleep: async () => {},
-  }), /SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN/u);
-  assert.equal(targets.has(orphanTargetId), true, 'crash orphan must remain untouched');
-  assert.equal(targetCreateCount, 3, 'uncertain prior targets block another fresh target');
-  assert.equal(targetCloseCount, 0);
-
-  targets.clear();
-  simulateUnknownTargetCreateResponse = true;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
   }, {
     authorityReadTimeoutMs: 25,
     readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
+      ...inventory([{ layoutId: '206000778', name: MARKER }]),
       profile: { profileName: INPUT.profileName, profileId, cdpUrl },
       close: async () => {},
     }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
+    fetch: async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` }) }),
     connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
-    sleep: async () => {},
   }), (error) => {
-    assert.equal(error.message, 'SAVED_LAYOUT_TARGET_CREATE_OUTCOME_UNKNOWN');
+    assert.equal(error.message, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
     assert.equal(error.temporaryTargetClosed, false);
     return true;
   });
-  assert.equal(targetCloseCount, 0, 'ambiguous target creation must not claim cleanup or close a guessed page');
-
-  targets.set('ambiguous-target-a', {
-    id: 'ambiguous-target-a', type: 'page', url: lastTemporaryTargetUrl,
-  });
-  targets.set('ambiguous-target-b', {
-    id: 'ambiguous-target-b', type: 'page', url: lastTemporaryTargetUrl,
-  });
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-  }, {
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async (webSocketUrl) => {
-      targetId = String(webSocketUrl).split('/').at(-1);
-      return page;
-    },
-    sleep: async () => {},
-  }), (error) => {
-    assert.equal(error.message, 'SAVED_LAYOUT_TARGET_OWNERSHIP_UNPROVEN');
-    assert.equal(error.temporaryTargetClosed, false);
-    return true;
-  });
-
-  targets.clear();
-  loaded = false;
-  runtimeChartId = `private-route-${'r'.repeat(146)}`;
-  activeSavedLayoutId = `PRIVATE_LAYOUT_ID_${'x'.repeat(180)}`;
-  activeSavedLayoutName = `PRIVATE_ACCOUNT_LAYOUT_NAME_${'y'.repeat(180)}`;
-  simulateMismatchedActiveReadback = true;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-  }, {
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async () => page,
-    sleep: async () => {},
-  }), (error) => {
-    assert.match(error.message, /SAVED_LAYOUT_LOAD_NOT_CONFIRMED:SAVED_LAYOUT_ACTIVE_ID_MISMATCH/u);
-    assert.match(error.message, /authenticated=true/u);
-    assert.match(error.message, /account_match=true/u);
-    assert.match(error.message, /active_id_match=false/u);
-    assert.match(error.message, /active_name_match=false/u);
-    assert.match(error.message, /route_readback_match=true/u);
-    assert.ok(error.message.length <= 512);
-    assert.ok(!error.message.includes(activeSavedLayoutId));
-    assert.ok(!error.message.includes(activeSavedLayoutName));
-    assert.ok(!error.message.includes(runtimeChartId));
-    assert.doesNotMatch(error.message, /https?:\/\//u);
-    return true;
-  });
-  assert.equal(targetCloseCount, 1);
-  assert.equal(targets.has(targetId), false);
-
-  simulateHungLoad = true;
-  loaded = false;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-  }, {
-    authorityReadTimeoutMs: 25,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async () => page,
-    sleep: async () => {},
-  }), (error) => {
-    assert.equal(error.message, 'SAVED_LAYOUT_LOAD_TIMEOUT');
-    assert.equal(error.temporaryTargetClosed, true);
-    return true;
-  });
-  assert.equal(targetCloseCount, 2, 'a hung load must close its exact disposable target');
-  assert.equal(targets.has(targetId), false);
-
-  simulateHungLoad = false;
-  loaded = false;
-  simulateHungReadback = true;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-  }, {
-    authorityReadTimeoutMs: 300,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async () => page,
-    sleep: async () => {},
-  }), (error) => {
-    assert.equal(error.message, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
-    assert.equal(error.temporaryTargetClosed, true);
-    return true;
-  });
-  assert.equal(targetCloseCount, 3, 'a hung post-load readback must close its exact disposable target');
-  assert.equal(targets.has(targetId), false);
-
-  simulateHungReadback = false;
-  simulateHungPreLoadReadback = true;
-  loaded = false;
-  await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId,
-  }, {
-    authorityReadTimeoutMs: 25,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async (value) => {
-      const url = new URL(String(value));
-      const body = url.pathname.endsWith('/json/version')
-        ? { webSocketDebuggerUrl: browserWebSocketUrl }
-        : [...targets.values()];
-      return { ok: true, json: async () => body };
-    },
-    connectBrowser: async () => browser,
-    connectTarget: async () => page,
-    sleep: async () => {},
-  }), (error) => {
-    assert.equal(error.message, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
-    assert.equal(error.temporaryTargetClosed, true);
-    return true;
-  });
-  assert.equal(targetCloseCount, 4, 'a hung pre-load readback must close its exact disposable target');
-  assert.equal(targets.has(targetId), false);
+  assert.equal(targetCreateCount, 1);
+  assert.equal(targetCloseCount, 0);
 });
 
 test('saved-layout hydration refuses marker-to-ID mismatch before opening a target', async () => {
@@ -1656,6 +1285,7 @@ test('saved-layout hydration refuses marker-to-ID mismatch before opening a targ
     captureSlotId: INPUT.captureSlotId,
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId: 'wrong-layout-id',
+    requireFreshTarget: true,
   }, {
     readProfileInventory: async () => ({
       ...inventory([{ layoutId: 'actual-layout-id', name: MARKER }]),

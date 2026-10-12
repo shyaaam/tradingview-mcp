@@ -780,7 +780,7 @@ export const observerToolDefinitions = Object.freeze({
       capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       saved_layout_id: z.string().min(1).max(160),
-      require_fresh_target: z.boolean().optional(),
+      require_fresh_target: z.literal(true),
     },
     outputSchema: {
       success: z.literal(true),
@@ -803,7 +803,6 @@ export const observerToolDefinitions = Object.freeze({
         target_id: z.string().min(1).max(256),
         capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
         reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
-        prior_target_ids: z.array(z.string().min(1).max(256)).max(256),
         saved_layout_id: z.string().min(1).max(160),
         layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
         account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -811,34 +810,6 @@ export const observerToolDefinitions = Object.freeze({
       navigation_performed: z.literal(true),
       state: z.literal('hydrated'),
       mutations_performed: z.literal(true),
-    },
-  },
-  tv_observer_retire_saved_chart_v2: {
-    classification: 'bootstrap_mutation',
-    inputSchema: {
-      profile_name: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
-      layout_code: z.literal('s'),
-      authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
-      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
-      saved_layout_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
-      reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
-      allowed_origins: z.array(z.literal('https://www.tradingview.com')).length(1),
-    },
-    outputSchema: {
-      success: z.literal(true),
-      retirement_version: z.literal('saved-chart-retirement-v2'),
-      authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
-      authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
-      profile_name: z.string().min(1).max(160),
-      saved_layout_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/),
-      account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
-      chart_target_id: z.string().min(1).max(256).nullable(),
-      action: z.enum(['closed', 'already-closed', 'ambiguous']),
-      failure_code: z.enum(['DUPLICATE_EXACT_SAVED_LAYOUT_TARGETS']).nullable(),
-      matching_saved_layout_targets: z.number().int().nonnegative(),
-      remaining_chart_targets: z.number().int().nonnegative(),
-      mutations_performed: z.boolean(),
     },
   },
   tv_observer_retire_owned_saved_layout_target_v1: {
@@ -861,7 +832,6 @@ export const observerToolDefinitions = Object.freeze({
         target_id: z.string().min(1).max(256),
         capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
         reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
-        prior_target_ids: z.array(z.string().min(1).max(256)).max(256),
         saved_layout_id: z.string().min(1).max(160),
         layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
         account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
@@ -877,10 +847,7 @@ export const observerToolDefinitions = Object.freeze({
       account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       target_id: z.string().min(1).max(256),
       action: z.enum(['closed', 'already-closed']),
-      matching_saved_layout_targets: z.number().int().nonnegative(),
-      remaining_chart_targets: z.number().int().nonnegative(),
       mutations_performed: z.boolean(),
-      preserved_other_targets: z.literal(true),
     },
   },
   tv_observer_identity: {
@@ -1481,7 +1448,7 @@ export function registerObserverTool(server, name, description, handler) {
     if (definition.rejectUnexpectedInput && args && Object.keys(args).length > 0) {
       throw new Error(`${name} accepts no input arguments.`);
     }
-    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_hydrate_saved_layout_v1' && name !== 'tv_observer_retire_saved_chart_v2' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
+    if (name !== 'tv_observer_contract' && name !== 'tv_observer_prepare' && name !== 'tv_observer_start_profile_by_name_v1' && name !== 'tv_observer_attach_existing_read_only' && name !== 'tv_observer_hydrate_chart_target' && name !== 'tv_observer_hydrate_chart_target_v2' && name !== 'tv_observer_open_bootstrap_chart_target_v1' && name !== 'tv_observer_resolve_profile_name_v1' && name !== 'tv_observer_saved_chart_authority_preflight_v1' && name !== 'tv_observer_ensure_saved_chart_authority_v1' && name !== 'tv_observer_hydrate_saved_layout_v1' && name !== 'chart_runtime_readiness_probe_v1' && name !== 'chart_runtime_wait_ready_v1' && name !== 'chart_runtime_target_lifecycle_trace_v1' && name !== 'chart_runtime_content_snapshot_v1' && name !== 'chart_runtime_content_snapshot_v2') {
       requireObserverSession();
     }
     return handler(args, extra);
