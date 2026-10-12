@@ -5,11 +5,7 @@ import { requireObserverSession } from '../connection.js';
 
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
-const millisecondUtcTimestamp = z.string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
-  .refine((value) => {
-    try { return new Date(value).toISOString() === value; } catch { return false; }
-  });
+const millisecondUtcTimestamp = z.string().datetime({ precision: 3 });
 
 const reviewAuthoritySchema = z.object({
   profile_id: z.string().min(1).max(160),

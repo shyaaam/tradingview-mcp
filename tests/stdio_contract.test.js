@@ -33,6 +33,7 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
     cwd: ROOT,
     env: {
       ...process.env,
+      CLOAK_BROWSER_BASE_URL: 'http://127.0.0.1:1/api',
       TRADINGVIEW_MCP_RELEASE_COMMIT: COMMIT,
     },
     stderr: 'pipe',
@@ -53,6 +54,52 @@ test('stdio client completes initialize, contract call, and bounded shutdown', a
     assert.deepEqual(tool.inputSchema, capability.inputSchema, `${capability.name} input schema drift`);
     assert.deepEqual(tool.outputSchema, capability.resultSchema, `${capability.name} output schema drift`);
   }
+
+  const invalidReviewAuthority = {
+    profile_id: 'profile-a',
+    runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+    chart_target_id: 'owned-target',
+    symbol: 'BYBIT:BTCUSDT.P',
+    timeframe: '5',
+    source_candle_time: '2026-02-30T19:25:00.000Z',
+    pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+    sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+    active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+    active_layout_transition_hash: 'e'.repeat(64),
+    tab_index: 0,
+    pane_index: 0,
+    mcp_release_commit: 'f'.repeat(40),
+    mcp_manifest_hash: '0'.repeat(64),
+  };
+  const invalidAuthorityResult = await deadline(client.callTool({
+    name: 'tv_observer_attach_existing_read_only',
+    arguments: {
+      profile_id: 'profile-a',
+      chart_target_id: 'owned-target',
+      review_authority: invalidReviewAuthority,
+    },
+  }), observerCapabilityManifest.lifecycle.defaultCallTimeoutMs, 'invalid screenshot authority');
+  assert.equal(invalidAuthorityResult.isError, true);
+  const invalidAuthorityText = invalidAuthorityResult.content.find((entry) => entry.type === 'text')?.text ?? '';
+  assert.match(invalidAuthorityText, /invalid|validation|arguments|source_candle_time/iu);
+  assert.doesNotMatch(invalidAuthorityText, /fetch|connection refused/iu);
+
+  const extraAuthorityResult = await deadline(client.callTool({
+    name: 'tv_observer_attach_existing_read_only',
+    arguments: {
+      profile_id: 'profile-a',
+      chart_target_id: 'owned-target',
+      review_authority: {
+        ...invalidReviewAuthority,
+        source_candle_time: '2026-07-26T19:25:00.000Z',
+        unexpected_authority: 'must be rejected',
+      },
+    },
+  }), observerCapabilityManifest.lifecycle.defaultCallTimeoutMs, 'extra screenshot authority field');
+  assert.equal(extraAuthorityResult.isError, true);
+  const extraAuthorityText = extraAuthorityResult.content.find((entry) => entry.type === 'text')?.text ?? '';
+  assert.match(extraAuthorityText, /invalid|validation|arguments|unexpected_authority/iu);
+  assert.doesNotMatch(extraAuthorityText, /fetch|connection refused/iu);
 
   const response = await deadline(
     client.callTool({ name: 'tv_observer_contract', arguments: {} }),

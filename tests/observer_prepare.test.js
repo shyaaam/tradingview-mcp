@@ -7,7 +7,7 @@ import { getObserverSession, invalidateObserverSession, requireObserverSession }
 import { resolveCdpBaseUrl, resolveCloakProfileId } from '../src/core/cloak.js';
 import { registerObserverTool, observerToolDefinitions } from '../src/release/observer-schema.js';
 import { registerHealthTools } from '../src/tools/health.js';
-import { z } from 'zod';
+import { toJSONSchema, z } from 'zod';
 
 const BASE_URL = 'http://127.0.0.1:8080/api';
 const PROFILE_ID = 'profile-a';
@@ -228,6 +228,11 @@ test('exact read-only attachment binds screenshot authority without browser muta
 
 test('screenshot authority tool schema requires canonical millisecond UTC and rejects extra fields', () => {
   const inputSchema = z.object(observerToolDefinitions.tv_observer_attach_existing_read_only.inputSchema);
+  const sourceTimeSchema = toJSONSchema(inputSchema, { target: 'draft-07', io: 'input' })
+    .properties.review_authority.properties.source_candle_time;
+  assert.equal(sourceTimeSchema.format, 'date-time');
+  assert.equal(new RegExp(sourceTimeSchema.pattern).test('2026-07-26T19:25:00.000Z'), true);
+  assert.equal(new RegExp(sourceTimeSchema.pattern).test('2026-02-30T19:25:00.000Z'), false);
   const valid = {
     profile_id: PROFILE_ID,
     chart_target_id: 'owned-target',
