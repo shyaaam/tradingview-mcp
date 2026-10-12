@@ -97,6 +97,7 @@ export async function attachExistingReadOnly(input = {}) {
     cdpUrl,
     chartTargetId: chartTarget.id,
     chartTargetUrl: chartTarget.url,
+    reviewAuthority: input.review_authority,
   });
   return {
     success: true,

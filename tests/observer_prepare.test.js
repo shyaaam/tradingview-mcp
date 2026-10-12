@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import { prepare } from '../src/core/observer.js';
+import { attachExistingReadOnly, prepare } from '../src/core/observer.js';
 import { list as listTabs } from '../src/core/tab.js';
 import { getObserverSession, invalidateObserverSession, requireObserverSession } from '../src/connection.js';
 import { resolveCdpBaseUrl, resolveCloakProfileId } from '../src/core/cloak.js';
@@ -146,6 +146,120 @@ test('registered observer preparation preserves exact review authority', async (
     mcpReleaseCommit: reviewAuthority.mcp_release_commit,
     mcpManifestHash: reviewAuthority.mcp_manifest_hash,
   });
+});
+
+test('exact read-only attachment binds screenshot authority without browser mutations', async () => {
+  const calls = [];
+  const handlers = new Map();
+  registerHealthTools({
+    registerTool(name, _definition, handler) { handlers.set(name, handler); },
+    tool() {},
+  });
+  global.fetch = async (input, init = {}) => {
+    const url = String(input);
+    calls.push({ url, method: init.method || 'GET' });
+    if (url === `${BASE_URL}/profiles`) {
+      return response([{ id: PROFILE_ID, status: 'running', cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'owned-target', type: 'page', title: 'TradingView', url: 'https://www.tradingview.com/chart/abc/' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const authority = {
+    profile_id: PROFILE_ID,
+    runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+    chart_target_id: 'owned-target',
+    symbol: 'BYBIT:BTCUSDT.P',
+    timeframe: '5',
+    source_candle_time: '2026-07-26T19:25:00.000Z',
+    pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+    sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+    active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+    active_layout_transition_hash: 'e'.repeat(64),
+    tab_index: 0,
+    pane_index: 0,
+    mcp_release_commit: 'f'.repeat(40),
+    mcp_manifest_hash: '0'.repeat(64),
+  };
+
+  const result = await handlers.get('tv_observer_attach_existing_read_only')({
+    profile_id: PROFILE_ID,
+    chart_target_id: 'owned-target',
+    review_authority: authority,
+  });
+
+  assert.deepEqual(result.structuredContent, {
+    success: true,
+    manager_base_url: BASE_URL,
+    profile_id: PROFILE_ID,
+    status: 'running',
+    cdp_ready: true,
+    cdp_url: `${BASE_URL}/profiles/${PROFILE_ID}/cdp`,
+    browser: 'Chrome/146.0.0.0',
+    user_agent: 'test-agent',
+    chart_target_id: 'owned-target',
+    chart_target_url: 'https://www.tradingview.com/chart/abc/',
+    mutations_performed: false,
+  });
+  assert.deepEqual(getObserverSession()?.reviewAuthority, {
+    profileId: PROFILE_ID,
+    runtimeTargetId: authority.runtime_target_id,
+    chartTargetId: 'owned-target',
+    symbol: authority.symbol,
+    timeframe: authority.timeframe,
+    sourceCandleTime: authority.source_candle_time,
+    paneCapabilitySnapshotId: authority.pane_capability_snapshot_id,
+    stickyPlacementEpochId: authority.sticky_placement_epoch_id,
+    activeLayoutTransitionId: authority.active_layout_transition_id,
+    activeLayoutTransitionHash: authority.active_layout_transition_hash,
+    tabIndex: 0,
+    paneIndex: 0,
+    mcpReleaseCommit: authority.mcp_release_commit,
+    mcpManifestHash: authority.mcp_manifest_hash,
+  });
+  assert.equal(calls.every(({ method }) => method === 'GET'), true);
+  assert.equal(calls.some(({ url }) => /\/(?:launch|stop)(?:\?|$)/u.test(url)), false);
+});
+
+test('exact read-only attachment rejects review authority for a different target before binding', async () => {
+  const authority = {
+    profile_id: PROFILE_ID,
+    runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+    chart_target_id: 'other-target',
+    symbol: 'BYBIT:BTCUSDT.P',
+    timeframe: '5',
+    source_candle_time: '2026-07-26T19:25:00.000Z',
+    pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+    sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+    active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+    active_layout_transition_hash: 'e'.repeat(64),
+    tab_index: 0,
+    pane_index: 0,
+    mcp_release_commit: 'f'.repeat(40),
+    mcp_manifest_hash: '0'.repeat(64),
+  };
+  global.fetch = async (input) => {
+    const url = String(input);
+    if (url === `${BASE_URL}/profiles`) {
+      return response([{ id: PROFILE_ID, status: 'running', cdp_url: `/api/profiles/${PROFILE_ID}/cdp` }]);
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/version`) {
+      return response({ Browser: 'Chrome/146.0.0.0', 'User-Agent': 'test-agent' });
+    }
+    if (url === `${BASE_URL}/profiles/${PROFILE_ID}/cdp/json/list`) {
+      return response([{ id: 'owned-target', type: 'page', url: 'https://www.tradingview.com/chart/abc/' }]);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+  await assert.rejects(
+    () => attachExistingReadOnly({ profile_id: PROFILE_ID, chart_target_id: 'owned-target', review_authority: authority }),
+    /does not match prepared session/u,
+  );
+  assert.equal(getObserverSession(), null);
 });
 
 test('observer preparation rejects missing profile identity', async () => {
