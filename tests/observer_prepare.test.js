@@ -5,8 +5,9 @@ import { attachExistingReadOnly, prepare } from '../src/core/observer.js';
 import { list as listTabs } from '../src/core/tab.js';
 import { getObserverSession, invalidateObserverSession, requireObserverSession } from '../src/connection.js';
 import { resolveCdpBaseUrl, resolveCloakProfileId } from '../src/core/cloak.js';
-import { registerObserverTool } from '../src/release/observer-schema.js';
+import { registerObserverTool, observerToolDefinitions } from '../src/release/observer-schema.js';
 import { registerHealthTools } from '../src/tools/health.js';
+import { z } from 'zod';
 
 const BASE_URL = 'http://127.0.0.1:8080/api';
 const PROFILE_ID = 'profile-a';
@@ -223,6 +224,48 @@ test('exact read-only attachment binds screenshot authority without browser muta
   });
   assert.equal(calls.every(({ method }) => method === 'GET'), true);
   assert.equal(calls.some(({ url }) => /\/(?:launch|stop)(?:\?|$)/u.test(url)), false);
+});
+
+test('screenshot authority tool schema requires canonical millisecond UTC and rejects extra fields', () => {
+  const inputSchema = z.object(observerToolDefinitions.tv_observer_attach_existing_read_only.inputSchema);
+  const valid = {
+    profile_id: PROFILE_ID,
+    chart_target_id: 'owned-target',
+    review_authority: {
+      profile_id: PROFILE_ID,
+      runtime_target_id: `runtime-target-v1:${'a'.repeat(64)}`,
+      chart_target_id: 'owned-target',
+      symbol: 'BYBIT:BTCUSDT.P',
+      timeframe: '5',
+      source_candle_time: '2026-07-26T19:25:00.000Z',
+      pane_capability_snapshot_id: `pane-capability-snapshot-v1:${'b'.repeat(64)}`,
+      sticky_placement_epoch_id: `sticky-symbol-placement-epoch-v1:${'c'.repeat(64)}`,
+      active_layout_transition_id: `active-pane-layout-transition-v1:${'d'.repeat(64)}`,
+      active_layout_transition_hash: 'e'.repeat(64),
+      tab_index: 0,
+      pane_index: 0,
+      mcp_release_commit: 'f'.repeat(40),
+      mcp_manifest_hash: '0'.repeat(64),
+    },
+  };
+
+  assert.equal(inputSchema.safeParse(valid).success, true);
+  assert.equal(inputSchema.safeParse({
+    ...valid,
+    review_authority: { ...valid.review_authority, source_candle_time: '2026-07-26T19:25:00Z' },
+  }).success, false);
+  assert.equal(inputSchema.safeParse({
+    ...valid,
+    review_authority: { ...valid.review_authority, source_candle_time: '2026-07-26T19:25:00.00Z' },
+  }).success, false);
+  assert.equal(inputSchema.safeParse({
+    ...valid,
+    review_authority: { ...valid.review_authority, source_candle_time: '2026-02-30T19:25:00.000Z' },
+  }).success, false);
+  assert.equal(inputSchema.safeParse({
+    ...valid,
+    review_authority: { ...valid.review_authority, unexpected_authority: 'ignored-by-default-objects' },
+  }).success, false);
 });
 
 test('exact read-only attachment rejects review authority for a different target before binding', async () => {

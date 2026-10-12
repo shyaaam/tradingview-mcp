@@ -5,13 +5,19 @@ import { requireObserverSession } from '../connection.js';
 
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
+const millisecondUtcTimestamp = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  .refine((value) => {
+    try { return new Date(value).toISOString() === value; } catch { return false; }
+  });
+
 const reviewAuthoritySchema = z.object({
   profile_id: z.string().min(1).max(160),
   runtime_target_id: z.string().regex(/^[a-z0-9-]+:[0-9a-f]{64}$/),
   chart_target_id: z.string().min(1).max(200),
   symbol: z.string().min(1).max(160),
   timeframe: z.string().regex(/^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/),
-  source_candle_time: z.string().datetime(),
+  source_candle_time: millisecondUtcTimestamp,
   pane_capability_snapshot_id: z.string().regex(/^pane-capability-snapshot-v1:[0-9a-f]{64}$/),
   sticky_placement_epoch_id: z.string().regex(/^sticky-symbol-placement-epoch-v1:[0-9a-f]{64}$/),
   active_layout_transition_id: z.string().regex(/^active-pane-layout-transition-v1:[0-9a-f]{64}$/),
@@ -20,7 +26,7 @@ const reviewAuthoritySchema = z.object({
   pane_index: z.number().int().nonnegative(),
   mcp_release_commit: z.string().regex(/^[0-9a-f]{40}$/),
   mcp_manifest_hash: z.string().regex(/^[0-9a-f]{64}$/),
-});
+}).strict();
 
 const scopedIndicatorMutationOutput = {
   success: z.literal(true),
