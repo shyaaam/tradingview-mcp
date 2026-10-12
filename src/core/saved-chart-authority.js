@@ -262,6 +262,11 @@ export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   return `V5OBS-${slot}-${digest}`;
 }
 
+/** Stable, non-reversible proof of one ephemeral CloakBrowser profile instance. */
+export function profileInstanceSha256(profileId) {
+  return createHash('sha256').update(requireText(profileId, 'profile ID'), 'utf8').digest('hex');
+}
+
 function savedLayoutHydrationTargetUrl() {
   const token = randomBytes(24).toString('base64url');
   return `about:blank#v5-hydrate-${token}`;
@@ -476,10 +481,10 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
 /** Validate the short-lived V5 receipt before allowing target-ID-scoped closure. */
 export function verifySavedLayoutTargetCreationReceipt(receipt, expected) {
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)
-    || receipt.schema_version !== 'saved-layout-created-target-v1'
+    || receipt.schema_version !== 'saved-layout-created-target-v2'
     || receipt.created_by_this_attempt !== true
-    || typeof receipt.profile_id !== 'string' || receipt.profile_id.length < 1 || receipt.profile_id.length > 160
-    || (expected.profileId !== undefined && receipt.profile_id !== expected.profileId)
+    || receipt.profile_name !== expected.profileName
+    || typeof receipt.profile_instance_sha256 !== 'string' || !HASH.test(receipt.profile_instance_sha256)
     || receipt.target_id !== expected.targetId
     || receipt.saved_layout_id !== expected.savedLayoutId
     || receipt.capture_slot_id !== expected.captureSlotId
@@ -589,9 +594,10 @@ async function openAndLoadSavedLayout(expected, dependencies) {
 
 function savedLayoutHydrationResult(input) {
   const ownershipReceipt = input.targetCreated ? Object.freeze({
-    schema_version: 'saved-layout-created-target-v1',
+    schema_version: 'saved-layout-created-target-v2',
     created_by_this_attempt: true,
-    profile_id: input.profileId,
+    profile_name: input.profileName,
+    profile_instance_sha256: profileInstanceSha256(input.profileId),
     target_id: input.targetId,
     capture_slot_id: input.captureSlotId,
     reconciliation_key: input.reconciliationKey,
