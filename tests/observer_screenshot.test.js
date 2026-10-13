@@ -15,6 +15,7 @@ const png = Buffer.from(
   'base64',
 );
 const pngBase64 = png.toString('base64');
+const chartTargetUrl = 'https://www.tradingview.com/chart/ChartExact/';
 
 function input(overrides = {}) {
   return {
@@ -37,6 +38,7 @@ function input(overrides = {}) {
       requireObserverSession: () => ({
         profileId: 'profile-1',
         chartTargetId: 'cdp-target-1',
+        chartTargetUrl,
         reviewAuthority: {
           profileId: 'profile-1',
           runtimeTargetId: ids.runtime,
@@ -59,14 +61,14 @@ function input(overrides = {}) {
         releaseCommit: '6'.repeat(40),
         manifestHash: '7'.repeat(64),
       }),
-      listTabs: async () => ({ tabs: [{ index: 0, id: 'cdp-target-1' }] }),
+      listTabs: async () => ({ tabs: [{ index: 0, id: 'cdp-target-1', url: chartTargetUrl }] }),
       listPanes: async () => ({
         active_index: 1,
         panes: [{ index: 1, symbol: 'NASDAQ:AAPL', resolution: '1h' }],
       }),
       captureCandle: async () => ({ success: true }),
       evaluateBound: async () => ({ x: 1, y: 2, width: 100, height: 80, viewport_width: 1200, viewport_height: 800 }),
-      getClient: async () => ({ Page: { captureScreenshot: async () => ({ data: pngBase64 }) } }),
+      getBoundClient: async () => ({ Page: { captureScreenshot: async () => ({ data: pngBase64 }) } }),
       now: () => new Date('2026-07-26T18:10:00.000Z'),
     },
     ...overrides,
@@ -97,9 +99,9 @@ test('fails closed on session, release, tab, pane, and source authority mismatch
   );
   await assert.rejects(
     captureObserverReviewScreenshot(input({
-      _deps: { ...input()._deps, listTabs: async () => ({ tabs: [] }) },
+      _deps: { ...input()._deps, listTabs: async () => ({ tabs: [{ index: 0, id: 'cdp-target-1', url: 'https://www.tradingview.com/chart/OtherChart/' }] }) },
     })),
-    /tab does not match/,
+    /target identity/,
   );
   await assert.rejects(
     captureObserverReviewScreenshot(input({
@@ -120,7 +122,7 @@ test('fails closed on non-canonical screenshot bytes', async () => {
     captureObserverReviewScreenshot(input({
       _deps: {
         ...input()._deps,
-        getClient: async () => ({ Page: { captureScreenshot: async () => ({ data: Buffer.from('not-png').toString('base64') }) } }),
+        getBoundClient: async () => ({ Page: { captureScreenshot: async () => ({ data: Buffer.from('not-png').toString('base64') }) } }),
       },
     })),
     /not a bounded PNG/,
@@ -176,7 +178,7 @@ test('PNG validation rejects CRC corruption and non-image compressed data', asyn
     captureObserverReviewScreenshot(input({
       _deps: {
         ...input()._deps,
-        getClient: async () => ({ Page: { captureScreenshot: async () => ({ data: corrupted.toString('base64') }) } }),
+        getBoundClient: async () => ({ Page: { captureScreenshot: async () => ({ data: corrupted.toString('base64') }) } }),
       },
     })),
     /CRC/,
@@ -188,9 +190,38 @@ test('PNG validation rejects CRC corruption and non-image compressed data', asyn
     captureObserverReviewScreenshot(input({
       _deps: {
         ...input()._deps,
-        getClient: async () => ({ Page: { captureScreenshot: async () => ({ data: invalidImageData.toString('base64') }) } }),
+        getBoundClient: async () => ({ Page: { captureScreenshot: async () => ({ data: invalidImageData.toString('base64') }) } }),
       },
     })),
     /CRC|cannot be decoded/,
   );
+});
+
+test('navigation after attachment fails before CDP screenshot capture', async () => {
+  const base = input();
+  let currentUrl = chartTargetUrl;
+  let screenshotCalls = 0;
+  const session = base._deps.requireObserverSession();
+  await assert.rejects(
+    captureObserverReviewScreenshot(input({
+      _deps: {
+        ...base._deps,
+        captureCandle: async () => {
+          currentUrl = 'https://www.tradingview.com/chart/OtherChart/';
+          return { success: true };
+        },
+        getBoundClient: async () => {
+          if (currentUrl !== session.chartTargetUrl) {
+            throw new Error('Bound observer chart target changed after attachment.');
+          }
+          return { Page: { captureScreenshot: async () => {
+            screenshotCalls += 1;
+            return { data: pngBase64 };
+          } } };
+        },
+      },
+    })),
+    /changed after attachment/u,
+  );
+  assert.equal(screenshotCalls, 0);
 });

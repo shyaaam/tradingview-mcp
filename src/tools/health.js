@@ -21,8 +21,8 @@ export function registerHealthTools(server, dependencies = {}) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  registerObserverTool(server, 'tv_observer_attach_existing_read_only', 'Attach to one exact existing TradingView target without launching, navigating, hydrating, focusing, or mutating', async ({ profile_id, chart_target_id }) => {
-    try { return jsonResult(await observer.attachExistingReadOnly({ profile_id, chart_target_id })); }
+  registerObserverTool(server, 'tv_observer_attach_existing_read_only', 'Attach to one exact existing TradingView target without launching, navigating, hydrating, focusing, or mutating', async ({ profile_id, chart_target_id, review_authority }) => {
+    try { return jsonResult(await observer.attachExistingReadOnly({ profile_id, chart_target_id, review_authority })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

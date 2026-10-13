@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 
-import { evaluateBound, getClient } from '../connection.js';
+import { evaluateBound, getBoundClient } from '../connection.js';
 import { buildObserverContract } from '../release/identity.js';
 import { captureCandle } from './observer-evidence.js';
 import { requireObserverSession } from './observer-session.js';
@@ -39,8 +39,8 @@ export async function captureObserverReviewScreenshot(input = {}) {
   const listTabs = deps.listTabs || tab.list;
   const tabs = await listTabs();
   const requestedTab = tabs?.tabs?.[request.tab_index];
-  if (!requestedTab || requestedTab.id !== session.chartTargetId) {
-    throw new Error('Requested screenshot tab does not match prepared observer target.');
+  if (!requestedTab || requestedTab.id !== session.chartTargetId || requestedTab.url !== session.chartTargetUrl) {
+    throw new Error('Requested screenshot tab does not match prepared observer target identity.');
   }
 
   const listPanes = deps.listPanes || pane.list;
@@ -82,7 +82,10 @@ export async function captureObserverReviewScreenshot(input = {}) {
     throw new Error('Active promoted pane bounds are unavailable for screenshot capture.');
   }
 
-  const getCdpClient = deps.getClient || getClient;
+  // Re-resolve the exact bound target after all pane/evidence reads and immediately
+  // before capture. The general client can reuse a live CDP connection without
+  // checking whether the target navigated after read-only attachment.
+  const getCdpClient = deps.getBoundClient || getBoundClient;
   const client = await getCdpClient();
   const result = await client.Page.captureScreenshot({
     format: 'png',
