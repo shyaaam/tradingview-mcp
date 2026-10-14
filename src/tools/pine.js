@@ -60,6 +60,11 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  registerObserverTool(server, 'pine_read_saved_source_v1', 'Read one exact saved Pine script ID/version and return its raw-source SHA-256 without opening the editor or changing the chart', async ({ script_id: scriptId, version }) => {
+    try { return jsonResult(await core.readSavedPineSourceIdentity({ scriptId, version })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   registerObserverTool(server, 'pine_upsert_named', 'Create or update one exact saved Pine Script by name, with source-hash and optional chart readback', async ({ name, source, add_to_chart: addToChart = false, pane_index: paneIndex }) => {
     try { return jsonResult(await core.upsertNamed({ name, source, addToChart, paneIndex })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }

@@ -119,6 +119,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     'symbol_search',
     'pine_apply_scoped',
     'pine_upsert_named',
+    'pine_read_saved_source_v1',
   ]);
   assert.equal(names.includes('data_get_ohlcv'), false);
   assert.equal(names.includes('capture_screenshot'), false);
@@ -147,6 +148,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     symbol_search: classifications.symbol_search,
     pine_apply_scoped: classifications.pine_apply_scoped,
     pine_upsert_named: classifications.pine_upsert_named,
+    pine_read_saved_source_v1: classifications.pine_read_saved_source_v1,
   }, {
     pane_indicator_signatures: 'read_only',
     pane_indicator_mutation_inventory: 'read_only',
@@ -161,6 +163,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     symbol_search: 'read_only',
     pine_apply_scoped: 'chart_mutation',
     pine_upsert_named: 'chart_mutation',
+    pine_read_saved_source_v1: 'read_only',
   });
 
   for (const capability of observerCapabilityManifest.capabilities) {
@@ -1142,6 +1145,15 @@ test('observer result fixtures satisfy registered output schemas', () => {
       post_mutation_indicator_count: 1,
       focus: {},
       message: 'scoped saved Pine source applied and exact chart binding verified',
+    },
+    pine_read_saved_source_v1: {
+      success: true,
+      identity_version: 'pine-saved-source-identity-v1',
+      script_id: 'USER;script-1',
+      version: '1.0',
+      source_sha256: 'a'.repeat(64),
+      source_utf8_bytes: 23,
+      mutations_performed: false,
     },
   };
 
