@@ -81,14 +81,15 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     const browser = await (deps.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
     try {
       const pages = (await listTargets(cdpUrl, deps)).filter((target) => target.type === 'page');
-      const blank = pages.find((target) => target.url === 'about:blank');
+      // Keep (or first create) the blank page before closing anything: closing the last page stops the browser.
+      const blankId = pages.find((target) => target.url === 'about:blank')?.id
+        ?? (await browser.Target.createTarget({ url: 'about:blank' })).targetId;
       for (const target of pages) {
-        if (target.id !== blank?.id) {
+        if (target.id !== blankId) {
           const closed = await browser.Target.closeTarget({ targetId: target.id });
           if (closed?.success !== true) throw new Error('Startup page cleanup was not confirmed');
         }
       }
-      if (!blank) await browser.Target.createTarget({ url: 'about:blank' });
       for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
         const remaining = (await listTargets(cdpUrl, deps)).filter((target) => target.type === 'page');
         if (remaining.length === 1 && remaining[0].url === 'about:blank') break;

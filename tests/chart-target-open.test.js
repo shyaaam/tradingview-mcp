@@ -600,6 +600,30 @@ test('explicit startup reset preserves one blank page and closes every other pag
   assert.deepEqual(harness.state.targets.map((x) => x.id), ['blank', 'worker']);
 });
 
+test('startup reset opens the blank page BEFORE closing the only chart page (closing the last page stops the browser)', async () => {
+  const harness = makeHarness({ targets: [
+    { id: 'chart-only', type: 'page', url: 'https://www.tradingview.com/chart/old/' },
+  ] });
+  const order = [];
+  harness.deps.connectBrowser = async () => ({
+    Target: {
+      createTarget: async ({ url }) => {
+        order.push('create'); assert.equal(url, 'about:blank');
+        harness.state.targets = [...harness.state.targets, { id: 'new-blank', type: 'page', url: 'about:blank' }];
+        return { targetId: 'new-blank' };
+      },
+      closeTarget: async ({ targetId }) => {
+        order.push(`close:${targetId}`); harness.state.targets = harness.state.targets.filter((x) => x.id !== targetId);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  });
+  await startExactProfileByName(PROFILE_NAME, harness.deps, { resetPages: true });
+  assert.deepEqual(order, ['create', 'close:chart-only']);
+  assert.deepEqual(harness.state.targets.map((x) => x.id), ['new-blank']);
+});
+
 test('startup reset refuses to proceed when target closure is not confirmed', async () => {
   const harness = makeHarness({ targets: [
     { id: 'blank', type: 'page', url: 'about:blank' },
