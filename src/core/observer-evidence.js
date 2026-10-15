@@ -353,26 +353,14 @@ async function moveDataWindowToLatestBar(evaluate, dependencies) {
     const client = await (dependencies?.getBoundClient || getBoundClient)();
     await client.Input.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
   }
-  const settled = await evaluate(`
+  // A short timer wait lets the Data Window repaint. It deliberately does not wait for animation frames: Chrome
+  // pauses them in non-visible tabs. Staleness is rejected downstream by the per-study closed-bar markers.
+  await evaluate(`
     /* TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1 */
     new Promise(function(resolve) {
-      var finished = false;
-      var timeout = setTimeout(function() {
-        if (finished) return;
-        finished = true;
-        resolve(false);
-      }, 1000);
-      requestAnimationFrame(function() {
-        requestAnimationFrame(function() {
-          if (finished) return;
-          finished = true;
-          clearTimeout(timeout);
-          resolve(true);
-        });
-      });
+      setTimeout(function() { resolve(true); }, 150);
     })
   `, { awaitPromise: true });
-  if (settled !== true) throw new Error('TradingView chart animation frames did not settle within 1000 ms.');
 }
 
 function normalizePaneCaptureRequest(input) {

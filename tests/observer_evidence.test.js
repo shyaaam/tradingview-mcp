@@ -246,6 +246,8 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
   assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
   assert.doesNotMatch(expressions[1], /indicators/iu);
   assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
+  assert.match(expressions[2], /setTimeout\(function\(\) \{ resolve\(true\); \}, 150\)/u);
+  assert.doesNotMatch(expressions[2], /requestAnimationFrame/u, 'settle must not depend on animation frames (paused in non-visible tabs)');
   assert.match(expressions[3], /cwc\.getAll\(\)/);
   assert.match(expressions[3], /all\[paneIndex\]/);
   assert.deepEqual(mouseEvents, [{ type: 'mouseMoved', x: 24, y: 18 }]);
@@ -346,30 +348,6 @@ test('exact pane capture fails before telemetry when no verified off-chart curso
       dispatchMouseEvent: async () => undefined,
     },
   }), /No verified off-chart viewport point is available/u);
-  assert.equal(captureRead, false);
-});
-
-test('exact pane capture fails closed when chart animation frames do not settle', async () => {
-  setObserverSession(session);
-  let captureRead = false;
-  await assert.rejects(() => capturePaneTelemetryOhlcv({
-    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
-    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
-    _deps: {
-      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
-      evaluateBound: async (expression) => {
-        if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
-          assert.doesNotMatch(expression, /indicators/iu);
-          return { x: 24, y: 18 };
-        }
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return false;
-        captureRead = true;
-        return {};
-      },
-      dispatchMouseEvent: async () => undefined,
-    },
-  }), /animation frames did not settle within 1000 ms/u);
   assert.equal(captureRead, false);
 });
 
