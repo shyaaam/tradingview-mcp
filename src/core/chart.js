@@ -13,6 +13,7 @@ import { list as _listTabs } from './tab.js';
 import { indicatorSignatures, mutationIdentityInventory, derivePaneIndicatorParityHash } from './pane.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
+import { exactTargetMatches } from './target-identity.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -298,11 +299,8 @@ async function assertExactSaveTarget(expected, session, listTabs) {
   }
   const tabs = await listTabs();
   const tabEntries = tabs && Array.isArray(tabs.tabs) ? tabs.tabs : null;
-  const matchingTabs = (tabEntries || []).filter((tab) => tab
-    && Number(tab.index) === expected.tabIndex
-    && tab.id === expected.targetId
-    && tab.chart_id === expected.chartId
-    && tab.url === canonicalUrl);
+  // Match by stable target ID: tab.index shifts when another slot opens or closes a tab.
+  const matchingTabs = exactTargetMatches(tabs, { targetId: expected.targetId, chartId: expected.chartId, url: canonicalUrl });
   if (tabs?.success !== true || !tabEntries || matchingTabs.length !== 1
     || tabEntries.filter((tab) => tab?.id === expected.targetId).length !== 1) {
     throw new Error('Scoped existing-chart save target tab is missing or ambiguous.');

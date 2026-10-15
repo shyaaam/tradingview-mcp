@@ -246,6 +246,8 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
   assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
   assert.doesNotMatch(expressions[1], /indicators/iu);
   assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
+  assert.match(expressions[2], /setTimeout\(function\(\) \{ resolve\(true\); \}, 150\)/u);
+  assert.doesNotMatch(expressions[2], /requestAnimationFrame/u, 'settle must not depend on animation frames (paused in non-visible tabs)');
   assert.match(expressions[3], /cwc\.getAll\(\)/);
   assert.match(expressions[3], /all\[paneIndex\]/);
   assert.deepEqual(mouseEvents, [{ type: 'mouseMoved', x: 24, y: 18 }]);
@@ -349,28 +351,42 @@ test('exact pane capture fails before telemetry when no verified off-chart curso
   assert.equal(captureRead, false);
 });
 
-test('exact pane capture fails closed when chart animation frames do not settle', async () => {
+test('exact pane capture finds its target by ID when the live tab position differs from tab_index', async () => {
   setObserverSession(session);
-  let captureRead = false;
-  await assert.rejects(() => capturePaneTelemetryOhlcv({
+  const result = await capturePaneTelemetryOhlcv({
     profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
-    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    expected_layout_id: '8', tab_index: 1, pane_index: 3, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
     _deps: {
+      // Another slot closed the tab that was at index 0, so this target now sits at index 0 although the request says 1.
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => {
         if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
-          assert.doesNotMatch(expression, /indicators/iu);
-          return { x: 24, y: 18 };
-        }
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return false;
-        captureRead = true;
-        return {};
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return true;
+        return {
+          pane_index: 3, pane_count: 8, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60',
+          candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
+          studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
+        };
       },
       dispatchMouseEvent: async () => undefined,
+      now: () => new Date('2026-07-17T10:00:01Z'),
     },
-  }), /animation frames did not settle within 1000 ms/u);
-  assert.equal(captureRead, false);
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.chart_target_id, 'target-exact');
+});
+
+test('exact pane capture reports a missing target distinctly from an ambiguous one', async () => {
+  setObserverSession(session);
+  const call = (tabs) => capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
+    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    _deps: { listTabs: async () => ({ success: true, tabs }) },
+  });
+  const tab = { index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl };
+  await assert.rejects(() => call([]), /exact pane observer tab target is missing/u);
+  await assert.rejects(() => call([tab, { ...tab, index: 1 }]), /exact pane observer tab target is not unique/u);
 });
 
 test('exact pane telemetry reports bounded ambiguity category and indexes while failing closed', async () => {

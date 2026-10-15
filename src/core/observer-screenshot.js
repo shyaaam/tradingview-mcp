@@ -7,6 +7,7 @@ import { captureCandle } from './observer-evidence.js';
 import { requireObserverSession } from './observer-session.js';
 import * as pane from './pane.js';
 import * as tab from './tab.js';
+import { exactTargetMatches } from './target-identity.js';
 
 export const OBSERVER_REVIEW_SCREENSHOT_VERSION = 'observer-review-screenshot-v1';
 export const OBSERVER_REVIEW_SCREENSHOT_MAX_BYTES = 25 * 1024 * 1024;
@@ -38,7 +39,9 @@ export async function captureObserverReviewScreenshot(input = {}) {
 
   const listTabs = deps.listTabs || tab.list;
   const tabs = await listTabs();
-  const requestedTab = tabs?.tabs?.[request.tab_index];
+  // Match by stable target ID: positions in the live tab list shift when another slot opens or closes a tab.
+  const idMatches = exactTargetMatches(tabs, { targetId: session.chartTargetId });
+  const requestedTab = idMatches.length === 1 ? idMatches[0] : undefined;
   if (!requestedTab || requestedTab.id !== session.chartTargetId || requestedTab.url !== session.chartTargetUrl) {
     throw new Error('Requested screenshot tab does not match prepared observer target identity.');
   }

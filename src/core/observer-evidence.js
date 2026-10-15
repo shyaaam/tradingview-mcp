@@ -2,6 +2,7 @@ import { evaluateBound, getBoundClient } from '../connection.js';
 import { requireObserverSession } from './observer-session.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 import { list as listTabs } from './tab.js';
+import { findExactTarget } from './target-identity.js';
 
 export const OBSERVER_ADAPTER_VERSION = 'tradingview-mcp-observer-v1';
 export const OBSERVER_TELEMETRY_OHLCV_VERSION = 'observer-telemetry-ohlcv-v1';
@@ -185,11 +186,8 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
   }
 
   const tabs = await (_deps?.listTabs || listTabs)();
-  const matches = Array.isArray(tabs?.tabs)
-    ? tabs.tabs.filter((tab) => tab?.index === scope.tab_index && tab?.id === scope.expected_chart_target_id)
-    : [];
-  if (tabs?.success !== true || matches.length !== 1) throw new Error('exact pane observer tab target is not unique');
-  const tab = matches[0];
+  // Match by stable target ID only: tab.index shifts when another slot opens or closes a tab.
+  const tab = findExactTarget(tabs, { targetId: scope.expected_chart_target_id }, 'exact pane observer tab target');
   if (tab.chart_id !== scope.expected_chart_id || tab.url !== canonicalUrl) {
     throw new Error('exact pane observer chart target does not match authority');
   }
@@ -353,26 +351,14 @@ async function moveDataWindowToLatestBar(evaluate, dependencies) {
     const client = await (dependencies?.getBoundClient || getBoundClient)();
     await client.Input.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
   }
-  const settled = await evaluate(`
+  // A short timer wait lets the Data Window repaint. It deliberately does not wait for animation frames: Chrome
+  // pauses them in non-visible tabs. Staleness is rejected downstream by the per-study closed-bar markers.
+  await evaluate(`
     /* TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1 */
     new Promise(function(resolve) {
-      var finished = false;
-      var timeout = setTimeout(function() {
-        if (finished) return;
-        finished = true;
-        resolve(false);
-      }, 1000);
-      requestAnimationFrame(function() {
-        requestAnimationFrame(function() {
-          if (finished) return;
-          finished = true;
-          clearTimeout(timeout);
-          resolve(true);
-        });
-      });
+      setTimeout(function() { resolve(true); }, 150);
     })
   `, { awaitPromise: true });
-  if (settled !== true) throw new Error('TradingView chart animation frames did not settle within 1000 ms.');
 }
 
 function normalizePaneCaptureRequest(input) {
