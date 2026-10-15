@@ -6,9 +6,9 @@ export function registerChartTargetOpenTool(server) {
   registerObserverTool(
     server,
     'tv_observer_start_profile_by_name_v1',
-    'Start one exact stable-name CloakBrowser profile when stopped and wait for its exact profile CDP endpoint; never opens or mutates chart tabs',
-    async ({ profile_name }) => {
-      try { return jsonResult(await startExactProfileByName(profile_name)); }
+    'Start one exact stable-name CloakBrowser profile when stopped and wait for its exact profile CDP endpoint; optionally resets an exclusively owned profile to one blank page at startup',
+    async ({ profile_name, reset_pages }) => {
+      try { return jsonResult(await startExactProfileByName(profile_name, {}, { resetPages: reset_pages })); }
       catch (error) {
         return jsonResult({
           success: false,

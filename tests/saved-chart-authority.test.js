@@ -1135,6 +1135,7 @@ test('saved-layout discovery does not depend on route UID resolution or target c
 });
 
 test('fresh hydration ignores duplicate existing tabs and returns exact target ownership', async () => {
+ for (const maxPages of [3, 4]) {
   const profileId = INPUT.expectedProfileId;
   const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
   const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
@@ -1144,6 +1145,7 @@ test('fresh hydration ignores duplicate existing tabs and returns exact target o
     ['user-tab-a', { id: 'user-tab-a', type: 'page', url: `https://www.tradingview.com/chart/${runtimeChartId}/` }],
     ['user-tab-b', { id: 'user-tab-b', type: 'page', url: `https://www.tradingview.com/chart/${runtimeChartId}/` }],
   ]);
+  if (maxPages === 4) targets.set('third-existing', { id: 'third-existing', type: 'page', url: 'about:blank' });
   let targetId = '';
   let lastTemporaryTargetUrl = '';
   let targetCreateCount = 0;
@@ -1208,12 +1210,10 @@ test('fresh hydration ignores duplicate existing tabs and returns exact target o
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId,
     requireFreshTarget: true,
+    maxPages,
   }, {
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: savedLayoutId, name: MARKER, symbol: '', resolution: '' }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
+    readProfileInventory: async () => { throw new Error('hydration must not read the profile inventory'); },
+    resolveExactRunningProfile: async () => ({ profileName: INPUT.profileName, profileId, cdpUrl }),
     fetch: async (value) => {
       const url = new URL(String(value));
       return { ok: true, json: async () => url.pathname.endsWith('/json/version')
@@ -1240,10 +1240,13 @@ test('fresh hydration ignores duplicate existing tabs and returns exact target o
   assert.match(lastTemporaryTargetUrl, /^about:blank#v5-hydrate-[A-Za-z0-9_-]{32}$/u);
   assert.equal(targetCreateCount, 1);
   assert.equal(targetCloseCount, 0);
+  // exactly one new page (the slot tab); no leftover generic /chart/ inventory page
+  assert.equal([...targets.values()].some((t) => t.url === 'https://www.tradingview.com/chart/'), false);
   assert.equal(targets.has('user-tab-a'), true);
   assert.equal(targets.has('user-tab-b'), true);
   assert.equal(targets.has('concurrent-user-tab'), true);
   assert.equal(targets.has(targetId), true);
+ }
 });
 
 test('lost fresh-target creation acknowledgement fails without inventory recovery or guessed close', async () => {
@@ -1264,14 +1267,12 @@ test('lost fresh-target creation acknowledgement fails without inventory recover
     reconciliationKey: INPUT.reconciliationKey,
     savedLayoutId: '206000778',
     requireFreshTarget: true,
+    maxPages: 3,
   }, {
     authorityReadTimeoutMs: 25,
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: '206000778', name: MARKER }]),
-      profile: { profileName: INPUT.profileName, profileId, cdpUrl },
-      close: async () => {},
-    }),
-    fetch: async () => ({ ok: true, json: async () => ({ webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` }) }),
+    resolveExactRunningProfile: async () => ({ profileName: INPUT.profileName, profileId, cdpUrl }),
+    fetch: async (url) => ({ ok: true, json: async () => String(url).endsWith('/json/list')
+      ? [] : { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${profileId}/cdp` } }),
     connectBrowser: async () => browser,
   }), (error) => {
     assert.equal(error.message, 'SAVED_CHART_AUTHORITY_READ_TIMEOUT');
@@ -1282,24 +1283,40 @@ test('lost fresh-target creation acknowledgement fails without inventory recover
   assert.equal(targetCloseCount, 0);
 });
 
-test('saved-layout hydration refuses marker-to-ID mismatch before opening a target', async () => {
-  let targetCreateCount = 0;
-  let closed = false;
+test('saved-layout marker-to-ID mismatch is detected on the slot tab, which closes itself', async () => {
+  const profileId = INPUT.expectedProfileId;
+  const cdpUrl = `http://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const browserWebSocketUrl = `ws://127.0.0.1:9222/profiles/${profileId}/cdp`;
+  const targets = new Map();
+  let targetId = ''; let creates = 0; const closed = [];
+  const page = {
+    Runtime: { enable: async () => {}, evaluate: async ({ expression }) => {
+      if (expression === '({ url: location.href })') return { result: { value: { url: targets.get(targetId)?.url } } };
+      return { result: { value: { authenticated: true, account_subject_sha256: ACCOUNT_HASH,
+        layouts: [{ layout_id: 'actual-layout-id', name: MARKER, symbol: '', resolution: '' }] } } };
+    } },
+    Page: { enable: async () => {}, navigate: async ({ url }) => { targets.set(targetId, { ...targets.get(targetId), url }); return {}; } },
+    close: async () => {},
+  };
+  const browser = { Target: {
+    createTarget: async ({ url }) => { creates += 1; targetId = 'slot-tab';
+      targets.set(targetId, { id: targetId, type: 'page', url, webSocketDebuggerUrl: `${browserWebSocketUrl}/devtools/page/${targetId}` });
+      return { targetId }; },
+    closeTarget: async ({ targetId: id }) => { closed.push(id); targets.delete(id); return { success: true }; },
+  }, close: async () => {} };
   await assert.rejects(hydrateSavedChartLayout({
-    profileName: INPUT.profileName,
-    captureSlotId: INPUT.captureSlotId,
-    reconciliationKey: INPUT.reconciliationKey,
-    savedLayoutId: 'wrong-layout-id',
-    requireFreshTarget: true,
+    profileName: INPUT.profileName, captureSlotId: INPUT.captureSlotId, reconciliationKey: INPUT.reconciliationKey,
+    savedLayoutId: 'wrong-layout-id', requireFreshTarget: true, maxPages: 3,
   }, {
-    readProfileInventory: async () => ({
-      ...inventory([{ layoutId: 'actual-layout-id', name: MARKER }]),
-      close: async () => { closed = true; },
-    }),
-    connectBrowser: async () => { targetCreateCount += 1; throw new Error('must not open target'); },
+    readProfileInventory: async () => { throw new Error('hydration must not read the profile inventory'); },
+    resolveExactRunningProfile: async () => ({ profileName: INPUT.profileName, profileId, cdpUrl }),
+    fetch: async (value) => ({ ok: true, json: async () => String(value).endsWith('/json/version')
+      ? { webSocketDebuggerUrl: browserWebSocketUrl } : [...targets.values()] }),
+    connectBrowser: async () => browser, connectTarget: async () => page, sleep: async () => {},
   }), /SAVED_LAYOUT_MARKER_ID_MISMATCH/u);
-  assert.equal(closed, true);
-  assert.equal(targetCreateCount, 0);
+  assert.equal(creates, 1);
+  assert.deepEqual(closed, ['slot-tab']);
+  assert.equal(targets.size, 0);
 });
 
 test('slot B create accepts exact new layout ID even when route UID matches Slot A', async () => {
@@ -1571,4 +1588,43 @@ test('account switch and duplicate marker fail closed without create retry', asy
   assert.equal(multiple.action, 'multiple');
   assert.equal(multiple.mutations_performed, false);
   assert.equal(creates, 0);
+});
+
+
+test('hydration refuses the configured page budget before createTarget', async () => {
+  for (const maxPages of [3, 4]) {
+    const cdpUrl = `http://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp`;
+    let creates = 0;
+    await assert.rejects(hydrateSavedChartLayout({
+      ...INPUT, savedLayoutId: '206000778', requireFreshTarget: true, maxPages,
+    }, {
+      resolveExactRunningProfile: async () => ({ profileId: INPUT.expectedProfileId, cdpUrl }),
+      fetch: async (url) => ({ ok: true, json: async () => String(url).endsWith('/json/version')
+        ? { webSocketDebuggerUrl: `ws://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp` }
+        : Array.from({ length: maxPages }, (_, i) => ({ id: String(i), type: 'page', url: 'about:blank' })) }),
+      connectBrowser: async () => ({ Target: { createTarget: async () => { creates++; } }, close: async () => {} }),
+    }), /tab_budget_exceeded/);
+    assert.equal(creates, 0);
+  }
+});
+
+test('inventory closes its own temporary target on success, rejection, and timeout', async () => {
+  for (const outcome of ['success', 'rejection', 'timeout']) {
+    const cdpUrl = `http://127.0.0.1:9222/profiles/${INPUT.expectedProfileId}/cdp`;
+    let closes = 0;
+    const page = preflightProbePage([{ layoutId: '206000778', name: MARKER }]);
+    page.Runtime.enable = async () => {};
+    page.Page = { enable: async () => {} };
+    if (outcome === 'rejection') page.Runtime.evaluate = async () => { throw new Error('inventory rejected'); };
+    if (outcome === 'timeout') page.Runtime.evaluate = async () => await new Promise(() => {});
+    const result = await preflightSavedChartAuthority(INPUT, {
+      managerBaseUrl: 'http://manager.test/api', authorityReadTimeoutMs: 25,
+      fetch: async (value) => ({ ok: true, json: async () => String(value).endsWith('/profiles')
+        ? [{ id: INPUT.expectedProfileId, name: INPUT.profileName, status: 'running', cdp_url: cdpUrl }] : [] }),
+      createInventoryTarget: async () => ({ target: { id: 'temporary', type: 'page' }, page,
+        close: async () => { closes++; } }),
+    });
+    assert.equal(closes, 1, outcome);
+    assert.equal(result.authenticated, outcome === 'success');
+  }
 });

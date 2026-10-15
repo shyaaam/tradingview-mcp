@@ -10,7 +10,7 @@ const POLL_INTERVAL_MS = 250;
 const PROFILE_REQUEST_TIMEOUT_MS = 2_000;
 
 /** Start one exact profile selected by stable name; never expose its Manager UUID. */
-export async function startExactProfileByName(profileNameValue, dependencies = {}) {
+export async function startExactProfileByName(profileNameValue, dependencies = {}, { resetPages = false } = {}) {
   const profileName = requireText(profileNameValue, 'profile_name');
   const deps = dependencies;
   const managerBaseUrl = deps.managerBaseUrl || await (deps.resolveManagerBaseUrl || resolveCloakManagerBaseUrl)();
@@ -76,6 +76,29 @@ export async function startExactProfileByName(profileNameValue, dependencies = {
     assertExactProfileBrowserWebSocket(version.webSocketDebuggerUrl, cdpUrl, current.profile_id);
   } catch {
     throw codedError('PROFILE_CDP_AUTHORITY_MISMATCH', 'Profile CDP endpoint did not match exact profile authority.');
+  }
+  if (resetPages) {
+    const browser = await (deps.connectBrowser || ((url) => CDP({ target: url, local: true })))(version.webSocketDebuggerUrl);
+    try {
+      const pages = (await listTargets(cdpUrl, deps)).filter((target) => target.type === 'page');
+      // Keep (or first create) the blank page before closing anything: closing the last page stops the browser.
+      const blankId = pages.find((target) => target.url === 'about:blank')?.id
+        ?? (await browser.Target.createTarget({ url: 'about:blank' })).targetId;
+      for (const target of pages) {
+        if (target.id !== blankId) {
+          const closed = await browser.Target.closeTarget({ targetId: target.id });
+          if (closed?.success !== true) throw new Error('Startup page cleanup was not confirmed');
+        }
+      }
+      for (let attempt = 0; attempt < PROFILE_POLL_ATTEMPTS; attempt += 1) {
+        const remaining = (await listTargets(cdpUrl, deps)).filter((target) => target.type === 'page');
+        if (remaining.length === 1 && remaining[0].url === 'about:blank') break;
+        if (attempt === PROFILE_POLL_ATTEMPTS - 1) throw new Error('Startup page cleanup was not confirmed');
+        await (deps.sleep || sleep)(POLL_INTERVAL_MS);
+      }
+    } finally {
+      await browser.close?.();
+    }
   }
   return Object.freeze({
     success: true,

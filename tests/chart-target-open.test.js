@@ -578,3 +578,59 @@ test('ignores empty optional CDP endpoint on unrelated stopped Manager profile',
   assert.equal(harness.calls.bound.length, 1);
   assert.equal(harness.calls.bound[0].profileId, PROFILE_ID);
 });
+
+
+test('explicit startup reset preserves one blank page and closes every other page only', async () => {
+  const harness = makeHarness({ targets: [
+    { id: 'blank', type: 'page', url: 'about:blank' },
+    { id: 'extra-blank', type: 'page', url: 'about:blank' },
+    { id: 'leaked', type: 'page', url: 'https://www.tradingview.com/chart/old/' },
+    { id: 'worker', type: 'service_worker', url: 'chrome-extension://worker' },
+  ] });
+  const closed = [];
+  harness.deps.connectBrowser = async () => ({
+    Target: { closeTarget: async ({ targetId }) => {
+      closed.push(targetId); harness.state.targets = harness.state.targets.filter((x) => x.id !== targetId);
+      return { success: true };
+    }, createTarget: async () => assert.fail('baseline already exists') },
+    close: async () => {},
+  });
+  await startExactProfileByName(PROFILE_NAME, harness.deps, { resetPages: true });
+  assert.deepEqual(closed, ['extra-blank', 'leaked']);
+  assert.deepEqual(harness.state.targets.map((x) => x.id), ['blank', 'worker']);
+});
+
+test('startup reset opens the blank page BEFORE closing the only chart page (closing the last page stops the browser)', async () => {
+  const harness = makeHarness({ targets: [
+    { id: 'chart-only', type: 'page', url: 'https://www.tradingview.com/chart/old/' },
+  ] });
+  const order = [];
+  harness.deps.connectBrowser = async () => ({
+    Target: {
+      createTarget: async ({ url }) => {
+        order.push('create'); assert.equal(url, 'about:blank');
+        harness.state.targets = [...harness.state.targets, { id: 'new-blank', type: 'page', url: 'about:blank' }];
+        return { targetId: 'new-blank' };
+      },
+      closeTarget: async ({ targetId }) => {
+        order.push(`close:${targetId}`); harness.state.targets = harness.state.targets.filter((x) => x.id !== targetId);
+        return { success: true };
+      },
+    },
+    close: async () => {},
+  });
+  await startExactProfileByName(PROFILE_NAME, harness.deps, { resetPages: true });
+  assert.deepEqual(order, ['create', 'close:chart-only']);
+  assert.deepEqual(harness.state.targets.map((x) => x.id), ['new-blank']);
+});
+
+test('startup reset refuses to proceed when target closure is not confirmed', async () => {
+  const harness = makeHarness({ targets: [
+    { id: 'blank', type: 'page', url: 'about:blank' },
+    { id: 'leaked', type: 'page', url: 'https://www.tradingview.com/chart/old/' },
+  ] });
+  harness.deps.connectBrowser = async () => ({
+    Target: { closeTarget: async () => ({ success: false }) }, close: async () => {},
+  });
+  await assert.rejects(startExactProfileByName(PROFILE_NAME, harness.deps, { resetPages: true }), /cleanup was not confirmed/);
+});

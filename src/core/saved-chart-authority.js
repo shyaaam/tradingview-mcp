@@ -453,28 +453,23 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
   if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
     throw new Error('Saved-layout hydration authority is invalid');
   }
+  const maxPages = input.maxPages ?? input.max_pages;
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('max_pages must be a positive integer');
   const marker = savedChartLayoutMarker(captureSlotId, reconciliationKey);
-  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(profileName, dependencies);
-  try {
-    const matches = exactMarkerMatches(inventory.layouts, marker);
-    const idMatches = inventory.layouts.filter((layout) => layout.layoutId === savedLayoutId);
-    if (matches.length > 1 || idMatches.length > 1) throw new Error('MULTIPLE_SAVED_CHART_AUTHORITIES');
-    if (matches.length !== 1 || matches[0].layoutId !== savedLayoutId
-      || idMatches.length !== 1 || idMatches[0].name !== marker) {
-      throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
-    }
-  } finally {
-    await closeProfileInventory(inventory);
-  }
-
+  // No inventory read: it would open a temporary generic chart page per hydration. The slot's own tab proves the
+  // account, saved-layout id and marker (openAndLoadSavedLayout), and a mismatch closes that tab.
+  const profile = await withAuthorityReadDeadline(
+    () => (dependencies.resolveExactRunningProfile || resolveExactRunningProfile)(profileName, dependencies),
+    createAuthorityReadDeadline(dependencies),
+  );
   return await openAndLoadSavedLayout({
-    profile: inventory.profile,
+    profile,
     profileName,
     captureSlotId,
     reconciliationKey,
     marker,
     savedLayoutId,
-    accountSubjectSha256: inventory.accountSubjectSha256,
+    maxPages,
   }, dependencies);
 }
 
@@ -497,8 +492,7 @@ export function verifySavedLayoutTargetCreationReceipt(receipt, expected) {
 }
 
 async function openAndLoadSavedLayout(expected, dependencies) {
-  const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
-    accountSubjectSha256 } = expected;
+  const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId } = expected;
   const temporaryTargetUrl = savedLayoutHydrationTargetUrl();
   const version = await fetchJson(
     new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
@@ -515,6 +509,10 @@ async function openAndLoadSavedLayout(expected, dependencies) {
   let operationError = null;
   let targetCreationAttempted = false;
   try {
+    const targets = await listTargets(profile.cdpUrl, dependencies, createAuthorityReadDeadline(dependencies));
+    if (targets.filter((target) => target.type === 'page').length >= expected.maxPages) {
+      throw new Error('tab_budget_exceeded');
+    }
     targetCreationAttempted = true;
     const created = await withAuthorityReadDeadline(
       () => browser.Target.createTarget({ url: temporaryTargetUrl }),
@@ -542,9 +540,7 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
     const beforeLoadDeadline = createAuthorityReadDeadline(dependencies);
     const beforeLoad = await waitForAccountProbe(page, dependencies, beforeLoadDeadline);
-    if (beforeLoad.account_subject_sha256 !== accountSubjectSha256) {
-      throw new Error('ACCOUNT_IDENTITY_CHANGED');
-    }
+    const accountSubjectSha256 = beforeLoad.account_subject_sha256;
     const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId);
     const markerBeforeLoad = exactMarkerMatches(beforeLoad.layouts, marker);
     if (exactBeforeLoad.length !== 1 || exactBeforeLoad[0].name !== marker
@@ -630,7 +626,8 @@ async function closeCreatedHydrationTarget({ profile, browser, targetId, tempora
   const target = await waitForTarget(profile.cdpUrl, targetId, dependencies, createAuthorityReadDeadline(dependencies));
   if (!target) return true;
   if (target.type !== 'page'
-    || (target.url !== temporaryTargetUrl && !/^https:\/\/www\.tradingview\.com\/chart\/[A-Za-z0-9_-]{1,160}\/$/u.test(target.url))) {
+    || (target.url !== temporaryTargetUrl && target.url !== GENERIC_CHART_URL
+      && !/^https:\/\/www\.tradingview\.com\/chart\/[A-Za-z0-9_-]{1,160}\/$/u.test(target.url))) {
     return false;
   }
   try {
@@ -752,68 +749,52 @@ async function readProfileInventory(profileName, dependencies) {
 
   let canonicalLayouts = null;
   let accountSubjectSha256 = null;
-  let firstPage = null;
-  for (const target of chartTargets) {
-    const page = temporaryTarget?.target.id === target.id
-      ? temporaryTarget.page
-      : await connectTarget(target, dependencies, deadline);
-    try {
-      await enablePage(page, deadline);
-      const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
-      if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))
-        || !Array.isArray(probe.layouts)) {
-        throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
-      }
-      const layouts = normalizeLayouts(probe.layouts);
-      if (accountSubjectSha256 !== null && accountSubjectSha256 !== probe.account_subject_sha256) {
-        throw new Error('PROFILE_TABS_HAVE_DIFFERENT_ACCOUNT_IDENTITIES');
-      }
-      if (canonicalLayouts !== null && stableJson(canonicalLayouts) !== stableJson(layouts)) {
-        throw new Error('PROFILE_TABS_HAVE_DIFFERENT_SAVED_LAYOUT_INVENTORIES');
-      }
-      accountSubjectSha256 = probe.account_subject_sha256;
-      canonicalLayouts = layouts;
-      firstPage ??= page;
-      if (page !== firstPage) await closePage(page, deadline);
-    } catch (error) {
-      let temporaryTargetClosed = temporaryTarget === null;
-      if (temporaryTarget !== null) {
-        try {
-          await temporaryTarget.close();
-          temporaryTargetClosed = true;
-        } catch {
-          temporaryTargetClosed = false;
+  try {
+    for (const target of chartTargets) {
+      const page = temporaryTarget?.target.id === target.id
+        ? temporaryTarget.page
+        : await connectTarget(target, dependencies, deadline);
+      try {
+        await enablePage(page, deadline);
+        const probe = await evaluate(page, ACCOUNT_LAYOUT_PROBE, deadline);
+        if (probe?.authenticated !== true || !HASH.test(String(probe.account_subject_sha256 || ''))
+          || !Array.isArray(probe.layouts)) {
+          throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
         }
-      } else {
-        try { await closePage(page, deadline); } catch { /* preserve inventory failure */ }
+        const layouts = normalizeLayouts(probe.layouts);
+        if (accountSubjectSha256 !== null && accountSubjectSha256 !== probe.account_subject_sha256) {
+          throw new Error('PROFILE_TABS_HAVE_DIFFERENT_ACCOUNT_IDENTITIES');
+        }
+        if (canonicalLayouts !== null && stableJson(canonicalLayouts) !== stableJson(layouts)) {
+          throw new Error('PROFILE_TABS_HAVE_DIFFERENT_SAVED_LAYOUT_INVENTORIES');
+        }
+        accountSubjectSha256 = probe.account_subject_sha256;
+        canonicalLayouts = layouts;
+      } finally {
+        if (page !== temporaryTarget?.page) await closePage(page);
       }
-      if (firstPage !== null && firstPage !== page && firstPage !== temporaryTarget?.page) {
-        try { await closePage(firstPage, deadline); } catch { /* preserve inventory failure */ }
-      }
-      throw inventoryReadFailure(error, temporaryTargetClosed);
     }
-  }
-  if (firstPage === null || canonicalLayouts === null || accountSubjectSha256 === null) {
-    const error = new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
+    if (canonicalLayouts === null || accountSubjectSha256 === null) {
+      throw new Error('PROFILE_NOT_AUTHENTICATED_OR_LAYOUT_API_UNAVAILABLE');
+    }
+    return {
+      profile,
+      allTargets: targets,
+      targets: chartTargets,
+      temporaryTargetCreated: temporaryTarget !== null,
+      layouts: canonicalLayouts,
+      accountSubjectSha256,
+      authenticated: true,
+      close: async () => {}, // Inventory owns and closes its connections/temporary target below.
+    };
+  } catch (error) {
+    throw inventoryReadFailure(error, true);
+  } finally {
     if (temporaryTarget !== null) {
-      try { await temporaryTarget.close(); } catch { throw inventoryReadFailure(error, false); }
+      try { await temporaryTarget.close(); }
+      catch (error) { throw inventoryReadFailure(error, false); }
     }
-    throw error;
   }
-  return {
-    profile,
-    allTargets: temporaryTarget === null ? targets : [...targets, temporaryTarget.target],
-    targets: chartTargets,
-    temporaryTargetCreated: temporaryTarget !== null,
-    page: firstPage,
-    layouts: canonicalLayouts,
-    accountSubjectSha256,
-    authenticated: true,
-    close: async () => {
-      if (temporaryTarget !== null) await temporaryTarget.close();
-      else await closePage(firstPage, deadline);
-    },
-  };
 }
 
 function inventoryReadFailure(error, temporaryTargetClosed) {
