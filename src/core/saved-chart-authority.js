@@ -456,27 +456,19 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
   const maxPages = input.maxPages ?? input.max_pages;
   if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('max_pages must be a positive integer');
   const marker = savedChartLayoutMarker(captureSlotId, reconciliationKey);
-  const inventory = await (dependencies.readProfileInventory || readProfileInventory)(profileName, dependencies);
-  try {
-    const matches = exactMarkerMatches(inventory.layouts, marker);
-    const idMatches = inventory.layouts.filter((layout) => layout.layoutId === savedLayoutId);
-    if (matches.length > 1 || idMatches.length > 1) throw new Error('MULTIPLE_SAVED_CHART_AUTHORITIES');
-    if (matches.length !== 1 || matches[0].layoutId !== savedLayoutId
-      || idMatches.length !== 1 || idMatches[0].name !== marker) {
-      throw new Error('SAVED_LAYOUT_MARKER_ID_MISMATCH');
-    }
-  } finally {
-    await closeProfileInventory(inventory);
-  }
-
+  // No inventory read: it would open a temporary generic chart page per hydration. The slot's own tab proves the
+  // account, saved-layout id and marker (openAndLoadSavedLayout), and a mismatch closes that tab.
+  const profile = await withAuthorityReadDeadline(
+    () => (dependencies.resolveExactRunningProfile || resolveExactRunningProfile)(profileName, dependencies),
+    createAuthorityReadDeadline(dependencies),
+  );
   return await openAndLoadSavedLayout({
-    profile: inventory.profile,
+    profile,
     profileName,
     captureSlotId,
     reconciliationKey,
     marker,
     savedLayoutId,
-    accountSubjectSha256: inventory.accountSubjectSha256,
     maxPages,
   }, dependencies);
 }
@@ -500,8 +492,7 @@ export function verifySavedLayoutTargetCreationReceipt(receipt, expected) {
 }
 
 async function openAndLoadSavedLayout(expected, dependencies) {
-  const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId,
-    accountSubjectSha256 } = expected;
+  const { profile, profileName, captureSlotId, reconciliationKey, marker, savedLayoutId } = expected;
   const temporaryTargetUrl = savedLayoutHydrationTargetUrl();
   const version = await fetchJson(
     new URL('json/version', `${profile.cdpUrl}/`).toString(), dependencies,
@@ -549,9 +540,7 @@ async function openAndLoadSavedLayout(expected, dependencies) {
     if (navigation?.errorText) throw new Error('SAVED_LAYOUT_GENERIC_NAVIGATION_FAILED');
     const beforeLoadDeadline = createAuthorityReadDeadline(dependencies);
     const beforeLoad = await waitForAccountProbe(page, dependencies, beforeLoadDeadline);
-    if (beforeLoad.account_subject_sha256 !== accountSubjectSha256) {
-      throw new Error('ACCOUNT_IDENTITY_CHANGED');
-    }
+    const accountSubjectSha256 = beforeLoad.account_subject_sha256;
     const exactBeforeLoad = beforeLoad.layouts.filter((layout) => layout.layoutId === savedLayoutId);
     const markerBeforeLoad = exactMarkerMatches(beforeLoad.layouts, marker);
     if (exactBeforeLoad.length !== 1 || exactBeforeLoad[0].name !== marker
@@ -637,7 +626,8 @@ async function closeCreatedHydrationTarget({ profile, browser, targetId, tempora
   const target = await waitForTarget(profile.cdpUrl, targetId, dependencies, createAuthorityReadDeadline(dependencies));
   if (!target) return true;
   if (target.type !== 'page'
-    || (target.url !== temporaryTargetUrl && !/^https:\/\/www\.tradingview\.com\/chart\/[A-Za-z0-9_-]{1,160}\/$/u.test(target.url))) {
+    || (target.url !== temporaryTargetUrl && target.url !== GENERIC_CHART_URL
+      && !/^https:\/\/www\.tradingview\.com\/chart\/[A-Za-z0-9_-]{1,160}\/$/u.test(target.url))) {
     return false;
   }
   try {
