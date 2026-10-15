@@ -28,7 +28,7 @@ function paneDependencies(dependencies) {
   return {
     ...dependencies,
     evaluateBound: async (expression, options) => {
-      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V2')) return { x: 24, y: 18 };
       if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return true;
       return dependencies.evaluateBound(expression, options);
     },
@@ -205,7 +205,7 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
       evaluateBound: async (expression, options) => {
         expressions.push(expression);
         if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V2')) return { x: 24, y: 18 };
         if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) {
           assert.deepEqual(options, { awaitPromise: true });
           return true;
@@ -243,7 +243,7 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
     study_telemetry_reason: null,
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
-  assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
+  assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V2/);
   assert.doesNotMatch(expressions[1], /indicators/iu);
   assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
   assert.match(expressions[2], /setTimeout\(function\(\) \{ resolve\(true\); \}, 150\)/u);
@@ -278,7 +278,7 @@ test('Data Window telemetry reflects post-reset cursor selection, not a fixed mo
       }),
       evaluateBound: async (expression, options) => {
         if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V2')) {
           events.push('find-off-plot-target');
           return { x: 24, y: 18 };
         }
@@ -341,13 +341,13 @@ test('exact pane capture fails before telemetry when no verified off-chart curso
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => {
         if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return null;
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V2')) return null;
         captureRead = true;
         return {};
       },
       dispatchMouseEvent: async () => undefined,
     },
-  }), /No verified off-chart viewport point is available/u);
+  }), /No verified non-interactive off-chart viewport point is available/u);
   assert.equal(captureRead, false);
 });
 
@@ -361,7 +361,7 @@ test('exact pane capture finds its target by ID when the live tab position diffe
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => {
         if (expression.includes('layout_id')) return { layout_id: '8' };
-        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V2')) return { x: 24, y: 18 };
         if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return true;
         return {
           pane_index: 3, pane_count: 8, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60',

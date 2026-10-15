@@ -317,33 +317,37 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
   };
 }
 
-async function moveDataWindowToLatestBar(evaluate, dependencies) {
+/**
+ * Parks the cursor on a point that is off every canvas and hovers no interactive element (an interactive
+ * element would raise a tooltip, e.g. the account/layout hint), so the Data Window shows the latest bar and
+ * screenshots stay clean.
+ */
+export async function moveDataWindowToLatestBar(evaluate, dependencies) {
   const position = await evaluate(`
     (function() {
-      /* TVOBS_DATA_WINDOW_CURSOR_RESET_V1 */
+      /* TVOBS_DATA_WINDOW_CURSOR_RESET_V2 */
       var width = Number(window.innerWidth);
       var height = Number(window.innerHeight);
       if (!Number.isFinite(width) || !Number.isFinite(height) || width < 8 || height < 8) return null;
-      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas')).map(function(canvas) {
-        return canvas.getBoundingClientRect();
-      }).filter(function(rect) { return rect.width > 0 && rect.height > 0; });
-      var candidates = [
-        { x: 2, y: 2 }, { x: width - 3, y: 2 },
-        { x: 2, y: height - 3 }, { x: width - 3, y: height - 3 },
-        { x: Math.floor(width / 2), y: 2 }, { x: Math.floor(width / 2), y: height - 3 },
-      ];
-      for (var i = 0; i < candidates.length; i++) {
-        var point = candidates[i];
-        var insideCanvas = canvases.some(function(rect) {
-          return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
-        });
-        if (!insideCanvas) return point;
+      var interactive = function(element) {
+        for (var node = element; node && node !== document.body; node = node.parentElement) {
+          var role = node.getAttribute && node.getAttribute('role');
+          if (/^(BUTTON|A|INPUT|SELECT|TEXTAREA|CANVAS)$/.test(node.tagName) || role === 'button' || role === 'menuitem'
+            || role === 'tab' || role === 'link' || /tooltip|button|menu/i.test(String(node.className))) return true;
+        }
+        return false;
+      };
+      for (var y = 2; y < height - 2; y += 20) {
+        for (var x = 2; x < width - 2; x += 20) {
+          var hit = document.elementFromPoint(x, y);
+          if (hit && !interactive(hit)) return { x: x, y: y };
+        }
       }
       return null;
     })()
   `);
   if (position === null || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) {
-    throw new Error('No verified off-chart viewport point is available for Data Window selection.');
+    throw new Error('No verified non-interactive off-chart viewport point is available for cursor parking.');
   }
   if (dependencies?.dispatchMouseEvent) {
     await dependencies.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });

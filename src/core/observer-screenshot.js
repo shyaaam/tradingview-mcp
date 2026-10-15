@@ -3,7 +3,7 @@ import { inflateSync } from 'node:zlib';
 
 import { evaluateBound, getBoundClient } from '../connection.js';
 import { buildObserverContract } from '../release/identity.js';
-import { captureCandle } from './observer-evidence.js';
+import { captureCandle, moveDataWindowToLatestBar } from './observer-evidence.js';
 import { requireObserverSession } from './observer-session.js';
 import * as pane from './pane.js';
 import * as tab from './tab.js';
@@ -18,6 +18,47 @@ const COMMIT = /^[0-9a-f]{40}$/;
 const DOMAIN_ID = /^[a-z0-9-]+:[0-9a-f]{64}$/;
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const TIMEFRAME = /^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/;
+
+const RESTORE_FLOATING_TOOLBAR_SOURCE = `
+  /* TVOBS_SCREENSHOT_TOOLBAR_RESTORE_V1 */
+  (function() {
+    document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.removeProperty('display'); });
+    return true;
+  })()
+`;
+
+/**
+ * Makes the chart reviewable: reset the view (TradingView "Reset chart", the Alt+R action) so price and time
+ * scales fit, clear any drawing selection, hide the floating drawing toolbar (restored after capture) and park
+ * the cursor where it hovers nothing. Everything runs through in-page TradingView APIs; no key presses.
+ */
+async function prepareCleanChart(evaluate, deps) {
+  const prepared = await evaluate(`
+    (function() {
+      /* TVOBS_SCREENSHOT_CLEAN_CHART_V1 */
+      var chart = window.TradingViewApi && window.TradingViewApi.activeChart && window.TradingViewApi.activeChart();
+      if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
+      chart.executeActionById('chartReset');
+      chart.selection().clear();
+      document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.setProperty('display', 'none', 'important'); });
+      return true;
+    })()
+  `);
+  if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
+  await moveDataWindowToLatestBar(evaluate, deps);
+  // A bounded timer wait lets the reset repaint without animation frames, which Chrome pauses in background tabs.
+  const fitted = await evaluate(`
+    new Promise(function(resolve) {
+      setTimeout(function() {
+        try {
+          var widget = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+          resolve(widget.model().mainSeries().priceScale().isAutoScale() === true);
+        } catch (error) { resolve(false); }
+      }, 500);
+    })
+  `, { awaitPromise: true });
+  if (fitted !== true) throw new Error('TradingView chart did not return to fit-to-screen autoscale before screenshot capture.');
+}
 
 export async function captureObserverReviewScreenshot(input = {}) {
   const request = normalizeRequest(input);
@@ -85,23 +126,29 @@ export async function captureObserverReviewScreenshot(input = {}) {
     throw new Error('Active promoted pane bounds are unavailable for screenshot capture.');
   }
 
-  // Re-resolve the exact bound target after all pane/evidence reads and immediately
-  // before capture. The general client can reuse a live CDP connection without
-  // checking whether the target navigated after read-only attachment.
-  const getCdpClient = deps.getBoundClient || getBoundClient;
-  const client = await getCdpClient();
-  const result = await client.Page.captureScreenshot({
-    format: 'png',
-    clip: {
-      x: clip.x,
-      y: clip.y,
-      width: clip.width,
-      height: clip.height,
-      scale: 1,
-    },
-    captureBeyondViewport: false,
-    fromSurface: true,
-  });
+  let result;
+  try {
+    await prepareCleanChart(evaluate, deps);
+    // Re-resolve the exact bound target after all pane/evidence reads and immediately
+    // before capture. The general client can reuse a live CDP connection without
+    // checking whether the target navigated after read-only attachment.
+    const getCdpClient = deps.getBoundClient || getBoundClient;
+    const client = await getCdpClient();
+    result = await client.Page.captureScreenshot({
+      format: 'png',
+      clip: {
+        x: clip.x,
+        y: clip.y,
+        width: clip.width,
+        height: clip.height,
+        scale: 1,
+      },
+      captureBeyondViewport: false,
+      fromSurface: true,
+    });
+  } finally {
+    await evaluate(RESTORE_FLOATING_TOOLBAR_SOURCE).catch(() => undefined);
+  }
   const pngBase64 = requireCanonicalBase64(result?.data);
   const bytes = Buffer.from(pngBase64, 'base64');
   if (bytes.length < 8 || bytes.length > OBSERVER_REVIEW_SCREENSHOT_MAX_BYTES) throw new Error('Captured screenshot is not a bounded PNG.');
