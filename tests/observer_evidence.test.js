@@ -251,6 +251,78 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
   assert.doesNotMatch(expressions[3], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
 });
 
+test('Data Window telemetry reflects post-reset cursor selection, not a fixed mocked value', async () => {
+  setObserverSession(session);
+  const events = [];
+  const latestBar = '2026-07-17T10:00:00.000Z';
+  const staleBar = '2026-07-17T09:00:00.000Z';
+  let selectedDataWindowBar = staleBar;
+  const result = await capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 0,
+    symbol: 'OANDA:EURUSD',
+    timeframe: '15',
+    count: 2,
+    _deps: {
+      listTabs: async () => ({
+        success: true,
+        tab_count: 1,
+        tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
+      }),
+      evaluateBound: async (expression, options) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
+          events.push('find-off-plot-target');
+          return { x: 24, y: 18 };
+        }
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) {
+          events.push('wait-two-frames');
+          assert.deepEqual(options, { awaitPromise: true });
+          return true;
+        }
+        events.push('read-study-data-window');
+        const selectedTimestamp = Date.parse(selectedDataWindowBar);
+        return {
+          pane_index: 0,
+          pane_count: 1,
+          symbol: 'OANDA:EURUSD',
+          timeframe: '15',
+          candles: [
+            { opened_at: staleBar, open: '1.1', high: '1.2', low: '1.0', close: '1.1', volume: '0' },
+            { opened_at: latestBar, open: '1.1', high: '1.2', low: '1.0', close: '1.1', volume: '0' },
+          ],
+          studies: [{
+            study_id: 'Script$USER;cipher@tv-scripting',
+            study_name: 'VuManChu B Divergences',
+            values: [
+              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_BAR_TIME', raw_value: String(selectedTimestamp) },
+              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_DIVERGENCE_FLAGS', raw_value: '0' },
+            ],
+          }],
+        };
+      },
+      dispatchMouseEvent: async (event) => {
+        events.push('move-pointer-off-plot');
+        assert.deepEqual(event, { type: 'mouseMoved', x: 24, y: 18 });
+        selectedDataWindowBar = latestBar;
+      },
+      now: () => new Date('2026-07-17T10:00:01Z'),
+    },
+  });
+  assert.deepEqual(events, [
+    'find-off-plot-target',
+    'move-pointer-off-plot',
+    'wait-two-frames',
+    'read-study-data-window',
+  ]);
+  assert.equal(result.studies[0].values[0].raw_value, String(Date.parse(latestBar)));
+  assert.notEqual(result.studies[0].values[0].raw_value, String(Date.parse(staleBar)));
+});
+
 test('exact pane capture fails before telemetry when toolbar cursor target is unavailable', async () => {
   setObserverSession(session);
   let captureRead = false;
