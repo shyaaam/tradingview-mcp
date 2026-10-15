@@ -32,7 +32,7 @@ const RESTORE_FLOATING_TOOLBAR_SOURCE = `
  * scales fit, clear any drawing selection, hide the floating drawing toolbar (restored after capture) and park
  * the cursor where it hovers nothing. Everything runs through in-page TradingView APIs; no key presses.
  */
-async function prepareCleanChart(evaluate, deps) {
+async function prepareCleanChart(evaluate, deps, clip) {
   const prepared = await evaluate(`
     (function() {
       /* TVOBS_SCREENSHOT_CLEAN_CHART_V1 */
@@ -45,6 +45,10 @@ async function prepareCleanChart(evaluate, deps) {
     })()
   `);
   if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
+  // The reset can leave a stale crosshair; entering and then leaving the chart makes TradingView hide it. A park
+  // alone is not enough because the cursor may already be on the parking point (no mouse event is produced).
+  const mouse = deps.dispatchMouseEvent || (async (event) => (await (deps.getBoundClient || getBoundClient)()).Input.dispatchMouseEvent(event));
+  await mouse({ type: 'mouseMoved', x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 });
   await moveDataWindowToLatestBar(evaluate, deps);
   // A bounded timer wait lets the reset repaint without animation frames, which Chrome pauses in background tabs.
   const fitted = await evaluate(`
@@ -128,7 +132,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
 
   let result;
   try {
-    await prepareCleanChart(evaluate, deps);
+    await prepareCleanChart(evaluate, deps, clip);
     // Re-resolve the exact bound target after all pane/evidence reads and immediately
     // before capture. The general client can reuse a live CDP connection without
     // checking whether the target navigated after read-only attachment.
