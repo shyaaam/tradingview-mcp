@@ -29,10 +29,10 @@ const RESTORE_FLOATING_TOOLBAR_SOURCE = `
 
 /**
  * Makes the chart reviewable: reset the view (TradingView "Reset chart", the Alt+R action) so price and time
- * scales fit, clear any drawing selection, hide the floating drawing toolbar (restored after capture) and park
- * the cursor where it hovers nothing. Everything runs through in-page TradingView APIs; no key presses.
+ * scales fit, clear any drawing selection and the crosshair, hide the floating drawing toolbar (restored after
+ * capture) and park the cursor where it hovers nothing. Everything runs through in-page TradingView APIs; no key presses.
  */
-async function prepareCleanChart(evaluate, deps, clip) {
+async function prepareCleanChart(evaluate, deps) {
   const prepared = await evaluate(`
     (function() {
       /* TVOBS_SCREENSHOT_CLEAN_CHART_V1 */
@@ -40,29 +40,26 @@ async function prepareCleanChart(evaluate, deps, clip) {
       if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
       chart.executeActionById('chartReset');
       chart.selection().clear();
+      window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().crosshairSource().clearPosition();
       document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.setProperty('display', 'none', 'important'); });
       return true;
     })()
   `);
   if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
-  // The reset can leave a stale crosshair; entering the chart, letting TradingView register it, then leaving makes
-  // TradingView hide it. A park alone is not enough because the cursor may already be on the parking point.
-  const mouse = deps.dispatchMouseEvent || (async (event) => (await (deps.getBoundClient || getBoundClient)()).Input.dispatchMouseEvent(event));
-  await mouse({ type: 'mouseMoved', x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 });
-  await evaluate('new Promise(function(resolve) { setTimeout(function() { resolve(true); }, 200); })', { awaitPromise: true });
   await moveDataWindowToLatestBar(evaluate, deps);
   // A bounded timer wait lets the reset repaint without animation frames, which Chrome pauses in background tabs.
   const fitted = await evaluate(`
     new Promise(function(resolve) {
       setTimeout(function() {
         try {
-          var widget = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-          resolve(widget.model().mainSeries().priceScale().isAutoScale() === true);
+          var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+          model.crosshairSource().clearPosition();
+          resolve(model.mainSeries().priceScale().isAutoScale() === true && !model.crosshairSource().visible);
         } catch (error) { resolve(false); }
       }, 300);
     })
   `, { awaitPromise: true });
-  if (fitted !== true) throw new Error('TradingView chart did not return to fit-to-screen autoscale before screenshot capture.');
+  if (fitted !== true) throw new Error('TradingView chart did not return to fit-to-screen autoscale with a cleared crosshair before screenshot capture.');
 }
 
 export async function captureObserverReviewScreenshot(input = {}) {
@@ -133,7 +130,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
 
   let result;
   try {
-    await prepareCleanChart(evaluate, deps, clip);
+    await prepareCleanChart(evaluate, deps);
     // Re-resolve the exact bound target after all pane/evidence reads and immediately
     // before capture. The general client can reuse a live CDP connection without
     // checking whether the target navigated after read-only attachment.

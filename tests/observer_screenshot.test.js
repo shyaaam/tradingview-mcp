@@ -245,13 +245,13 @@ test('resets the chart view, parks the cursor off interactive elements, then cap
   fitted = true;
   await captureObserverReviewScreenshot(input());
   const interesting = events.filter((name) => name !== 'other');
-  assert.deepEqual(interesting, ['reset', 'mouse:51,42', 'park-point', 'mouse:82,2', 'fit-check', 'capture', 'restore']);
+  assert.deepEqual(interesting, ['reset', 'park-point', 'mouse:82,2', 'fit-check', 'capture', 'restore']);
 });
 
 test('fails closed and still restores the toolbar when the chart does not return to autoscale', async () => {
   events.length = 0;
   fitted = false;
-  await assert.rejects(captureObserverReviewScreenshot(input()), /fit-to-screen autoscale/);
+  await assert.rejects(captureObserverReviewScreenshot(input()), /fit-to-screen autoscale with a cleared crosshair/);
   assert.equal(events.includes('capture'), false);
   assert.equal(events.at(-1), 'restore');
   fitted = true;
