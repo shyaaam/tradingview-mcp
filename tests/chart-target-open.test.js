@@ -142,18 +142,27 @@ test('resolves the current UUID from exact profile name instead of reusing a sta
   assert.equal(harness.calls.bound[0].profileId, currentId);
 });
 
-test('refuses a stale/saved chart target instead of selecting it or creating another', async () => {
-  const harness = makeHarness({ targets: [{
+test('creates a new generic target without hydrating an existing saved-chart route', async () => {
+  const existing = {
     id: 'stale-chart', type: 'page', url: 'https://www.tradingview.com/chart/old-account-id/',
     webSocketDebuggerUrl: 'ws://stale-chart',
+  };
+  const harness = makeHarness({ targets: [{
+    ...existing,
   }] });
-  await assert.rejects(
-    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps),
-    /non-generic or ambiguous TradingView chart target/u,
-  );
-  assert.equal(harness.calls.createTarget.length, 0);
-  assert.equal(harness.calls.navigate.length, 0);
-  assert.equal(harness.calls.bound.length, 0);
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+
+  assert.equal(result.success, true);
+  assert.equal(result.target_id, 'target-new');
+  assert.equal(result.target_url, CHART_URL);
+  assert.equal(result.target_created, true);
+  assert.equal(result.navigation_performed, true);
+  assert.deepEqual(harness.calls.createTarget, [{ url: 'about:blank' }]);
+  assert.deepEqual(harness.calls.navigate, [CHART_URL]);
+  assert.deepEqual(harness.calls.targetWebSockets, ['ws://target-new']);
+  assert.deepEqual(harness.state.targets[0], existing);
+  assert.equal(harness.calls.bound.length, 1);
+  assert.equal(harness.calls.bound[0].chartTargetId, 'target-new');
 });
 
 test('refuses multiple generic chart targets and blank-target ambiguity', async () => {

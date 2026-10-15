@@ -19,22 +19,22 @@ export async function openBootstrapChartTarget(input = {}, dependencies = {}) {
   assertExactProfileBrowserWebSocket(version?.webSocketDebuggerUrl, cdpUrl, profileId);
   const before = await listTargets(cdpUrl, deps);
   const chartTargets = before.filter(isTradingViewChartTarget);
-  if (chartTargets.length > 0) {
-    const generic = chartTargets.filter((target) => isGenericChartUrl(target.url));
-    if (chartTargets.length === 1 && generic.length === 1) {
-      return bindAndReturn({
-        managerBaseUrl,
-        profileName,
-        profileId,
-        cdpUrl,
-        target: generic[0],
-        targetCreated: false,
-        navigationPerformed: false,
-        pageState: 'generic_chart',
-        deps,
-      });
-    }
-    throw new Error('A non-generic or ambiguous TradingView chart target already exists; refusing to select or create another.');
+  const genericTargets = chartTargets.filter((target) => isGenericChartUrl(target.url));
+  if (genericTargets.length > 1) {
+    throw new Error('Multiple generic TradingView chart targets already exist; refusing to select or create another.');
+  }
+  if (genericTargets.length === 1) {
+    return bindAndReturn({
+      managerBaseUrl,
+      profileName,
+      profileId,
+      cdpUrl,
+      target: genericTargets[0],
+      targetCreated: false,
+      navigationPerformed: false,
+      pageState: 'generic_chart',
+      deps,
+    });
   }
 
   if (before.some(isTradingViewLoginTarget)) {
