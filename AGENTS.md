@@ -15,3 +15,8 @@ These apply to every agent (Codex, Claude Code, others) working in this reposito
 4. **Name the failure before adding a guard.** Before adding any check, receipt, hash, failure code, migration or
    retry, write down the concrete failure it prevents and what that failure costs. If you cannot, do not add it.
 5. **Report facts.** Say what was run and what it returned. Do not claim live acceptance from unit tests.
+6. **One config, latest working values.** `~/.config/tv-observer-v5/production.env` is the only place runtime values live
+   (commands, provider path, release commit, flags). Launchers and scripts must not set them inline, because
+   `--env-file` never overrides variables that are already set. When a value changes, search every launcher and
+   config for the old value and fix or remove it. Keep backups only under `~/dev/tv-observer-runtime/backups/legacy/`,
+   never next to the live config.
