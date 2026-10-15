@@ -45,10 +45,11 @@ async function prepareCleanChart(evaluate, deps, clip) {
     })()
   `);
   if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
-  // The reset can leave a stale crosshair; entering and then leaving the chart makes TradingView hide it. A park
-  // alone is not enough because the cursor may already be on the parking point (no mouse event is produced).
+  // The reset can leave a stale crosshair; entering the chart, letting TradingView register it, then leaving makes
+  // TradingView hide it. A park alone is not enough because the cursor may already be on the parking point.
   const mouse = deps.dispatchMouseEvent || (async (event) => (await (deps.getBoundClient || getBoundClient)()).Input.dispatchMouseEvent(event));
   await mouse({ type: 'mouseMoved', x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 });
+  await evaluate('new Promise(function(resolve) { setTimeout(function() { resolve(true); }, 200); })', { awaitPromise: true });
   await moveDataWindowToLatestBar(evaluate, deps);
   // A bounded timer wait lets the reset repaint without animation frames, which Chrome pauses in background tabs.
   const fitted = await evaluate(`
@@ -58,7 +59,7 @@ async function prepareCleanChart(evaluate, deps, clip) {
           var widget = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
           resolve(widget.model().mainSeries().priceScale().isAutoScale() === true);
         } catch (error) { resolve(false); }
-      }, 500);
+      }, 300);
     })
   `, { awaitPromise: true });
   if (fitted !== true) throw new Error('TradingView chart did not return to fit-to-screen autoscale before screenshot capture.');
