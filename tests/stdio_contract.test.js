@@ -14,6 +14,7 @@ import { closeClientStrict } from '../src/connection.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const COMMIT = String(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' })).trim();
+const FIXTURE_PROCESS_EXIT_TIMEOUT_MS = 2_000;
 
 function deadline(promise, timeoutMs, label) {
   let timer;
@@ -133,11 +134,11 @@ test('stdio health response preserves complete session reclaim evidence', async 
     stderr: 'pipe',
   });
   const client = new Client({ name: 'health-evidence-stdio-test', version: '1.0.0' });
-  await deadline(client.connect(transport), 500, 'health fixture initialize');
+  await deadline(client.connect(transport), observerCapabilityManifest.lifecycle.startupHandshakeTimeoutMs, 'health fixture initialize');
 
   const response = await deadline(
     client.callTool({ name: 'tv_health_check', arguments: {} }),
-    500,
+    observerCapabilityManifest.lifecycle.defaultCallTimeoutMs,
     'health fixture call',
   );
   const text = response.content.find((entry) => entry.type === 'text')?.text;
@@ -204,7 +205,7 @@ test('hung shutdown force-exits child after graceful deadline', async () => {
 
   try {
     child.stdin.end();
-    const [code, signal] = await deadline(once(child, 'close'), 500, 'forced shutdown');
+    const [code, signal] = await deadline(once(child, 'close'), FIXTURE_PROCESS_EXIT_TIMEOUT_MS, 'forced shutdown');
     assert.equal(code, 1);
     assert.equal(signal, null);
   } finally {
@@ -220,7 +221,7 @@ test('client disconnect during in-flight call still force-exits hung server clea
     stderr: 'pipe',
   });
   const client = new Client({ name: 'inflight-shutdown-test', version: '1.0.0' });
-  await deadline(client.connect(transport), 500, 'in-flight fixture connect');
+  await deadline(client.connect(transport), observerCapabilityManifest.lifecycle.startupHandshakeTimeoutMs, 'in-flight fixture connect');
   const pid = transport.pid;
   assert.ok(pid, 'in-flight fixture exposes child pid');
   const pending = client.callTool({ name: 'slow', arguments: {} }).catch(() => {});
@@ -228,7 +229,7 @@ test('client disconnect during in-flight call still force-exits hung server clea
   await client.close();
   void pending;
 
-  await deadline(waitForProcessExit(pid), 500, 'in-flight forced shutdown');
+  await deadline(waitForProcessExit(pid, FIXTURE_PROCESS_EXIT_TIMEOUT_MS), FIXTURE_PROCESS_EXIT_TIMEOUT_MS, 'in-flight forced shutdown');
   assert.throws(() => process.kill(pid, 0), /ESRCH/);
 });
 
@@ -242,15 +243,16 @@ test('strict observer client cleanup propagates close failure and closes once', 
   );
 });
 
-async function waitForProcessExit(pid) {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+async function waitForProcessExit(pid, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
     try { process.kill(pid, 0); } catch (error) {
       if (error.code === 'ESRCH') return;
       throw error;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`process ${pid} still alive`);
+  throw new Error(`process ${pid} still alive after ${timeoutMs}ms`);
 }
 
 test.after(() => {

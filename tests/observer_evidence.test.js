@@ -23,6 +23,19 @@ const session = {
 
 test.afterEach(() => clearObserverSession());
 
+
+function paneDependencies(dependencies) {
+  return {
+    ...dependencies,
+    evaluateBound: async (expression, options) => {
+      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return true;
+      return dependencies.evaluateBound(expression, options);
+    },
+    dispatchMouseEvent: dependencies.dispatchMouseEvent || (async () => undefined),
+  };
+}
+
 test('observer evidence fails closed before preparation', async () => {
   await assert.rejects(
     identity({ _deps: { evaluateBound: async () => ({}) } }),
@@ -169,9 +182,10 @@ test('bounded telemetry OHLCV extraction fails closed on invalid count and bindi
   await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 2, _deps: { evaluateBound: async () => ({ error: 'Bound chart symbol or timeframe does not match the requested extraction.' }) } }), /does not match/);
 });
 
-test('exact pane telemetry binds pane directly without active-widget, focus, or mutation paths', async () => {
+test('exact pane telemetry moves cursor off the plot before reading the latest-bar Data Window', async () => {
   setObserverSession(session);
   const expressions = [];
+  const mouseEvents = [];
   const result = await capturePaneTelemetryOhlcv({
     profile_id: 'profile-exact',
     expected_chart_target_id: 'target-exact',
@@ -188,9 +202,14 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
         tab_count: 1,
         tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
       }),
-      evaluateBound: async (expression) => {
+      evaluateBound: async (expression, options) => {
         expressions.push(expression);
         if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) {
+          assert.deepEqual(options, { awaitPromise: true });
+          return true;
+        }
         return {
           pane_index: 3,
           pane_count: 8,
@@ -200,13 +219,14 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
           studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
         };
       },
+      dispatchMouseEvent: async (event) => { mouseEvents.push(event); },
       now: () => new Date('2026-07-17T10:00:01Z'),
     },
   });
 
   assert.deepEqual(result, {
     success: true,
-    extraction_version: 'observer-pane-telemetry-ohlcv-v1',
+    extraction_version: 'observer-pane-telemetry-ohlcv-v2',
     profile_id: 'profile-exact',
     chart_target_id: 'target-exact',
     chart_id: 'chart-exact',
@@ -223,9 +243,134 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
     study_telemetry_reason: null,
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
-  assert.match(expressions[1], /cwc\.getAll\(\)/);
-  assert.match(expressions[1], /all\[paneIndex\]/);
-  assert.doesNotMatch(expressions[1], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+  assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
+  assert.doesNotMatch(expressions[1], /indicators/iu);
+  assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
+  assert.match(expressions[3], /cwc\.getAll\(\)/);
+  assert.match(expressions[3], /all\[paneIndex\]/);
+  assert.deepEqual(mouseEvents, [{ type: 'mouseMoved', x: 24, y: 18 }]);
+  assert.doesNotMatch(expressions[3], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+});
+
+test('Data Window telemetry reflects post-reset cursor selection, not a fixed mocked value', async () => {
+  setObserverSession(session);
+  const events = [];
+  const latestBar = '2026-07-17T10:00:00.000Z';
+  const staleBar = '2026-07-17T09:00:00.000Z';
+  let selectedDataWindowBar = staleBar;
+  const result = await capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact',
+    expected_chart_target_id: 'target-exact',
+    expected_chart_id: 'chart-exact',
+    expected_layout_id: '8',
+    tab_index: 0,
+    pane_index: 0,
+    symbol: 'OANDA:EURUSD',
+    timeframe: '15',
+    count: 2,
+    _deps: {
+      listTabs: async () => ({
+        success: true,
+        tab_count: 1,
+        tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
+      }),
+      evaluateBound: async (expression, options) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
+          events.push('find-off-plot-target');
+          return { x: 24, y: 18 };
+        }
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) {
+          events.push('wait-two-frames');
+          assert.deepEqual(options, { awaitPromise: true });
+          return true;
+        }
+        events.push('read-study-data-window');
+        return {
+          pane_index: 0,
+          pane_count: 1,
+          symbol: 'OANDA:EURUSD',
+          timeframe: '15',
+          candles: [
+            { opened_at: staleBar, open: '1.1', high: '1.2', low: '1.0', close: '1.1', volume: '0' },
+            { opened_at: latestBar, open: '1.1', high: '1.2', low: '1.0', close: '1.1', volume: '0' },
+          ],
+          studies: [{
+            study_id: 'Script$USER;cipher@tv-scripting',
+            study_name: 'VuManChu B Divergences',
+            values: [
+              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_BAR_TIME', raw_value: String(Date.parse(staleBar)) },
+              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_DIVERGENCE_FLAGS', raw_value: '0' },
+            ],
+          }, {
+            study_id: 'study-rsi',
+            study_name: 'RSI',
+            values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: selectedDataWindowBar }],
+          }],
+        };
+      },
+      dispatchMouseEvent: async (event) => {
+        events.push('move-pointer-off-plot');
+        assert.deepEqual(event, { type: 'mouseMoved', x: 24, y: 18 });
+        selectedDataWindowBar = latestBar;
+      },
+      now: () => new Date('2026-07-17T10:00:01Z'),
+    },
+  });
+  assert.deepEqual(events, [
+    'find-off-plot-target',
+    'move-pointer-off-plot',
+    'wait-two-frames',
+    'read-study-data-window',
+  ]);
+  assert.equal(result.studies[0].values[0].raw_value, String(Date.parse(staleBar)));
+  assert.notEqual(result.studies[0].values[0].raw_value, String(Date.parse(latestBar)));
+  assert.equal(result.studies[1].values[0].raw_value, latestBar,
+    'non-Cipher-B Data Window value must follow pointer-reset selection');
+});
+
+test('exact pane capture fails before telemetry when no verified off-chart cursor point exists', async () => {
+  setObserverSession(session);
+  let captureRead = false;
+  await assert.rejects(() => capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
+    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return null;
+        captureRead = true;
+        return {};
+      },
+      dispatchMouseEvent: async () => undefined,
+    },
+  }), /No verified off-chart viewport point is available/u);
+  assert.equal(captureRead, false);
+});
+
+test('exact pane capture fails closed when chart animation frames do not settle', async () => {
+  setObserverSession(session);
+  let captureRead = false;
+  await assert.rejects(() => capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
+    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
+          assert.doesNotMatch(expression, /indicators/iu);
+          return { x: 24, y: 18 };
+        }
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return false;
+        captureRead = true;
+        return {};
+      },
+      dispatchMouseEvent: async () => undefined,
+    },
+  }), /animation frames did not settle within 1000 ms/u);
+  assert.equal(captureRead, false);
 });
 
 test('exact pane telemetry reports bounded ambiguity category and indexes while failing closed', async () => {
@@ -261,7 +406,7 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
 
   for (const testCase of cases) {
     studies[testCase.studyIndex].values = testCase.values;
-    await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+    await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id')
         ? { layout_id: '8' }
@@ -273,7 +418,7 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
           candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
           studies,
         },
-    } }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
+    }) }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
   }
 });
 
@@ -298,7 +443,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
       { source_label: 'data-window', field_label: 'Current POC', raw_value: '100' },
     ],
   }];
-  const result = await capturePaneTelemetryOhlcv({ ...input, _deps: {
+  const result = await capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
     listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
     evaluateBound: async (expression) => expression.includes('layout_id')
       ? { layout_id: '8' }
@@ -311,7 +456,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
         studies,
       },
     now: () => new Date('2026-07-17T10:00:01.000Z'),
-  } });
+  }) });
   assert.deepEqual(result.studies, [{
     study_id: 'pvp',
     study_name: 'PvP',
@@ -322,7 +467,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
     { source_label: 'data-window', field_label: 'Optional rail', raw_value: '' },
     { source_label: 'data-window', field_label: 'Optional rail', raw_value: '101' },
   ];
-  await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+  await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
     listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
     evaluateBound: async (expression) => expression.includes('layout_id')
       ? { layout_id: '8' }
@@ -334,7 +479,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
         candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
         studies,
       },
-  } }), /studies\[0\]\.values\[1\] is ambiguous: DUPLICATE_SOURCE_FIELD/);
+  }) }), /studies\[0\]\.values\[1\] is ambiguous: DUPLICATE_SOURCE_FIELD/);
 });
 
 test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {
@@ -355,17 +500,17 @@ test('exact pane telemetry fails closed on identity, layout, and pane readback d
     /exact profile\/chart authority/,
   );
   await assert.rejects(
-    capturePaneTelemetryOhlcv({ ...input, _deps: {
+    capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '4' } : {},
-    } }),
+    }) }),
     /layout does not match authority/,
   );
   await assert.rejects(
-    capturePaneTelemetryOhlcv({ ...input, _deps: {
+    capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '8' } : { error: 'Exact requested pane is missing or ambiguous.' },
-    } }),
+    }) }),
     /missing or ambiguous/,
   );
 });

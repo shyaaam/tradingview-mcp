@@ -1,11 +1,11 @@
-import { evaluateBound } from '../connection.js';
+import { evaluateBound, getBoundClient } from '../connection.js';
 import { requireObserverSession } from './observer-session.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 import { list as listTabs } from './tab.js';
 
 export const OBSERVER_ADAPTER_VERSION = 'tradingview-mcp-observer-v1';
 export const OBSERVER_TELEMETRY_OHLCV_VERSION = 'observer-telemetry-ohlcv-v1';
-export const OBSERVER_PANE_TELEMETRY_OHLCV_VERSION = 'observer-pane-telemetry-ohlcv-v1';
+export const OBSERVER_PANE_TELEMETRY_OHLCV_VERSION = 'observer-pane-telemetry-ohlcv-v2';
 
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -206,6 +206,7 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     throw new Error('exact pane observer layout does not match authority');
   }
 
+  await moveDataWindowToLatestBar(evaluate, _deps);
   const result = await evaluate(`
     (function() {
       function text(value) {
@@ -316,6 +317,62 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     study_telemetry_reason: studies.length > 0 ? null : 'missing-or-ambiguous',
     studies,
   };
+}
+
+async function moveDataWindowToLatestBar(evaluate, dependencies) {
+  const position = await evaluate(`
+    (function() {
+      /* TVOBS_DATA_WINDOW_CURSOR_RESET_V1 */
+      var width = Number(window.innerWidth);
+      var height = Number(window.innerHeight);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 8 || height < 8) return null;
+      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas')).map(function(canvas) {
+        return canvas.getBoundingClientRect();
+      }).filter(function(rect) { return rect.width > 0 && rect.height > 0; });
+      var candidates = [
+        { x: 2, y: 2 }, { x: width - 3, y: 2 },
+        { x: 2, y: height - 3 }, { x: width - 3, y: height - 3 },
+        { x: Math.floor(width / 2), y: 2 }, { x: Math.floor(width / 2), y: height - 3 },
+      ];
+      for (var i = 0; i < candidates.length; i++) {
+        var point = candidates[i];
+        var insideCanvas = canvases.some(function(rect) {
+          return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+        });
+        if (!insideCanvas) return point;
+      }
+      return null;
+    })()
+  `);
+  if (position === null || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) {
+    throw new Error('No verified off-chart viewport point is available for Data Window selection.');
+  }
+  if (dependencies?.dispatchMouseEvent) {
+    await dependencies.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
+  } else {
+    const client = await (dependencies?.getBoundClient || getBoundClient)();
+    await client.Input.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
+  }
+  const settled = await evaluate(`
+    /* TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1 */
+    new Promise(function(resolve) {
+      var finished = false;
+      var timeout = setTimeout(function() {
+        if (finished) return;
+        finished = true;
+        resolve(false);
+      }, 1000);
+      requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          resolve(true);
+        });
+      });
+    })
+  `, { awaitPromise: true });
+  if (settled !== true) throw new Error('TradingView chart animation frames did not settle within 1000 ms.');
 }
 
 function normalizePaneCaptureRequest(input) {
