@@ -590,6 +590,7 @@ export const observerToolDefinitions = Object.freeze({
     inputSchema: {
       profile_name: z.string().min(1).max(160)
         .describe('Exact stable CloakBrowser profile name; no UUID or profile selection is accepted.'),
+      reset_pages: z.boolean().optional().describe('Startup only: exclusively owned profile; retain one blank page and close all other pages.'),
     },
     outputSchema: {
       success: z.literal(true),
@@ -785,6 +786,7 @@ export const observerToolDefinitions = Object.freeze({
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       saved_layout_id: z.string().min(1).max(160),
       require_fresh_target: z.literal(true),
+      max_pages: z.number().int().positive(),
     },
     outputSchema: {
       success: z.literal(true),
