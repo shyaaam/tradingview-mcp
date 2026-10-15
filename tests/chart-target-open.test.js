@@ -294,6 +294,19 @@ test('fails closed on malformed profile or target inventories', async () => {
   );
   assert.equal(conflictingProfileAliases.calls.createTarget.length, 0);
 
+  const blankAndPresentEndpointAliases = makeHarness({ profileInventory: [{
+    id: PROFILE_ID,
+    name: PROFILE_NAME,
+    status: 'running',
+    cdp_url: `/api/profiles/${PROFILE_ID}/cdp`,
+    cdp_endpoint: '',
+  }] });
+  await assert.rejects(
+    openBootstrapChartTarget({ profile_name: PROFILE_NAME }, blankAndPresentEndpointAliases.deps),
+    /profile inventory entry 0 CDP endpoint aliases conflict/u,
+  );
+  assert.equal(blankAndPresentEndpointAliases.calls.createTarget.length, 0);
+
   const malformedTargetMember = makeHarness({ targetInventory: [null] });
   await assert.rejects(
     openBootstrapChartTarget({ profile_name: PROFILE_NAME }, malformedTargetMember.deps),
@@ -309,4 +322,30 @@ test('fails closed on malformed profile or target inventories', async () => {
     /CDP target inventory entry 0 id aliases conflict/u,
   );
   assert.equal(conflictingTargetAliases.calls.createTarget.length, 0);
+});
+
+test('ignores empty optional CDP endpoint on unrelated stopped Manager profile', async () => {
+  const harness = makeHarness({ profileInventory: [
+    {
+      id: PROFILE_ID,
+      name: PROFILE_NAME,
+      status: 'running',
+      cdp_url: `/api/profiles/${PROFILE_ID}/cdp`,
+    },
+    {
+      id: 'stopped-profile',
+      name: 'other-profile',
+      status: 'stopped',
+      cdp_url: '',
+    },
+  ] });
+
+  const result = await openBootstrapChartTarget({ profile_name: PROFILE_NAME }, harness.deps);
+
+  assert.equal(result.success, true);
+  assert.equal(result.profile_name, PROFILE_NAME);
+  assert.equal(harness.calls.createTarget.length, 1);
+  assert.deepEqual(harness.calls.browserWebSockets, [`ws://manager.test/api/profiles/${PROFILE_ID}/cdp`]);
+  assert.equal(harness.calls.bound.length, 1);
+  assert.equal(harness.calls.bound[0].profileId, PROFILE_ID);
 });
