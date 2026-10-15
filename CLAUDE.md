@@ -1,6 +1,6 @@
 # TradingView MCP — Claude Instructions
 
-> Working rules (branches only, no worktrees or copies, never touch the live runtime, name the failure before adding a guard) are in `AGENTS.md`.
+Follow `AGENTS.md`.
 
 Versioned tools for reading and controlling a live TradingView chart via CloakBrowser Manager and CDP. TV Observer integrations must call `tv_observer_contract` first and verify the release commit and manifest hash.
 

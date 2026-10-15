@@ -2,21 +2,26 @@
 
 These apply to every agent (Codex, Claude Code, others) working in this repository.
 
-1. **Work only in this directory, on branches.** Do not create git worktrees or copies of the repository
-   (no `git worktree add`, no clones into `/tmp` or `~/.codex/worktrees`). Use a branch in this checkout and
-   switch back to `main` when you are done.
-2. **Never edit, build or run development commands inside `~/dev/tv-observer-runtime`.** It is the live runtime
-   (provider and app checkouts, backups, logs, reports). Changes reach it only through merged PRs followed by an
-   owner-approved update.
-3. **Production is the owner's.** Do not edit `~/.config/tv-observer-v5/production.env`, run migrations or the
-   reviewed-source transition, resume the scheduler, or start/stop the live V5 process unless the owner asked for
-   that exact step. Live experiments use a restored copy of the database and a throwaway branch, and are removed
-   afterwards.
-4. **Name the failure before adding a guard.** Before adding any check, receipt, hash, failure code, migration or
-   retry, write down the concrete failure it prevents and what that failure costs. If you cannot, do not add it.
-5. **Report facts.** Say what was run and what it returned. Do not claim live acceptance from unit tests.
-6. **One config, latest working values.** `~/.config/tv-observer-v5/production.env` is the only place runtime values live
-   (commands, provider path, release commit, flags). Launchers and scripts must not set them inline, because
-   `--env-file` never overrides variables that are already set. When a value changes, search every launcher and
-   config for the old value and fix or remove it. Keep backups only under `~/dev/tv-observer-runtime/backups/legacy/`,
-   never next to the live config.
+## Where you may work
+1. Work only in this directory, on branches. No git worktrees or copies of the repository anywhere (no
+   `git worktree add`, no clones into `/tmp` or `~/.codex/worktrees`). Switch back to `main` when done.
+2. Never edit, build or run development commands inside `~/dev/tv-observer-runtime`. It is the live runtime;
+   changes reach it only through merged PRs and an owner-approved update.
+3. Production is the owner's. Do not edit `production.env`, run migrations or the reviewed-source transition,
+   resume the scheduler, or start/stop live V5 unless the owner asked for that exact step. Live experiments use a
+   restored database copy and a throwaway branch, removed afterwards.
+
+## KISS (mandatory)
+4. Fix the root cause with the smallest change. Prefer deleting or simplifying over adding.
+5. Measure live before choosing any number (timeouts, budgets, retries). One measurement, one change.
+6. No new guard, retry, receipt, hash, layer, failure code or migration unless you can name the concrete failure
+   it prevents and its cost. If the cost is a missed or deferred observation, log it instead.
+7. One source of truth: one config, one function per rule, no duplicate checks, no stale copies. Runtime values
+   (commands, provider path, release commit, flags) live only in `~/.config/tv-observer-v5/production.env`;
+   launchers must not set them inline, because `--env-file` never overrides variables that are already set.
+   When a value changes, search every launcher and config for the old value. Keep backups only under
+   `~/dev/tv-observer-runtime/backups/legacy/`.
+8. Every PR states lines added / removed and why it cannot be smaller. Net-additive needs a reason.
+9. If a fix needs a second patch to work, stop and redesign instead of patching the patch.
+10. Verify live (a short smoke) before calling anything done, and report what ran and what it returned. Unit
+    tests are not live acceptance.
