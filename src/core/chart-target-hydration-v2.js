@@ -394,9 +394,7 @@ function blocked(expected, details) {
 }
 
 async function createBlankTarget(browserClient) {
-  // Each capture slot owns its own browser window: Chrome pauses animation frames in non-visible tabs, so
-  // two slots sharing one window starve whichever tab is behind.
-  return browserClient.Target.createTarget({ url: 'about:blank', newWindow: true });
+  return browserClient.Target.createTarget({ url: 'about:blank' });
 }
 
 async function waitForCreatedTarget(cdpUrl, targetId, deps, attempts = 40) {

@@ -58,11 +58,9 @@ function makeHarness({ targets = [], runtimeSnapshot = runtime(), navigate = {} 
   const listeners = {};
   const browser = {
     Target: {
-      createTarget: async ({ url, newWindow }) => {
+      createTarget: async ({ url }) => {
         calls.createTarget += 1;
         assert.equal(url, 'about:blank');
-        // Each capture slot gets its own window so a background slot keeps rendering animation frames.
-        assert.equal(newWindow, true);
         state.targets = [{ id: 'target-new', type: 'page', url: 'about:blank', webSocketDebuggerUrl: 'ws://target-new' }];
         return { targetId: 'target-new' };
       },

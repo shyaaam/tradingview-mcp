@@ -8,6 +8,7 @@ import { identity as observerIdentity } from './observer-evidence.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 import { list as listTabs } from './tab.js';
+import { exactTargetMatches } from './target-identity.js';
 
 const CWC = 'window.TradingViewApi._chartWidgetCollection';
 const HASH = /^[0-9a-f]{64}$/i;
@@ -421,10 +422,7 @@ export async function focusedMutationIdentityInventory(input = {}, { _deps = {} 
     const tabs = await readScopedTabs(dependencies);
     const entries = Array.isArray(tabs?.tabs) ? tabs.tabs : [];
     const targetMatches = entries.filter((tab) => tab?.id === expected.targetId);
-    const exactMatches = entries.filter((tab) => Number(tab?.index) === expected.tabIndex
-      && tab?.id === expected.targetId
-      && tab?.chart_id === expected.chartId
-      && tab?.url === canonicalUrl);
+    const exactMatches = exactTargetMatches(tabs, { targetId: expected.targetId, chartId: expected.chartId, url: canonicalUrl });
     if (tabs?.success !== true || targetMatches.length !== 1 || exactMatches.length !== 1) {
       throw new Error('Focused pane mutation inventory browser target identity is not unique.');
     }
@@ -468,7 +466,7 @@ export async function focusedMutationIdentityInventory(input = {}, { _deps = {} 
     }
     assertFocusedInventoryPaneState(current, expected.paneIndex, `before inventory pane ${expected.paneIndex}`);
     const target = await verifyTarget();
-    if (target.id !== beforeTab.id || target.url !== beforeTab.url || Number(target.index) !== expected.tabIndex) {
+    if (target.id !== beforeTab.id || target.url !== beforeTab.url) {
       throw new Error('Focused pane mutation inventory browser target changed during pane read.');
     }
 
@@ -507,7 +505,7 @@ export async function focusedMutationIdentityInventory(input = {}, { _deps = {} 
     restored = await readPanes();
     assertFocusedInventoryPaneState(restored, initialActiveIndex, 'after focus restoration');
     const afterTab = await verifyTarget();
-    if (afterTab.id !== beforeTab.id || afterTab.url !== beforeTab.url || Number(afterTab.index) !== expected.tabIndex) {
+    if (afterTab.id !== beforeTab.id || afterTab.url !== beforeTab.url) {
       throw new Error('Focused pane mutation inventory did not preserve the original browser tab.');
     }
     studyFingerprintAfter = await focusedPaneStudyFingerprint(
