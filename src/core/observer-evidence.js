@@ -1,4 +1,4 @@
-import { evaluateBound } from '../connection.js';
+import { evaluateBound, getBoundClient } from '../connection.js';
 import { requireObserverSession } from './observer-session.js';
 import { LEGACY_LAYOUT_IDENTITY_HELPER } from './layout-identity.js';
 import { list as listTabs } from './tab.js';
@@ -206,6 +206,7 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     throw new Error('exact pane observer layout does not match authority');
   }
 
+  await moveDataWindowToLatestBar(evaluate, _deps);
   const result = await evaluate(`
     (function() {
       function text(value) {
@@ -316,6 +317,51 @@ export async function capturePaneTelemetryOhlcv(input = {}) {
     study_telemetry_reason: studies.length > 0 ? null : 'missing-or-ambiguous',
     studies,
   };
+}
+
+async function moveDataWindowToLatestBar(evaluate, dependencies) {
+  const position = await evaluate(`
+    (function() {
+      /* TVOBS_DATA_WINDOW_CURSOR_RESET_V1 */
+      var nodes = document.querySelectorAll('button, [role="button"], a, span, div');
+      var candidates = [];
+      for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        if (!node || node.offsetParent === null || String(node.textContent || '').trim().toLowerCase() !== 'indicators') continue;
+        var rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || rect.top < 0 || rect.bottom > window.innerHeight * 0.5) continue;
+        var x = rect.left + rect.width / 2;
+        var y = rect.top + rect.height / 2;
+        var canvases = document.querySelectorAll('canvas');
+        var overChartCanvas = false;
+        for (var ci = 0; ci < canvases.length; ci++) {
+          var canvasRect = canvases[ci].getBoundingClientRect();
+          if (x >= canvasRect.left && x <= canvasRect.right && y >= canvasRect.top && y <= canvasRect.bottom) {
+            overChartCanvas = true;
+            break;
+          }
+        }
+        if (!overChartCanvas) candidates.push({ x: x, y: y, area: rect.width * rect.height });
+      }
+      candidates.sort(function(a, b) { return a.area - b.area; });
+      return candidates.length ? { x: candidates[0].x, y: candidates[0].y } : null;
+    })()
+  `);
+  if (position === null || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) {
+    throw new Error('TradingView Indicators toolbar is unavailable outside the chart plot.');
+  }
+  if (dependencies?.dispatchMouseEvent) {
+    await dependencies.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
+  } else {
+    const client = await (dependencies?.getBoundClient || getBoundClient)();
+    await client.Input.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
+  }
+  await evaluate(`
+    /* TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1 */
+    new Promise(function(resolve) {
+      requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+    })
+  `, { awaitPromise: true });
 }
 
 function normalizePaneCaptureRequest(input) {

@@ -23,6 +23,19 @@ const session = {
 
 test.afterEach(() => clearObserverSession());
 
+
+function paneDependencies(dependencies) {
+  return {
+    ...dependencies,
+    evaluateBound: async (expression, options) => {
+      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+      if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return true;
+      return dependencies.evaluateBound(expression, options);
+    },
+    dispatchMouseEvent: dependencies.dispatchMouseEvent || (async () => undefined),
+  };
+}
+
 test('observer evidence fails closed before preparation', async () => {
   await assert.rejects(
     identity({ _deps: { evaluateBound: async () => ({}) } }),
@@ -169,9 +182,10 @@ test('bounded telemetry OHLCV extraction fails closed on invalid count and bindi
   await assert.rejects(() => captureTelemetryOhlcv({ symbol: 'AAPL', timeframe: '60', count: 2, _deps: { evaluateBound: async () => ({ error: 'Bound chart symbol or timeframe does not match the requested extraction.' }) } }), /does not match/);
 });
 
-test('exact pane telemetry binds pane directly without active-widget, focus, or mutation paths', async () => {
+test('exact pane telemetry moves cursor off the plot before reading the latest-bar Data Window', async () => {
   setObserverSession(session);
   const expressions = [];
+  const mouseEvents = [];
   const result = await capturePaneTelemetryOhlcv({
     profile_id: 'profile-exact',
     expected_chart_target_id: 'target-exact',
@@ -188,9 +202,14 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
         tab_count: 1,
         tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }],
       }),
-      evaluateBound: async (expression) => {
+      evaluateBound: async (expression, options) => {
         expressions.push(expression);
         if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return { x: 24, y: 18 };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) {
+          assert.deepEqual(options, { awaitPromise: true });
+          return true;
+        }
         return {
           pane_index: 3,
           pane_count: 8,
@@ -200,6 +219,7 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
           studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
         };
       },
+      dispatchMouseEvent: async (event) => { mouseEvents.push(event); },
       now: () => new Date('2026-07-17T10:00:01Z'),
     },
   });
@@ -223,9 +243,32 @@ test('exact pane telemetry binds pane directly without active-widget, focus, or 
     study_telemetry_reason: null,
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
-  assert.match(expressions[1], /cwc\.getAll\(\)/);
-  assert.match(expressions[1], /all\[paneIndex\]/);
-  assert.doesNotMatch(expressions[1], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+  assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
+  assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
+  assert.match(expressions[3], /cwc\.getAll\(\)/);
+  assert.match(expressions[3], /all\[paneIndex\]/);
+  assert.deepEqual(mouseEvents, [{ type: 'mouseMoved', x: 24, y: 18 }]);
+  assert.doesNotMatch(expressions[3], /_activeChartWidgetWV|pane_focus|setSymbol|setResolution|createStudy|removeEntity|navigate/);
+});
+
+test('exact pane capture fails before telemetry when toolbar cursor target is unavailable', async () => {
+  setObserverSession(session);
+  let captureRead = false;
+  await assert.rejects(() => capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
+    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) return null;
+        captureRead = true;
+        return {};
+      },
+      dispatchMouseEvent: async () => undefined,
+    },
+  }), /Indicators toolbar is unavailable/u);
+  assert.equal(captureRead, false);
 });
 
 test('exact pane telemetry reports bounded ambiguity category and indexes while failing closed', async () => {
@@ -261,7 +304,7 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
 
   for (const testCase of cases) {
     studies[testCase.studyIndex].values = testCase.values;
-    await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+    await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id')
         ? { layout_id: '8' }
@@ -273,7 +316,7 @@ test('exact pane telemetry reports bounded ambiguity category and indexes while 
           candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
           studies,
         },
-    } }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
+    }) }), new RegExp(`studies\\[${testCase.studyIndex}\\]\\.values\\[${testCase.valueIndex}\\] is ambiguous: ${testCase.reason}`));
   }
 });
 
@@ -298,7 +341,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
       { source_label: 'data-window', field_label: 'Current POC', raw_value: '100' },
     ],
   }];
-  const result = await capturePaneTelemetryOhlcv({ ...input, _deps: {
+  const result = await capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
     listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
     evaluateBound: async (expression) => expression.includes('layout_id')
       ? { layout_id: '8' }
@@ -311,7 +354,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
         studies,
       },
     now: () => new Date('2026-07-17T10:00:01.000Z'),
-  } });
+  }) });
   assert.deepEqual(result.studies, [{
     study_id: 'pvp',
     study_name: 'PvP',
@@ -322,7 +365,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
     { source_label: 'data-window', field_label: 'Optional rail', raw_value: '' },
     { source_label: 'data-window', field_label: 'Optional rail', raw_value: '101' },
   ];
-  await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: {
+  await assert.rejects(() => capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
     listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
     evaluateBound: async (expression) => expression.includes('layout_id')
       ? { layout_id: '8' }
@@ -334,7 +377,7 @@ test('exact pane telemetry omits only labeled empty values and still rejects dup
         candles: [{ opened_at: '2026-07-17T10:00:00.000Z', open: '100', high: '110', low: '95', close: '105', volume: '1234' }],
         studies,
       },
-  } }), /studies\[0\]\.values\[1\] is ambiguous: DUPLICATE_SOURCE_FIELD/);
+  }) }), /studies\[0\]\.values\[1\] is ambiguous: DUPLICATE_SOURCE_FIELD/);
 });
 
 test('exact pane telemetry fails closed on identity, layout, and pane readback drift', async () => {
@@ -355,17 +398,17 @@ test('exact pane telemetry fails closed on identity, layout, and pane readback d
     /exact profile\/chart authority/,
   );
   await assert.rejects(
-    capturePaneTelemetryOhlcv({ ...input, _deps: {
+    capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '4' } : {},
-    } }),
+    }) }),
     /layout does not match authority/,
   );
   await assert.rejects(
-    capturePaneTelemetryOhlcv({ ...input, _deps: {
+    capturePaneTelemetryOhlcv({ ...input, _deps: paneDependencies({
       listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
       evaluateBound: async (expression) => expression.includes('layout_id') ? { layout_id: '8' } : { error: 'Exact requested pane is missing or ambiguous.' },
-    } }),
+    }) }),
     /missing or ambiguous/,
   );
 });

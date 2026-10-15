@@ -156,7 +156,7 @@ test('observer manifest is canonical, immutable, and uniquely classified', () =>
     indicator_remove_scoped: 'chart_mutation',
     chart_saved_layout_identity: 'read_only',
     chart_save_existing_scoped_v2: 'chart_mutation',
-    tv_observer_capture_pane_telemetry_ohlcv: 'read_only',
+    tv_observer_capture_pane_telemetry_ohlcv: 'browser_focus_mutation',
     symbol_info: 'read_only',
     symbol_search: 'read_only',
     pine_apply_scoped: 'chart_mutation',
