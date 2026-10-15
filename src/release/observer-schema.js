@@ -963,7 +963,7 @@ export const observerToolDefinitions = Object.freeze({
     },
     outputSchema: {
       success: z.literal(true),
-      extraction_version: z.literal('observer-pane-telemetry-ohlcv-v1'),
+      extraction_version: z.literal('observer-pane-telemetry-ohlcv-v2'),
       profile_id: z.string().min(1),
       chart_target_id: z.string().min(1),
       chart_id: z.string().min(1),

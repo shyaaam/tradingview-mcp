@@ -5,7 +5,7 @@ import { list as listTabs } from './tab.js';
 
 export const OBSERVER_ADAPTER_VERSION = 'tradingview-mcp-observer-v1';
 export const OBSERVER_TELEMETRY_OHLCV_VERSION = 'observer-telemetry-ohlcv-v1';
-export const OBSERVER_PANE_TELEMETRY_OHLCV_VERSION = 'observer-pane-telemetry-ohlcv-v1';
+export const OBSERVER_PANE_TELEMETRY_OHLCV_VERSION = 'observer-pane-telemetry-ohlcv-v2';
 
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -323,32 +323,29 @@ async function moveDataWindowToLatestBar(evaluate, dependencies) {
   const position = await evaluate(`
     (function() {
       /* TVOBS_DATA_WINDOW_CURSOR_RESET_V1 */
-      var nodes = document.querySelectorAll('button, [role="button"], a, span, div');
-      var candidates = [];
-      for (var i = 0; i < nodes.length; i++) {
-        var node = nodes[i];
-        if (!node || node.offsetParent === null || String(node.textContent || '').trim().toLowerCase() !== 'indicators') continue;
-        var rect = node.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0 || rect.top < 0 || rect.bottom > window.innerHeight * 0.5) continue;
-        var x = rect.left + rect.width / 2;
-        var y = rect.top + rect.height / 2;
-        var canvases = document.querySelectorAll('canvas');
-        var overChartCanvas = false;
-        for (var ci = 0; ci < canvases.length; ci++) {
-          var canvasRect = canvases[ci].getBoundingClientRect();
-          if (x >= canvasRect.left && x <= canvasRect.right && y >= canvasRect.top && y <= canvasRect.bottom) {
-            overChartCanvas = true;
-            break;
-          }
-        }
-        if (!overChartCanvas) candidates.push({ x: x, y: y, area: rect.width * rect.height });
+      var width = Number(window.innerWidth);
+      var height = Number(window.innerHeight);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 8 || height < 8) return null;
+      var canvases = Array.prototype.slice.call(document.querySelectorAll('canvas')).map(function(canvas) {
+        return canvas.getBoundingClientRect();
+      }).filter(function(rect) { return rect.width > 0 && rect.height > 0; });
+      var candidates = [
+        { x: 2, y: 2 }, { x: width - 3, y: 2 },
+        { x: 2, y: height - 3 }, { x: width - 3, y: height - 3 },
+        { x: Math.floor(width / 2), y: 2 }, { x: Math.floor(width / 2), y: height - 3 },
+      ];
+      for (var i = 0; i < candidates.length; i++) {
+        var point = candidates[i];
+        var insideCanvas = canvases.some(function(rect) {
+          return point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom;
+        });
+        if (!insideCanvas) return point;
       }
-      candidates.sort(function(a, b) { return a.area - b.area; });
-      return candidates.length ? { x: candidates[0].x, y: candidates[0].y } : null;
+      return null;
     })()
   `);
   if (position === null || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) {
-    throw new Error('TradingView Indicators toolbar is unavailable outside the chart plot.');
+    throw new Error('No verified off-chart viewport point is available for Data Window selection.');
   }
   if (dependencies?.dispatchMouseEvent) {
     await dependencies.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
@@ -356,12 +353,26 @@ async function moveDataWindowToLatestBar(evaluate, dependencies) {
     const client = await (dependencies?.getBoundClient || getBoundClient)();
     await client.Input.dispatchMouseEvent({ type: 'mouseMoved', x: position.x, y: position.y });
   }
-  await evaluate(`
+  const settled = await evaluate(`
     /* TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1 */
     new Promise(function(resolve) {
-      requestAnimationFrame(function() { requestAnimationFrame(resolve); });
+      var finished = false;
+      var timeout = setTimeout(function() {
+        if (finished) return;
+        finished = true;
+        resolve(false);
+      }, 1000);
+      requestAnimationFrame(function() {
+        requestAnimationFrame(function() {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          resolve(true);
+        });
+      });
     })
   `, { awaitPromise: true });
+  if (settled !== true) throw new Error('TradingView chart animation frames did not settle within 1000 ms.');
 }
 
 function normalizePaneCaptureRequest(input) {

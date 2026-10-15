@@ -226,7 +226,7 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
 
   assert.deepEqual(result, {
     success: true,
-    extraction_version: 'observer-pane-telemetry-ohlcv-v1',
+    extraction_version: 'observer-pane-telemetry-ohlcv-v2',
     profile_id: 'profile-exact',
     chart_target_id: 'target-exact',
     chart_id: 'chart-exact',
@@ -244,6 +244,7 @@ test('exact pane telemetry moves cursor off the plot before reading the latest-b
     studies: [{ study_id: 'rsi', study_name: 'RSI', values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: '52.3' }] }],
   });
   assert.match(expressions[1], /TVOBS_DATA_WINDOW_CURSOR_RESET_V1/);
+  assert.doesNotMatch(expressions[1], /indicators/iu);
   assert.match(expressions[2], /TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1/);
   assert.match(expressions[3], /cwc\.getAll\(\)/);
   assert.match(expressions[3], /all\[paneIndex\]/);
@@ -285,7 +286,6 @@ test('Data Window telemetry reflects post-reset cursor selection, not a fixed mo
           return true;
         }
         events.push('read-study-data-window');
-        const selectedTimestamp = Date.parse(selectedDataWindowBar);
         return {
           pane_index: 0,
           pane_count: 1,
@@ -299,9 +299,13 @@ test('Data Window telemetry reflects post-reset cursor selection, not a fixed mo
             study_id: 'Script$USER;cipher@tv-scripting',
             study_name: 'VuManChu B Divergences',
             values: [
-              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_BAR_TIME', raw_value: String(selectedTimestamp) },
+              { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_BAR_TIME', raw_value: String(Date.parse(staleBar)) },
               { source_label: 'data-window', field_label: 'TVOBS_CIPHER_B_V3_CLOSED_DIVERGENCE_FLAGS', raw_value: '0' },
             ],
+          }, {
+            study_id: 'study-rsi',
+            study_name: 'RSI',
+            values: [{ source_label: 'data-window', field_label: 'RSI', raw_value: selectedDataWindowBar }],
           }],
         };
       },
@@ -319,11 +323,13 @@ test('Data Window telemetry reflects post-reset cursor selection, not a fixed mo
     'wait-two-frames',
     'read-study-data-window',
   ]);
-  assert.equal(result.studies[0].values[0].raw_value, String(Date.parse(latestBar)));
-  assert.notEqual(result.studies[0].values[0].raw_value, String(Date.parse(staleBar)));
+  assert.equal(result.studies[0].values[0].raw_value, String(Date.parse(staleBar)));
+  assert.notEqual(result.studies[0].values[0].raw_value, String(Date.parse(latestBar)));
+  assert.equal(result.studies[1].values[0].raw_value, latestBar,
+    'non-Cipher-B Data Window value must follow pointer-reset selection');
 });
 
-test('exact pane capture fails before telemetry when toolbar cursor target is unavailable', async () => {
+test('exact pane capture fails before telemetry when no verified off-chart cursor point exists', async () => {
   setObserverSession(session);
   let captureRead = false;
   await assert.rejects(() => capturePaneTelemetryOhlcv({
@@ -339,7 +345,31 @@ test('exact pane capture fails before telemetry when toolbar cursor target is un
       },
       dispatchMouseEvent: async () => undefined,
     },
-  }), /Indicators toolbar is unavailable/u);
+  }), /No verified off-chart viewport point is available/u);
+  assert.equal(captureRead, false);
+});
+
+test('exact pane capture fails closed when chart animation frames do not settle', async () => {
+  setObserverSession(session);
+  let captureRead = false;
+  await assert.rejects(() => capturePaneTelemetryOhlcv({
+    profile_id: 'profile-exact', expected_chart_target_id: 'target-exact', expected_chart_id: 'chart-exact',
+    expected_layout_id: '8', tab_index: 0, pane_index: 0, symbol: 'BITSTAMP:BTCUSDT', timeframe: '60', count: 1,
+    _deps: {
+      listTabs: async () => ({ success: true, tabs: [{ index: 0, id: 'target-exact', chart_id: 'chart-exact', url: session.chartTargetUrl }] }),
+      evaluateBound: async (expression) => {
+        if (expression.includes('layout_id')) return { layout_id: '8' };
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_RESET_V1')) {
+          assert.doesNotMatch(expression, /indicators/iu);
+          return { x: 24, y: 18 };
+        }
+        if (expression.includes('TVOBS_DATA_WINDOW_CURSOR_SETTLE_V1')) return false;
+        captureRead = true;
+        return {};
+      },
+      dispatchMouseEvent: async () => undefined,
+    },
+  }), /animation frames did not settle within 1000 ms/u);
   assert.equal(captureRead, false);
 });
 

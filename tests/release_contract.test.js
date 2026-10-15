@@ -799,7 +799,7 @@ test('observer result fixtures satisfy registered output schemas', () => {
     },
     tv_observer_capture_pane_telemetry_ohlcv: {
       success: true,
-      extraction_version: 'observer-pane-telemetry-ohlcv-v1',
+      extraction_version: 'observer-pane-telemetry-ohlcv-v2',
       profile_id: 'profile-a', chart_target_id: 'chart-1', chart_id: 'x', layout_id: '8',
       tab_index: 0, pane_index: 0, pane_count: 8, symbol: 'AAPL', timeframe: '60', requested_count: 2,
       captured_at: '2026-07-17T10:00:01Z',

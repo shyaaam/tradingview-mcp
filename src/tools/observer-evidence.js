@@ -15,7 +15,7 @@ export function registerObserverEvidenceTools(server) {
     try { return jsonResult(await core.captureTelemetryOhlcv(args)); }
     catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
   });
-  registerObserverTool(server, 'tv_observer_capture_pane_telemetry_ohlcv', 'Move the exact chart cursor off the plot, then capture bounded OHLCV and same-pane Data Window telemetry from that pane.', async ({ ...args }) => {
+  registerObserverTool(server, 'tv_observer_capture_pane_telemetry_ohlcv', 'Move the exact chart cursor to a verified point outside chart canvases, wait for bounded rendering settlement, then capture bounded OHLCV and same-pane Data Window telemetry from that pane.', async ({ ...args }) => {
     try { return jsonResult(await core.capturePaneTelemetryOhlcv(args)); }
     catch (err) { return jsonResult({ success: false, error: sanitizeError(err) }, true); }
   });
