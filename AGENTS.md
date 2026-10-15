@@ -1,8 +1,3 @@
-# Working rules for agents
-
-These apply to every agent (Codex, Claude Code, others) working in this repository.
-
-## Where you may work
 1. Work only in this directory, on branches. No git worktrees or copies of the repository anywhere (no
    `git worktree add`, no clones into `/tmp` or `~/.codex/worktrees`). Switch back to `main` when done.
 2. Never edit, build or run development commands inside `~/dev/tv-observer-runtime`. It is the live runtime;
@@ -10,8 +5,6 @@ These apply to every agent (Codex, Claude Code, others) working in this reposito
 3. Production is the owner's. Do not edit `production.env`, run migrations or the reviewed-source transition,
    resume the scheduler, or start/stop live V5 unless the owner asked for that exact step. Live experiments use a
    restored database copy and a throwaway branch, removed afterwards.
-
-## KISS (mandatory)
 4. Fix the root cause with the smallest change. Prefer deleting or simplifying over adding.
 5. Measure live before choosing any number (timeouts, budgets, retries). One measurement, one change.
 6. No new guard, retry, receipt, hash, layer, failure code or migration unless you can name the concrete failure
@@ -25,3 +18,4 @@ These apply to every agent (Codex, Claude Code, others) working in this reposito
 9. If a fix needs a second patch to work, stop and redesign instead of patching the patch.
 10. Verify live (a short smoke) before calling anything done, and report what ran and what it returned. Unit
     tests are not live acceptance.
+11. Merge exactly the commit that was tested live, via merge commit, only after CI is green. Never squash from the index.
