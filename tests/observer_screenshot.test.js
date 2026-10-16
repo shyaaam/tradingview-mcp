@@ -17,6 +17,9 @@ const png = Buffer.from(
 const pngBase64 = png.toString('base64');
 const chartTargetUrl = 'https://www.tradingview.com/chart/ChartExact/';
 
+const events = [];
+let fitted = true;
+
 function input(overrides = {}) {
   return {
     profile_id: 'profile-1',
@@ -67,8 +70,19 @@ function input(overrides = {}) {
         panes: [{ index: 1, symbol: 'NASDAQ:AAPL', resolution: '1h' }],
       }),
       captureCandle: async () => ({ success: true }),
-      evaluateBound: async () => ({ x: 1, y: 2, width: 100, height: 80, viewport_width: 1200, viewport_height: 800 }),
-      getBoundClient: async () => ({ Page: { captureScreenshot: async () => ({ data: pngBase64 }) } }),
+      evaluateBound: async (source) => {
+        events.push(/TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source) ? 'reset'
+          : /TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source) ? 'park-point'
+            : /TVOBS_SCREENSHOT_RESTORE_V1/.test(source) ? 'restore'
+              : /isAutoScale/.test(source) ? 'fit-check' : 'other');
+        if (/TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source)) return true;
+        if (/TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source)) return { x: 82, y: 2 };
+        if (/TVOBS_SCREENSHOT_RESTORE_V1/.test(source)) return true;
+        if (/isAutoScale/.test(source)) return fitted;
+        return { x: 1, y: 2, width: 100, height: 80, viewport_width: 1200, viewport_height: 800 };
+      },
+      dispatchMouseEvent: async (event) => { events.push(`mouse:${event.x},${event.y}`); },
+      getBoundClient: async () => ({ Page: { captureScreenshot: async () => { events.push('capture'); return { data: pngBase64 }; } } }),
       now: () => new Date('2026-07-26T18:10:00.000Z'),
     },
     ...overrides,
@@ -224,4 +238,44 @@ test('navigation after attachment fails before CDP screenshot capture', async ()
     /changed after attachment/u,
   );
   assert.equal(screenshotCalls, 0);
+});
+
+test('blocks pointer events, resets and frames the chart, then captures and restores the page', async () => {
+  events.length = 0;
+  fitted = true;
+  await captureObserverReviewScreenshot(input());
+  const interesting = events.filter((name) => name !== 'other');
+  assert.deepEqual(interesting, ['reset', 'fit-check', 'capture', 'restore']);
+});
+
+test('fails closed and still restores the toolbar when the chart does not return to autoscale', async () => {
+  events.length = 0;
+  fitted = false;
+  await assert.rejects(captureObserverReviewScreenshot(input()), /not framed on the captured candles/);
+  assert.equal(events.includes('capture'), false);
+  assert.equal(events.at(-1), 'restore');
+  fitted = true;
+});
+
+test('restores the toolbar when the capture itself fails', async () => {
+  events.length = 0;
+  fitted = true;
+  await assert.rejects(captureObserverReviewScreenshot(input({
+    _deps: { ...input()._deps, getBoundClient: async () => ({ Page: { captureScreenshot: async () => { throw new Error('boom'); } } }) },
+  })), /boom/);
+  assert.equal(events.at(-1), 'restore');
+});
+
+test('framing source blocks pointer events and zooms to the captured candle window', async () => {
+  const sources = [];
+  fitted = true;
+  const base = input();
+  await captureObserverReviewScreenshot(input({
+    _deps: { ...base._deps, evaluateBound: async (source, options) => { sources.push(source); return base._deps.evaluateBound(source, options); } },
+  }));
+  const framing = sources.find((source) => /TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source));
+  assert.match(framing, /pointer-events: none/);
+  assert.match(framing, /zoomToBarsRange\(first, last\)/);
+  assert.match(framing, /last - 179/);
+  assert.ok(sources.some((source) => /TVOBS_SCREENSHOT_RESTORE_V1/.test(source)));
 });

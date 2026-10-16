@@ -19,6 +19,67 @@ const DOMAIN_ID = /^[a-z0-9-]+:[0-9a-f]{64}$/;
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const TIMEFRAME = /^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/;
 
+// Number of captured candles the review image frames; matches the 180 candles the V5 telemetry capture reads.
+const SCREENSHOT_CANDLE_WINDOW = 180;
+
+const RESTORE_CHART_SOURCE = `
+  /* TVOBS_SCREENSHOT_RESTORE_V1 */
+  (function() {
+    var guard = document.getElementById('tvobs-screenshot-no-pointer');
+    if (guard) guard.remove();
+    document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.removeProperty('display'); });
+    return true;
+  })()
+`;
+
+/**
+ * Makes the chart reviewable, all through in-page TradingView APIs (no key presses):
+ * - block pointer events so neither the real cursor nor a stale hover can draw a crosshair or tooltip
+ *   (a crosshair on the foreground tab otherwise reappears after every re-layout);
+ * - reset the chart (restores price autoscale, which a saved layout may have off), then frame exactly the
+ *   captured candle window so few-bar timeframes fill the width instead of hugging the right edge;
+ * - clear the drawing selection and the crosshair, and hide the floating drawing toolbar.
+ * The caller always restores the page with RESTORE_CHART_SOURCE.
+ */
+async function prepareCleanChart(evaluate) {
+  const prepared = await evaluate(`
+    (function() {
+      /* TVOBS_SCREENSHOT_CLEAN_CHART_V2 */
+      var chart = window.TradingViewApi && window.TradingViewApi.activeChart && window.TradingViewApi.activeChart();
+      if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
+      var guard = document.createElement('style');
+      guard.id = 'tvobs-screenshot-no-pointer';
+      guard.textContent = 'html, html * { pointer-events: none !important; }';
+      document.head.appendChild(guard);
+      var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+      var bars = model.mainSeries().bars();
+      var last = bars.lastIndex();
+      var first = Math.max(bars.firstIndex(), last - ${SCREENSHOT_CANDLE_WINDOW - 1});
+      chart.executeActionById('chartReset');
+      model.timeScale().zoomToBarsRange(first, last);
+      chart.selection().clear();
+      model.crosshairSource().clearPosition();
+      document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.setProperty('display', 'none', 'important'); });
+      return true;
+    })()
+  `);
+  if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
+  // A bounded timer wait lets the view repaint without animation frames, which Chrome pauses in background tabs.
+  const framed = await evaluate(`
+    new Promise(function(resolve) {
+      setTimeout(function() {
+        try {
+          var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+          model.crosshairSource().clearPosition();
+          resolve(model.mainSeries().priceScale().isAutoScale() === true && model.timeScale().rightOffset() === 0
+            && !model.crosshairSource().visible);
+        } catch (error) { resolve(false); }
+      }, 400);
+    })
+  `, { awaitPromise: true });
+  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale and no crosshair before screenshot capture.');
+}
+
 export async function captureObserverReviewScreenshot(input = {}) {
   const request = normalizeRequest(input);
   const deps = input._deps || {};
@@ -85,23 +146,29 @@ export async function captureObserverReviewScreenshot(input = {}) {
     throw new Error('Active promoted pane bounds are unavailable for screenshot capture.');
   }
 
-  // Re-resolve the exact bound target after all pane/evidence reads and immediately
-  // before capture. The general client can reuse a live CDP connection without
-  // checking whether the target navigated after read-only attachment.
-  const getCdpClient = deps.getBoundClient || getBoundClient;
-  const client = await getCdpClient();
-  const result = await client.Page.captureScreenshot({
-    format: 'png',
-    clip: {
-      x: clip.x,
-      y: clip.y,
-      width: clip.width,
-      height: clip.height,
-      scale: 1,
-    },
-    captureBeyondViewport: false,
-    fromSurface: true,
-  });
+  let result;
+  try {
+    await prepareCleanChart(evaluate);
+    // Re-resolve the exact bound target after all pane/evidence reads and immediately
+    // before capture. The general client can reuse a live CDP connection without
+    // checking whether the target navigated after read-only attachment.
+    const getCdpClient = deps.getBoundClient || getBoundClient;
+    const client = await getCdpClient();
+    result = await client.Page.captureScreenshot({
+      format: 'png',
+      clip: {
+        x: clip.x,
+        y: clip.y,
+        width: clip.width,
+        height: clip.height,
+        scale: 1,
+      },
+      captureBeyondViewport: false,
+      fromSurface: true,
+    });
+  } finally {
+    await evaluate(RESTORE_CHART_SOURCE).catch(() => undefined);
+  }
   const pngBase64 = requireCanonicalBase64(result?.data);
   const bytes = Buffer.from(pngBase64, 'base64');
   if (bytes.length < 8 || bytes.length > OBSERVER_REVIEW_SCREENSHOT_MAX_BYTES) throw new Error('Captured screenshot is not a bounded PNG.');
