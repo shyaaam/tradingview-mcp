@@ -3,7 +3,7 @@ import { inflateSync } from 'node:zlib';
 
 import { evaluateBound, getBoundClient } from '../connection.js';
 import { buildObserverContract } from '../release/identity.js';
-import { captureCandle, moveDataWindowToLatestBar } from './observer-evidence.js';
+import { captureCandle } from './observer-evidence.js';
 import { requireObserverSession } from './observer-session.js';
 import * as pane from './pane.js';
 import * as tab from './tab.js';
@@ -19,47 +19,65 @@ const DOMAIN_ID = /^[a-z0-9-]+:[0-9a-f]{64}$/;
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const TIMEFRAME = /^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/;
 
-const RESTORE_FLOATING_TOOLBAR_SOURCE = `
-  /* TVOBS_SCREENSHOT_TOOLBAR_RESTORE_V1 */
+// Number of captured candles the review image frames; matches the 180 candles the V5 telemetry capture reads.
+const SCREENSHOT_CANDLE_WINDOW = 180;
+
+const RESTORE_CHART_SOURCE = `
+  /* TVOBS_SCREENSHOT_RESTORE_V1 */
   (function() {
+    var guard = document.getElementById('tvobs-screenshot-no-pointer');
+    if (guard) guard.remove();
     document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.removeProperty('display'); });
     return true;
   })()
 `;
 
 /**
- * Makes the chart reviewable: reset the view (TradingView "Reset chart", the Alt+R action) so price and time
- * scales fit, clear any drawing selection and the crosshair, hide the floating drawing toolbar (restored after
- * capture) and park the cursor where it hovers nothing. Everything runs through in-page TradingView APIs; no key presses.
+ * Makes the chart reviewable, all through in-page TradingView APIs (no key presses):
+ * - block pointer events so neither the real cursor nor a stale hover can draw a crosshair or tooltip
+ *   (a crosshair on the foreground tab otherwise reappears after every re-layout);
+ * - reset the chart (restores price autoscale, which a saved layout may have off), then frame exactly the
+ *   captured candle window so few-bar timeframes fill the width instead of hugging the right edge;
+ * - clear the drawing selection and the crosshair, and hide the floating drawing toolbar.
+ * The caller always restores the page with RESTORE_CHART_SOURCE.
  */
-async function prepareCleanChart(evaluate, deps) {
+async function prepareCleanChart(evaluate) {
   const prepared = await evaluate(`
     (function() {
-      /* TVOBS_SCREENSHOT_CLEAN_CHART_V1 */
+      /* TVOBS_SCREENSHOT_CLEAN_CHART_V2 */
       var chart = window.TradingViewApi && window.TradingViewApi.activeChart && window.TradingViewApi.activeChart();
       if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
+      var guard = document.createElement('style');
+      guard.id = 'tvobs-screenshot-no-pointer';
+      guard.textContent = 'html, html * { pointer-events: none !important; }';
+      document.head.appendChild(guard);
+      var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+      var bars = model.mainSeries().bars();
+      var last = bars.lastIndex();
+      var first = Math.max(bars.firstIndex(), last - ${SCREENSHOT_CANDLE_WINDOW - 1});
       chart.executeActionById('chartReset');
+      model.timeScale().zoomToBarsRange(first, last);
       chart.selection().clear();
-      window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().crosshairSource().clearPosition();
+      model.crosshairSource().clearPosition();
       document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.setProperty('display', 'none', 'important'); });
       return true;
     })()
   `);
   if (prepared !== true) throw new Error('TradingView chart reset is unavailable for screenshot capture.');
-  await moveDataWindowToLatestBar(evaluate, deps);
-  // A bounded timer wait lets the reset repaint without animation frames, which Chrome pauses in background tabs.
-  const fitted = await evaluate(`
+  // A bounded timer wait lets the view repaint without animation frames, which Chrome pauses in background tabs.
+  const framed = await evaluate(`
     new Promise(function(resolve) {
       setTimeout(function() {
         try {
           var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
           model.crosshairSource().clearPosition();
-          resolve(model.mainSeries().priceScale().isAutoScale() === true && !model.crosshairSource().visible);
+          resolve(model.mainSeries().priceScale().isAutoScale() === true && model.timeScale().rightOffset() === 0
+            && !model.crosshairSource().visible);
         } catch (error) { resolve(false); }
-      }, 300);
+      }, 400);
     })
   `, { awaitPromise: true });
-  if (fitted !== true) throw new Error('TradingView chart did not return to fit-to-screen autoscale with a cleared crosshair before screenshot capture.');
+  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale and no crosshair before screenshot capture.');
 }
 
 export async function captureObserverReviewScreenshot(input = {}) {
@@ -130,7 +148,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
 
   let result;
   try {
-    await prepareCleanChart(evaluate, deps);
+    await prepareCleanChart(evaluate);
     // Re-resolve the exact bound target after all pane/evidence reads and immediately
     // before capture. The general client can reuse a live CDP connection without
     // checking whether the target navigated after read-only attachment.
@@ -149,7 +167,7 @@ export async function captureObserverReviewScreenshot(input = {}) {
       fromSurface: true,
     });
   } finally {
-    await evaluate(RESTORE_FLOATING_TOOLBAR_SOURCE).catch(() => undefined);
+    await evaluate(RESTORE_CHART_SOURCE).catch(() => undefined);
   }
   const pngBase64 = requireCanonicalBase64(result?.data);
   const bytes = Buffer.from(pngBase64, 'base64');
