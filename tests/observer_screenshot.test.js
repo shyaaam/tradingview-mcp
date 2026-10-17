@@ -71,13 +71,13 @@ function input(overrides = {}) {
       }),
       captureCandle: async () => ({ success: true }),
       evaluateBound: async (source) => {
-        events.push(/TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source) ? 'reset'
+        events.push(/TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source) ? 'reset'
           : /TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source) ? 'park-point'
-            : /TVOBS_SCREENSHOT_RESTORE_V1/.test(source) ? 'restore'
+            : /TVOBS_SCREENSHOT_RESTORE_V2/.test(source) ? 'restore'
               : /isAutoScale/.test(source) ? 'fit-check' : 'other');
-        if (/TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source)) return true;
+        if (/TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source)) return true;
         if (/TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source)) return { x: 82, y: 2 };
-        if (/TVOBS_SCREENSHOT_RESTORE_V1/.test(source)) return true;
+        if (/TVOBS_SCREENSHOT_RESTORE_V2/.test(source)) return true;
         if (/isAutoScale/.test(source)) return fitted;
         return { x: 1, y: 2, width: 100, height: 80, viewport_width: 1200, viewport_height: 800 };
       },
@@ -273,9 +273,17 @@ test('framing source blocks pointer events and zooms to the captured candle wind
   await captureObserverReviewScreenshot(input({
     _deps: { ...base._deps, evaluateBound: async (source, options) => { sources.push(source); return base._deps.evaluateBound(source, options); } },
   }));
-  const framing = sources.find((source) => /TVOBS_SCREENSHOT_CLEAN_CHART_V2/.test(source));
+  const framing = sources.find((source) => /TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source));
   assert.match(framing, /pointer-events: none/);
   assert.match(framing, /zoomToBarsRange\(first, last\)/);
   assert.match(framing, /last - 179/);
-  assert.ok(sources.some((source) => /TVOBS_SCREENSHOT_RESTORE_V1/.test(source)));
+  // Indicator name and value tags are hidden for the image; the main series' own last-price tag is not touched.
+  assert.match(framing, /\["showStudyPlotLabels","showStudyLastValue"\]\.forEach/);
+  assert.match(framing, /__tvobsIndicatorLabelRestore\[key\] = property\.value\(\)/);
+  assert.doesNotMatch(framing, /showSeriesLastValue/);
+  const restoreSource = sources.find((source) => /TVOBS_SCREENSHOT_RESTORE_V2/.test(source));
+  assert.match(restoreSource, /__tvobsIndicatorLabelRestore/);
+  assert.match(restoreSource, /setValue\(saved\[key\]\)/);
+  assert.doesNotMatch(restoreSource, /showSeriesLastValue/);
+  assert.ok(sources.some((source) => /TVOBS_SCREENSHOT_RESTORE_V2/.test(source)));
 });
