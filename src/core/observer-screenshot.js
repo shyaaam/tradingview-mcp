@@ -22,13 +22,27 @@ const TIMEFRAME = /^(?:[1-9][0-9]*[mhdwM]?|[1-9][0-9]*[SDWM])$/;
 // Number of captured candles the review image frames; matches the 180 candles the V5 telemetry capture reads.
 const SCREENSHOT_CANDLE_WINDOW = 180;
 
+// Chart settings that draw an indicator's name or last value as a tag on the price scale. They are hidden only while the
+// image is taken. The main series' own last-price tag and bar countdown (showSeriesLastValue) are left alone.
+const INDICATOR_LABEL_SETTINGS = ['showStudyPlotLabels', 'showStudyLastValue'];
+
 const RESTORE_CHART_SOURCE = `
-  /* TVOBS_SCREENSHOT_RESTORE_V1 */
+  /* TVOBS_SCREENSHOT_RESTORE_V2 */
   (function() {
     var guard = document.getElementById('tvobs-screenshot-no-pointer');
     if (guard) guard.remove();
     document.querySelectorAll('.tv-floating-toolbar').forEach(function(element) { element.style.removeProperty('display'); });
-    return true;
+    var saved = window.__tvobsIndicatorLabelRestore;
+    var restored = true;
+    if (saved) {
+      try {
+        var scales = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.properties().childs().scalesProperties.childs();
+        Object.keys(saved).forEach(function(key) { scales[key].setValue(saved[key]); });
+        restored = Object.keys(saved).every(function(key) { return scales[key].value() === saved[key]; });
+      } catch (error) { restored = false; }
+      delete window.__tvobsIndicatorLabelRestore;
+    }
+    return restored;
   })()
 `;
 
@@ -38,20 +52,31 @@ const RESTORE_CHART_SOURCE = `
  *   (a crosshair on the foreground tab otherwise reappears after every re-layout);
  * - reset the chart (restores price autoscale, which a saved layout may have off), then frame exactly the
  *   captured candle window so few-bar timeframes fill the width instead of hugging the right edge;
- * - clear the drawing selection and the crosshair, and hide the floating drawing toolbar.
+ * - clear the drawing selection and the crosshair, and hide the floating drawing toolbar;
+ * - hide the indicator name and value tags on the price scales (they cover the newest candles); the previous settings are
+ *   kept on the page so RESTORE_CHART_SOURCE puts the owner's view back exactly.
  * The caller always restores the page with RESTORE_CHART_SOURCE.
  */
 async function prepareCleanChart(evaluate) {
   const prepared = await evaluate(`
     (function() {
-      /* TVOBS_SCREENSHOT_CLEAN_CHART_V2 */
+      /* TVOBS_SCREENSHOT_CLEAN_CHART_V3 */
       var chart = window.TradingViewApi && window.TradingViewApi.activeChart && window.TradingViewApi.activeChart();
       if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
       var guard = document.createElement('style');
       guard.id = 'tvobs-screenshot-no-pointer';
       guard.textContent = 'html, html * { pointer-events: none !important; }';
       document.head.appendChild(guard);
-      var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+      var widget = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var scales = widget.properties().childs().scalesProperties.childs();
+      window.__tvobsIndicatorLabelRestore = {};
+      ${JSON.stringify(INDICATOR_LABEL_SETTINGS)}.forEach(function(key) {
+        var property = scales[key];
+        if (!property || typeof property.value !== 'function' || typeof property.setValue !== 'function') throw new Error('Missing chart setting ' + key);
+        window.__tvobsIndicatorLabelRestore[key] = property.value();
+        property.setValue(false);
+      });
+      var model = widget.model();
       var bars = model.mainSeries().bars();
       var last = bars.lastIndex();
       var first = Math.max(bars.firstIndex(), last - ${SCREENSHOT_CANDLE_WINDOW - 1});
@@ -71,13 +96,15 @@ async function prepareCleanChart(evaluate) {
         try {
           var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
           model.crosshairSource().clearPosition();
+          var scales = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.properties().childs().scalesProperties.childs();
           resolve(model.mainSeries().priceScale().isAutoScale() === true && model.timeScale().rightOffset() === 0
-            && !model.crosshairSource().visible);
+            && !model.crosshairSource().visible
+            && ${JSON.stringify(INDICATOR_LABEL_SETTINGS)}.every(function(key) { return scales[key].value() === false; }));
         } catch (error) { resolve(false); }
       }, 400);
     })
   `, { awaitPromise: true });
-  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale and no crosshair before screenshot capture.');
+  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale, no crosshair and no indicator tags before screenshot capture.');
 }
 
 export async function captureObserverReviewScreenshot(input = {}) {
