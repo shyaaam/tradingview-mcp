@@ -26,6 +26,10 @@ const SCREENSHOT_CANDLE_WINDOW = 180;
 // image is taken. The main series' own last-price tag and bar countdown (showSeriesLastValue) are left alone.
 const INDICATOR_LABEL_SETTINGS = ['showStudyPlotLabels', 'showStudyLastValue'];
 
+// The time axis reads in the chart's timezone while every candle time V5 stores is UTC, so the image is taken in UTC. The
+// setting stays UTC afterwards: the saved layouts belong to V5, and a restored zone would only bring the second clock back.
+export const OBSERVER_SCREENSHOT_TIMEZONE = 'Etc/UTC';
+
 const RESTORE_CHART_SOURCE = `
   /* TVOBS_SCREENSHOT_RESTORE_V2 */
   (function() {
@@ -55,18 +59,21 @@ const RESTORE_CHART_SOURCE = `
  * - clear the drawing selection and the crosshair, and hide the floating drawing toolbar;
  * - hide the indicator name and value tags on the price scales (they cover the newest candles); the previous settings are
  *   kept on the page so RESTORE_CHART_SOURCE puts the owner's view back exactly.
+ * - set the chart timezone to UTC (kept, see OBSERVER_SCREENSHOT_TIMEZONE) so the time axis matches the stored candle times.
  * The caller always restores the page with RESTORE_CHART_SOURCE.
  */
 async function prepareCleanChart(evaluate) {
   const prepared = await evaluate(`
     (function() {
-      /* TVOBS_SCREENSHOT_CLEAN_CHART_V3 */
+      /* TVOBS_SCREENSHOT_CLEAN_CHART_V4 */
       var chart = window.TradingViewApi && window.TradingViewApi.activeChart && window.TradingViewApi.activeChart();
       if (!chart || typeof chart.executeActionById !== 'function' || !chart.selection) return false;
       var guard = document.createElement('style');
       guard.id = 'tvobs-screenshot-no-pointer';
       guard.textContent = 'html, html * { pointer-events: none !important; }';
       document.head.appendChild(guard);
+      if (typeof chart.getTimezone !== 'function' || typeof chart.setTimezone !== 'function') throw new Error('Missing chart timezone API');
+      if (chart.getTimezone() !== ${JSON.stringify(OBSERVER_SCREENSHOT_TIMEZONE)}) chart.setTimezone(${JSON.stringify(OBSERVER_SCREENSHOT_TIMEZONE)});
       var widget = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
       var scales = widget.properties().childs().scalesProperties.childs();
       window.__tvobsIndicatorLabelRestore = {};
@@ -97,14 +104,15 @@ async function prepareCleanChart(evaluate) {
           var model = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
           model.crosshairSource().clearPosition();
           var scales = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.properties().childs().scalesProperties.childs();
-          resolve(model.mainSeries().priceScale().isAutoScale() === true && model.timeScale().rightOffset() === 0
+          resolve(window.TradingViewApi.activeChart().getTimezone() === ${JSON.stringify(OBSERVER_SCREENSHOT_TIMEZONE)}
+            && model.mainSeries().priceScale().isAutoScale() === true && model.timeScale().rightOffset() === 0
             && !model.crosshairSource().visible
             && ${JSON.stringify(INDICATOR_LABEL_SETTINGS)}.every(function(key) { return scales[key].value() === false; }));
         } catch (error) { resolve(false); }
       }, 400);
     })
   `, { awaitPromise: true });
-  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale, no crosshair and no indicator tags before screenshot capture.');
+  if (framed !== true) throw new Error('TradingView chart is not framed on the captured candles with autoscale, no crosshair, no indicator tags and a UTC time axis before screenshot capture.');
 }
 
 export async function captureObserverReviewScreenshot(input = {}) {

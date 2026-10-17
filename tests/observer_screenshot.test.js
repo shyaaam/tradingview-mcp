@@ -71,11 +71,11 @@ function input(overrides = {}) {
       }),
       captureCandle: async () => ({ success: true }),
       evaluateBound: async (source) => {
-        events.push(/TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source) ? 'reset'
+        events.push(/TVOBS_SCREENSHOT_CLEAN_CHART_V4/.test(source) ? 'reset'
           : /TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source) ? 'park-point'
             : /TVOBS_SCREENSHOT_RESTORE_V2/.test(source) ? 'restore'
               : /isAutoScale/.test(source) ? 'fit-check' : 'other');
-        if (/TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source)) return true;
+        if (/TVOBS_SCREENSHOT_CLEAN_CHART_V4/.test(source)) return true;
         if (/TVOBS_DATA_WINDOW_CURSOR_RESET_V2/.test(source)) return { x: 82, y: 2 };
         if (/TVOBS_SCREENSHOT_RESTORE_V2/.test(source)) return true;
         if (/isAutoScale/.test(source)) return fitted;
@@ -273,8 +273,13 @@ test('framing source blocks pointer events and zooms to the captured candle wind
   await captureObserverReviewScreenshot(input({
     _deps: { ...base._deps, evaluateBound: async (source, options) => { sources.push(source); return base._deps.evaluateBound(source, options); } },
   }));
-  const framing = sources.find((source) => /TVOBS_SCREENSHOT_CLEAN_CHART_V3/.test(source));
+  const framing = sources.find((source) => /TVOBS_SCREENSHOT_CLEAN_CHART_V4/.test(source));
   assert.match(framing, /pointer-events: none/);
+  // The time axis is set to UTC for the image and verified after the repaint wait.
+  assert.match(framing, /chart\.setTimezone\("Etc\/UTC"\)/);
+  assert.match(framing, /Missing chart timezone API/);
+  const verification = sources.find((source) => /getTimezone\(\) === "Etc\/UTC"/.test(source) && /isAutoScale/.test(source));
+  assert.ok(verification, 'timezone is verified together with the framing check');
   assert.match(framing, /zoomToBarsRange\(first, last\)/);
   assert.match(framing, /last - 179/);
   // Indicator name and value tags are hidden for the image; the main series' own last-price tag is not touched.
