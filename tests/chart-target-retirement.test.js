@@ -166,18 +166,47 @@ test('replaced profile instance fails before CDP access and leaves receipt targe
   assert.equal(deps.targets.has('owned-target'), true);
 });
 
-test('account or saved-layout mismatch leaves receipt target open', async () => {
+test('account or saved-layout mismatch on the receipt target still closes that tab, and only that tab, as unverified', async () => {
   for (const overrides of [{ accountHash: 'f'.repeat(64) }, { activeLayoutId: 'other-layout' }]) {
     const deps = fixture(overrides);
-    await assert.rejects(retireOwnedSavedLayoutTarget({
+    const result = await retireOwnedSavedLayoutTarget({
       ...AUTHORITY,
       target_id: 'owned-target',
       expected_account_subject_sha256: ACCOUNT_HASH,
       ownership_receipt: RECEIPT,
-    }, { ...deps, reviewedAuthority: AUTHORITY, managerBaseUrl: 'http://manager.test' }));
-    assert.deepEqual(deps.calls.closed, []);
-    assert.equal(deps.targets.has('owned-target'), true);
+    }, { ...deps, reviewedAuthority: AUTHORITY, managerBaseUrl: 'http://manager.test' });
+    assert.equal(result.action, 'closed');
+    assert.equal(result.mutations_performed, true);
+    assert.equal(result.identity_verified, false);
+    assert.deepEqual(deps.calls.closed, ['owned-target']);
+    assert.equal(deps.targets.has('owned-target'), false);
+    assert.equal(deps.targets.has('user-tab-a'), true);
+    assert.equal(deps.targets.has('user-tab-b'), true);
   }
+});
+
+test('a matching receipt target is closed as verified', async () => {
+  const deps = fixture();
+  const result = await retireOwnedSavedLayoutTarget({
+    ...AUTHORITY,
+    target_id: 'owned-target',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: RECEIPT,
+  }, { ...deps, reviewedAuthority: AUTHORITY, managerBaseUrl: 'http://manager.test' });
+  assert.equal(Object.hasOwn(result, 'identity_verified'), false);
+});
+
+test('a receipt target that is no longer a TradingView chart page is left open', async () => {
+  const deps = fixture();
+  deps.targets.set('owned-target', { targetId: 'owned-target', type: 'page', url: 'https://example.com/' });
+  await assert.rejects(retireOwnedSavedLayoutTarget({
+    ...AUTHORITY,
+    target_id: 'owned-target',
+    expected_account_subject_sha256: ACCOUNT_HASH,
+    ownership_receipt: RECEIPT,
+  }, { ...deps, reviewedAuthority: AUTHORITY, managerBaseUrl: 'http://manager.test' }), /no longer identifies a TradingView chart page/u);
+  assert.deepEqual(deps.calls.closed, []);
+  assert.equal(deps.targets.has('owned-target'), true);
 });
 
 test('already-closed receipt target is idempotent and does not inspect or close another tab', async () => {
@@ -194,6 +223,14 @@ test('already-closed receipt target is idempotent and does not inspect or close 
   assert.deepEqual(deps.calls.inspected, []);
   assert.equal(deps.targets.has('user-tab-a'), true);
   assert.equal(deps.targets.has('user-tab-b'), true);
+});
+
+test('the retirement output contract declares identity_verified as optional, so strict clients accept it', () => {
+  const shape = observerToolDefinitions.tv_observer_retire_owned_saved_layout_target_v1.outputSchema;
+  assert.ok(shape.identity_verified, 'identity_verified is declared');
+  assert.equal(shape.identity_verified.safeParse(undefined).success, true);
+  assert.equal(shape.identity_verified.safeParse(false).success, true);
+  assert.equal(shape.identity_verified.safeParse('no').success, false);
 });
 
 test('provider exposes only receipt-owned target retirement', () => {
