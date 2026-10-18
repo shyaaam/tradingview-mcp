@@ -60,21 +60,20 @@ export async function retireOwnedSavedLayoutTarget(input = {}, dependencies = {}
   );
 
   try {
-    if (!await readTargetIdentity(browser, targetId, expected, accountSubjectSha256, deadline, dependencies)) {
-      return result(expected, targetId, accountSubjectSha256, 'already-closed', false);
-    }
+    const identity = await readTargetIdentity(browser, targetId, expected, accountSubjectSha256, deadline, dependencies);
+    if (identity === 'gone') return result(expected, targetId, accountSubjectSha256, 'already-closed', false);
 
     try {
       await withDeadline(() => browser.Target.closeTarget({ targetId }), deadline);
     } catch { /* Exact target readback below decides whether close completed. */ }
     await waitForTargetClose(browser, targetId, deadline, dependencies);
-    return result(expected, targetId, accountSubjectSha256, 'closed', true);
+    return result(expected, targetId, accountSubjectSha256, 'closed', true, identity === 'verified');
   } finally {
     try { await browser.close?.(); } catch { /* Preserve target-close result. */ }
   }
 }
 
-function result(expected, targetId, accountSubjectSha256, action, mutationsPerformed) {
+function result(expected, targetId, accountSubjectSha256, action, mutationsPerformed, identityVerified = true) {
   return Object.freeze({
     success: true,
     retirement_version: 'owned-saved-layout-retirement-v1',
@@ -86,6 +85,8 @@ function result(expected, targetId, accountSubjectSha256, action, mutationsPerfo
     target_id: targetId,
     action,
     mutations_performed: mutationsPerformed,
+    // Present (false) only when the page no longer matched the receipt's account or layout but was still the receipt's own chart page.
+    ...(identityVerified ? {} : { identity_verified: false }),
   });
 }
 
@@ -95,13 +96,25 @@ async function readTargetIdentity(browser, targetId, expected, accountSubjectSha
     const response = await withDeadline(() => browser.Target.getTargetInfo({ targetId }), deadline);
     targetInfo = response?.targetInfo;
   } catch (error) {
-    if (/No target with given id found/iu.test(String(error?.message ?? error))) return false;
+    if (/No target with given id found/iu.test(String(error?.message ?? error))) return 'gone';
     throw error;
   }
   if (targetInfo?.targetId !== targetId || targetInfo.type !== 'page' || !CHART_ROUTE.test(targetInfo.url)) {
     throw new Error('Receipt target no longer identifies a TradingView chart page.');
   }
 
+  // The target id comes from V5's own creation receipt and the page is still a TradingView chart page, so it is V5's tab even
+  // when its account or layout no longer reads as expected (a failed capture can leave it half-loaded). Leaving it open
+  // would hold a slot of the tab budget with nothing tracking it, so it is closed and reported as unverified.
+  try {
+    await verifyTargetIdentity(browser, targetId, targetInfo, expected, accountSubjectSha256, deadline);
+    return 'verified';
+  } catch {
+    return 'unverified';
+  }
+}
+
+async function verifyTargetIdentity(browser, targetId, targetInfo, expected, accountSubjectSha256, deadline) {
   const attached = await withDeadline(
     () => browser.Target.attachToTarget({ targetId, flatten: true }), deadline,
   );
@@ -128,7 +141,6 @@ async function readTargetIdentity(browser, targetId, expected, accountSubjectSha
       || markerMatches[0]?.layout_id !== expected.savedLayoutId) {
       throw new Error('Receipt target no longer matches its account and saved-layout identity.');
     }
-    return true;
   } finally {
     try { await withDeadline(() => browser.Target.detachFromTarget({ sessionId }), deadline); }
     catch { /* Closing the profile-scoped connection releases the session. */ }

@@ -856,6 +856,8 @@ export const observerToolDefinitions = Object.freeze({
       target_id: z.string().min(1).max(256),
       action: z.enum(['closed', 'already-closed']),
       mutations_performed: z.boolean(),
+      // Present (false) when the receipt's own chart tab was closed although its account or layout no longer read as expected.
+      identity_verified: z.boolean().optional(),
     },
   },
   tv_observer_identity: {
