@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import CDP from 'chrome-remote-interface';
+import { captureSlotMarkerLetter, isCaptureSlotId } from './capture-slot-ids.js';
 
 import {
   assertExactProfileBrowserWebSocket,
@@ -255,7 +256,7 @@ export const ACTIVE_SAVED_LAYOUT_PROBE = `/* V5_ACTIVE_SAVED_LAYOUT_PROBE */
 
 export function savedChartLayoutMarker(captureSlotId, reconciliationKey) {
   validateEnsureInput({ profileName: 'profile', captureSlotId, reconciliationKey });
-  const slot = captureSlotId === 'v5-capture-slot-a' ? 'A' : 'B';
+  const slot = captureSlotMarkerLetter(captureSlotId);
   const digest = createHash('sha256')
     .update(`tv-observer-v5:saved-chart:${captureSlotId}:${reconciliationKey}`, 'utf8')
     .digest('base64url').slice(0, 32);
@@ -450,7 +451,7 @@ export async function hydrateSavedChartLayout(input = {}, dependencies = {}) {
   if ((input.requireFreshTarget ?? input.require_fresh_target) !== true) {
     throw new Error('Fresh disposable target is required for saved-layout hydration');
   }
-  if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
+  if (!isCaptureSlotId(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
     throw new Error('Saved-layout hydration authority is invalid');
   }
   const maxPages = input.maxPages ?? input.max_pages;
@@ -1498,7 +1499,7 @@ function validateEnsureInput(input) {
   const reconciliationKey = input.reconciliationKey ?? input.reconciliation_key;
   const expectedAccountSubjectSha256 = input.expectedAccountSubjectSha256 ?? input.expected_account_subject_sha256;
   const createIfAbsent = input.createIfAbsent ?? input.create_if_absent ?? false;
-  if (!['v5-capture-slot-a', 'v5-capture-slot-b'].includes(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
+  if (!isCaptureSlotId(captureSlotId) || !HASH.test(String(reconciliationKey || ''))) {
     throw new Error('Saved-chart authority request is invalid');
   }
   if (expectedAccountSubjectSha256 !== undefined

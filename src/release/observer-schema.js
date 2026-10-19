@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { OBSERVER_CONTRACT_ID, OBSERVER_MANIFEST_SCHEMA_VERSION } from './constants.js';
 import { requireObserverSession } from '../connection.js';
+import { CAPTURE_SLOT_IDS, LAYOUT_MARKER_PATTERN } from '../core/capture-slot-ids.js';
 
 const emptyInput = Object.freeze({});
 const jsonObject = z.record(z.string(), z.unknown());
@@ -722,16 +723,16 @@ export const observerToolDefinitions = Object.freeze({
       profile_name: z.string().min(1).max(160),
       expected_profile_id: z.string().min(1).max(160).optional()
         .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
     },
     outputSchema: {
       success: z.literal(true),
       preflight_version: z.literal('saved-chart-authority-preflight-v1'),
       profile_name: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
-      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      layout_marker: z.string().regex(LAYOUT_MARKER_PATTERN),
       authenticated: z.boolean(),
       account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
       action: z.enum(['not_found', 'found', 'multiple']),
@@ -754,7 +755,7 @@ export const observerToolDefinitions = Object.freeze({
       profile_name: z.string().min(1).max(160),
       expected_profile_id: z.string().min(1).max(160).optional()
         .describe('Optional ephemeral UUID guard for this call only; never persist it.'),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       expected_account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       create_if_absent: z.boolean(),
@@ -763,11 +764,11 @@ export const observerToolDefinitions = Object.freeze({
       success: z.literal(true),
       authority_ensure_version: z.literal('saved-chart-authority-ensure-v1'),
       profile_name: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       create_if_absent: z.boolean(),
       action: z.enum(['unknown', 'multiple', 'not_found', 'created', 'reused']),
-      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      layout_marker: z.string().regex(LAYOUT_MARKER_PATTERN),
       match_count: z.number().int().nonnegative(),
       saved_layout_id: z.string().min(1).nullable(),
       saved_chart_id: z.string().regex(/^[A-Za-z0-9_-]{1,160}$/).nullable(),
@@ -782,7 +783,7 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'bootstrap_mutation',
     inputSchema: {
       profile_name: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
       saved_layout_id: z.string().min(1).max(160),
       require_fresh_target: z.literal(true),
@@ -793,9 +794,9 @@ export const observerToolDefinitions = Object.freeze({
       hydration_version: z.literal('saved-layout-hydration-v1'),
       profile_name: z.string().min(1).max(160),
       profile_id: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
-      layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+      layout_marker: z.string().regex(LAYOUT_MARKER_PATTERN),
       saved_layout_id: z.string().min(1).max(160),
       account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       target_id: z.string().min(1).max(256),
@@ -808,10 +809,10 @@ export const observerToolDefinitions = Object.freeze({
         profile_name: z.string().min(1).max(160),
         profile_instance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
         target_id: z.string().min(1).max(256),
-        capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+        capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
         reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
         saved_layout_id: z.string().min(1).max(160),
-        layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+        layout_marker: z.string().regex(LAYOUT_MARKER_PATTERN),
         account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       }).nullable(),
       navigation_performed: z.literal(true),
@@ -823,7 +824,7 @@ export const observerToolDefinitions = Object.freeze({
     classification: 'bootstrap_mutation',
     inputSchema: {
       profile_name: z.string().min(1).max(160),
-      capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+      capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
       layout_code: z.literal('s'),
       authority_id: z.string().regex(/^v5-capture-slot:[0-9a-f]{64}$/),
       authority_hash: z.string().regex(/^[0-9a-f]{64}$/),
@@ -838,10 +839,10 @@ export const observerToolDefinitions = Object.freeze({
         profile_name: z.string().min(1).max(160),
         profile_instance_sha256: z.string().regex(/^[0-9a-f]{64}$/),
         target_id: z.string().min(1).max(256),
-        capture_slot_id: z.enum(['v5-capture-slot-a', 'v5-capture-slot-b']),
+        capture_slot_id: z.enum(CAPTURE_SLOT_IDS),
         reconciliation_key: z.string().regex(/^[0-9a-f]{64}$/),
         saved_layout_id: z.string().min(1).max(160),
-        layout_marker: z.string().regex(/^V5OBS-[AB]-[A-Za-z0-9_-]{32}$/),
+        layout_marker: z.string().regex(LAYOUT_MARKER_PATTERN),
         account_subject_sha256: z.string().regex(/^[0-9a-f]{64}$/),
       }),
     },
