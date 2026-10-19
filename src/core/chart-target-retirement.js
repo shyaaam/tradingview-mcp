@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
 
+import { CAPTURE_SLOT_ID_PATTERN } from './capture-slot-ids.js';
 import { resolveCloakManagerBaseUrl } from './cloak.js';
 import { resolveManagerCdpUrl } from './manager-cdp.js';
 import { assertExactProfileBrowserWebSocket, resolveExactRunningProfile } from './chart-target-open.js';
@@ -232,7 +233,7 @@ function connectBoundedBrowser(url, deadline) {
 
 function normalizeAuthority(input) {
   const profileName = requirePattern(input.profile_name ?? input.profileName, 'profile_name', /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,159}$/u);
-  const captureSlotId = requirePattern(input.capture_slot_id ?? input.captureSlotId, 'capture_slot_id', /^v5-capture-slot-[ab]$/u);
+  const captureSlotId = requirePattern(input.capture_slot_id ?? input.captureSlotId, 'capture_slot_id', CAPTURE_SLOT_ID_PATTERN);
   const layoutCode = requirePattern(input.layout_code ?? input.layoutCode, 'layout_code', /^s$/u);
   const savedLayoutId = requirePattern(input.saved_layout_id ?? input.savedLayoutId, 'saved_layout_id', /^[A-Za-z0-9_-]{1,160}$/u);
   const reconciliationKey = requirePattern(input.reconciliation_key ?? input.reconciliationKey, 'reconciliation_key', /^[0-9a-f]{64}$/u);
